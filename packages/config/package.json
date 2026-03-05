@@ -1,0 +1,11 @@
+{
+  "name": "@codexpanel/config",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "tsconfig.base.json",
+    "prettier.config.cjs",
+    "eslint.base.cjs"
+  ]
+}
