@@ -1,6 +1,6 @@
 # CodexPanel Implementation Plan
 
-Last updated: 2026-03-05
+Last updated: 2026-03-06
 
 ## 1. Phase 0: Foundation and Tooling
 1. Set up monorepo root files (`package.json`, `pnpm-workspace.yaml`, `.gitignore`, `.editorconfig`, `.env.example`).
@@ -42,9 +42,11 @@ Last updated: 2026-03-05
 3. Add observability baseline (structured logs, metrics/tracing hooks).
 
 ## 8. Immediate Next Work
-1. Implement auth module and first CRUD endpoints in `apps/api`.
-2. Add Prisma service/module wiring in Nest app.
-3. Build first real web pages: login, projects/sessions list, chat shell.
-4. Define and implement API <-> host runner contract.
-5. Add runner adapter and SSE stream endpoint.
+1. Update local runtime topology to hybrid mode:
+   - Keep `web + postgres (+redis)` in Docker.
+   - Run `apps/api` on host.
+2. Define and implement API <-> host runner contract.
+3. Add turn lifecycle endpoints and runner adapter module.
+4. Add SSE stream endpoint and reconnect behavior.
+5. Build first real web pages: login, projects/sessions list, chat shell.
 6. Add CI for lint/typecheck/test.

@@ -7,10 +7,12 @@
 - SQL (PostgreSQL) for persistent data.
 
 ### 1.6 Deployment
-- Recommended: Docker for local, staging, and production application deployment.
-- Local: `docker-compose` for `web + api + postgres (+redis optional)`.
-- Runtime split (Option 2): `web/api` in containers, `codex-runner` on host.
-- Production: build/push Docker images for `web` and `api`; deploy `codex-runner` as a host/system service; prefer managed Postgres/Redis.
+- Recommended: hybrid runtime for MVP runner integration.
+- Local: `docker-compose` for `web + postgres (+redis optional)`.
+- Runtime split (Option 2, revised): `web` in container, `api` on host, `codex-runner` on host.
+- Production options:
+  - Preferred for early versions: `api` + `codex-runner` as host/system services, `web` containerized.
+  - Optional later: containerize `api` after runner API/proxy boundary is stabilized.
 
 ### 1.2 Frontend
 - Framework: Next.js (App Router) + React.
@@ -134,7 +136,7 @@ packages/shared/
   - `web`: `http://localhost:3000`
   - `api`: `http://localhost:4000`
   - `codex-runner`: host daemon (for example `http://127.0.0.1:4700`)
-  - `postgres`: `localhost:5432`
+  - `postgres`: `localhost:5432` (container)
 
 ## 6. Why This Setup for You
 - One language across frontend/backend reduces learning burden.

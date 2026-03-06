@@ -10,6 +10,8 @@
   },
   "scripts": {
     "dev": "pnpm -r --parallel --if-present dev",
+    "dev:api:host": "./scripts/dev-api-host.sh",
+    "dev:docker": "docker compose -f infra/docker/docker-compose.yml up --build -d",
     "build": "pnpm -r --if-present build",
     "test": "pnpm -r --if-present test",
     "lint": "pnpm -r --if-present lint",

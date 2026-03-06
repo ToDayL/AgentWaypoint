@@ -17,7 +17,7 @@ Scaffolded monorepo baseline with initial `web`, `api`, shared packages, and loc
 - Backend: NestJS (Fastify) + TypeScript
 - Database: PostgreSQL + Prisma
 - Streaming: SSE first, WebSocket later if needed
-- Deployment (Option 2): Docker (`web` + `api`) plus host `codex-runner` daemon for Codex app-server process management, with managed Postgres/Redis preferred in production
+- Deployment (Option 2, revised): Docker (`web`, DB services) plus host `api` and host `codex-runner` daemon for Codex app-server process management
 
 ## Repository Structure
 ```text
@@ -36,10 +36,12 @@ scripts/
 1. Copy environment template:
    - `cp .env.example .env`
    - Optional: set `HTTP_PROXY`/`HTTPS_PROXY` in `.env` for constrained networks.
-2. Build and start dev stack:
+2. Build and start Docker services (`web + postgres + redis`):
    - `docker compose -f infra/docker/docker-compose.yml up --build -d`
-3. Run DB migration from the app container:
-   - `docker compose -f infra/docker/docker-compose.yml exec app pnpm --filter @codexpanel/api prisma:migrate:dev`
+3. Start API on host:
+   - `./scripts/dev-api-host.sh`
+4. Run DB migration on host (new terminal):
+   - `corepack pnpm --filter @codexpanel/api prisma:migrate:dev`
 
 Expected local ports:
 - `web`: `http://localhost:3000`
@@ -48,6 +50,8 @@ Expected local ports:
 
 Stop stack:
 - `docker compose -f infra/docker/docker-compose.yml down`
+- Stop host API:
+  - terminate the `./scripts/dev-api-host.sh` process (`Ctrl+C` if foreground)
 
 ## Documentation
 - [PRD](./doc/PRD.md)
@@ -58,7 +62,7 @@ Stop stack:
 - [Implementation Progress](./doc/Implementation-Progress.md)
 
 ## Next Steps
-1. Add Prisma module/service wiring to `apps/api` and implement first CRUD endpoints.
+1. Shift local runtime to hybrid mode (`web + db` in Docker, `api` on host).
 2. Define and implement API <-> host runner contract.
 3. Add API runner adapter + SSE streaming endpoints.
 4. Add API client + session list page in `apps/web`.

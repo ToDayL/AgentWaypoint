@@ -1,7 +1,7 @@
 # CodexPanel Initial Architecture Design
 
 ## 1. Overview
-This architecture enables a browser-based Codex experience by placing a Web application and API backend in front of a host-side Codex runner daemon that manages Codex app-server processes.
+This architecture enables a browser-based Codex experience by placing a Web application in front of a host-side API backend and host-side Codex runner daemon that manages Codex app-server processes.
 
 Primary design goals:
 - Fast streaming UX for chat/vibe coding.
@@ -13,7 +13,7 @@ Primary design goals:
 ```text
 +--------------------+        HTTPS        +---------------------------+
 |   Web Frontend     | <-----------------> |   Web API / BFF Backend   |
-| (Next.js)          |                     | (Auth, Sessions, Stream)  |
+| (Next.js container)|                     | (NestJS on host)          |
 +--------------------+                     +-------------+-------------+
                                                           |
                                                           | Internal API (HTTP/gRPC)
@@ -145,15 +145,17 @@ Rules:
 - Audit logging for admin-sensitive operations.
 
 ## 9. Deployment Topology (MVP)
-- Frontend and API run in Docker containers.
+- Frontend (`web`) runs in Docker.
+- API (`apps/api`) runs on host during MVP and runner integration.
 - Host-side `codex-runner` daemon runs outside containers.
 - `codex-runner` manages `codex app-server` child processes on host.
 - PostgreSQL managed instance (or local container for dev).
 - Optional Redis managed instance (or local container for dev).
-- Use `docker-compose` for local orchestration of `web/api/postgres/redis`; runner is a host process.
+- Use `docker-compose` for local orchestration of `web/postgres/redis`; run API and runner as host processes.
 
 Recommended MVP approach:
 - Keep runner as a dedicated host process boundary for workspace and privileged operations.
+- Keep API on host while integrating runner to avoid container-host IPC/path/permission friction.
 - Keep API adapter module isolated so runner protocol changes do not leak into business modules.
 
 ## 10. Technology Options
