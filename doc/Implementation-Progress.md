@@ -1,6 +1,6 @@
 # CodexPanel Implementation Progress
 
-Last updated: 2026-03-05
+Last updated: 2026-03-06
 
 ## Architecture Decision on 2026-03-05
 1. Chosen integration model: Option 2.
@@ -38,3 +38,25 @@ Last updated: 2026-03-05
    - `codexpanel-redis`
 2. API health check passes from inside container:
    - `GET /api/health -> {"status":"ok"}`
+
+## Completed on 2026-03-06
+1. API backend slice implemented in `apps/api`:
+   - Global `PrismaModule` + `PrismaService` wiring.
+   - Header-based auth stub via `x-user-email` with user upsert and request user context.
+   - Consistent API error payload shape via global HTTP exception filter.
+2. First CRUD endpoints implemented:
+   - `GET /api/projects`
+   - `POST /api/projects`
+   - `GET /api/projects/:id`
+   - `GET /api/projects/:projectId/sessions`
+   - `POST /api/projects/:projectId/sessions`
+3. Input validation and ownership checks added:
+   - Zod-based request validation for params/body.
+   - Owner-scoped access for projects/sessions (other users receive `404`).
+4. API integration tests added and passing:
+   - `apps/api/src/modules/api.e2e.spec.ts`
+   - Covers auth missing header (`401`), create/list flows, validation errors (`400`), and cross-user access control.
+5. Containerized verification completed:
+   - `pnpm --filter @codexpanel/api typecheck` passes in `codexpanel-app`.
+   - `pnpm --filter @codexpanel/api test` passes in `codexpanel-app`.
+   - Host-level smoke tests against `localhost:4000` confirm project/session CRUD works.
