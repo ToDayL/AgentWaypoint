@@ -53,11 +53,50 @@ Stop stack:
 - Stop host API:
   - terminate the `./scripts/dev-api-host.sh` process (`Ctrl+C` if foreground)
 
+## Development Workflow (Verified)
+This project currently runs in hybrid mode:
+- Container: `web + postgres + redis`
+- Host: `api`
+
+### 1. Clean Reset (optional but recommended when debugging)
+1. Stop and remove containers + networks + volumes:
+   - `docker compose -f infra/docker/docker-compose.yml down -v --remove-orphans`
+2. Remove web build cache:
+   - `rm -rf apps/web/.next`
+
+### 2. Start Container Services
+1. Start web/postgres/redis:
+   - `docker compose -f infra/docker/docker-compose.yml up --build -d`
+
+### 3. Start Host API
+1. In a separate terminal:
+   - `./scripts/dev-api-host.sh`
+2. If your host Node is not v22 (for example v24), use watch mode:
+   - `API_WATCH_MODE=1 ./scripts/dev-api-host.sh`
+3. If DB schema is not initialized yet, run once:
+   - `set -a; source .env; set +a; corepack pnpm --filter @codexpanel/api prisma:migrate:dev`
+
+### 4. Verify End-to-End
+1. API health:
+   - `curl http://localhost:4000/api/health`
+   - expected: `{"status":"ok"}`
+2. Web app:
+   - open `http://localhost:3000`
+3. Simulation API proxy (from web container):
+   - `docker compose -f infra/docker/docker-compose.yml exec -T web sh -lc "node -e \"fetch('http://localhost:3000/api/sim/projects',{headers:{'x-user-email':'demo@example.com'}}).then(async r=>{console.log(r.status);console.log(await r.text());})\""`
+
+### 5. Stop All Services
+1. Stop containers:
+   - `docker compose -f infra/docker/docker-compose.yml down`
+2. Stop host API process:
+   - terminate `./scripts/dev-api-host.sh`
+
 ## Documentation
 - [PRD](./doc/PRD.md)
 - [Initial Architecture](./doc/Architecture-Initial.md)
 - [Codex App Server Notes](./doc/Codex-App-Server-Documentation.md)
 - [v1 Tech Stack and Repo Structure](./doc/V1-Tech-Stack-and-Repo-Structure.md)
+- [Development Workflow](./doc/Development-Workflow.md)
 - [Implementation Plan](./doc/Implementation-Plan.md)
 - [Implementation Progress](./doc/Implementation-Progress.md)
 

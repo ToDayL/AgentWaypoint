@@ -4,8 +4,10 @@ import { PrismaModule } from './modules/prisma/prisma.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { ProjectsModule } from './modules/projects/projects.module';
 import { SessionsModule } from './modules/sessions/sessions.module';
+import { RunnerModule } from './modules/runner/runner.module';
+import { TurnsModule } from './modules/turns/turns.module';
 
 @Module({
-  imports: [PrismaModule, AuthModule, HealthModule, ProjectsModule, SessionsModule],
+  imports: [PrismaModule, AuthModule, HealthModule, ProjectsModule, SessionsModule, RunnerModule, TurnsModule],
 })
 export class AppModule {}

@@ -1,8 +1,19 @@
 :root {
   color-scheme: light;
+  --bg-a: #fff5e8;
+  --bg-b: #ffe5d2;
+  --bg-c: #f5fbff;
+  --ink: #1b1e2b;
+  --ink-muted: #4d546d;
+  --line: #e8d8c7;
+  --card: rgba(255, 255, 255, 0.82);
+  --accent: #ff6a3d;
+  --accent-2: #0b6fcb;
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -10,12 +21,186 @@ html,
 body {
   margin: 0;
   padding: 0;
-  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+  min-height: 100%;
 }
 
-main {
+body {
+  font-family: 'Space Grotesk', 'Avenir Next', 'Segoe UI', sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 10% 12%, var(--bg-c), transparent 50%),
+    radial-gradient(circle at 88% 18%, #ffe6cc, transparent 48%),
+    linear-gradient(140deg, var(--bg-a), var(--bg-b));
+}
+
+.sim-shell {
   min-height: 100vh;
+  padding: 1.5rem;
+}
+
+.sim-panel {
+  max-width: 1120px;
+  margin: 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--card);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 20px 40px rgba(46, 32, 10, 0.12);
+  padding: 1.25rem;
+}
+
+.sim-header h1 {
+  margin: 0 0 0.4rem;
+  font-size: clamp(1.5rem, 3vw, 2.3rem);
+  line-height: 1.08;
+}
+
+.sim-kicker {
+  margin: 0;
+  color: var(--accent-2);
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.sim-subtitle {
+  margin: 0;
+  color: var(--ink-muted);
+}
+
+.sim-grid {
   display: grid;
-  place-items: center;
-  padding: 2rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.9rem;
+  margin-top: 1rem;
+}
+
+.sim-card,
+.sim-chat {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fffdf9;
+  padding: 0.9rem;
+}
+
+.sim-card h2,
+.sim-chat h2,
+.sim-output h3,
+.sim-events h3 {
+  margin: 0 0 0.65rem;
+  font-size: 1rem;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+  font-size: 0.88rem;
+  color: var(--ink-muted);
+  margin-top: 0.7rem;
+}
+
+input,
+select,
+textarea,
+button {
+  width: 100%;
+  margin-top: 0.35rem;
+  border-radius: 10px;
+  border: 1px solid #d8cfc4;
+  font: inherit;
+}
+
+input,
+select,
+textarea {
+  padding: 0.62rem 0.7rem;
+  color: var(--ink);
+  background: #fff;
+}
+
+textarea {
+  resize: vertical;
+}
+
+button {
+  margin-top: 0.75rem;
+  padding: 0.62rem 0.72rem;
+  cursor: pointer;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(90deg, var(--accent), #ff8a4d);
+  border: none;
+  transition: transform 0.12s ease, filter 0.12s ease;
+}
+
+button:hover:enabled {
+  transform: translateY(-1px);
+  filter: brightness(1.04);
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.sim-chat {
+  margin-top: 0.95rem;
+}
+
+.sim-chat-head p {
+  margin: 0.35rem 0;
+  color: var(--ink-muted);
+}
+
+.status-pill {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.14rem 0.55rem;
+  background: #e8f3ff;
+  color: #0c4f8c;
+  font-weight: 700;
+  font-size: 0.82rem;
+  text-transform: lowercase;
+}
+
+.sim-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+}
+
+.sim-output pre {
+  margin: 0;
+  border-radius: 12px;
+  border: 1px solid #ddd5c8;
+  background: #fff;
+  min-height: 120px;
+  padding: 0.7rem;
+  white-space: pre-wrap;
+  line-height: 1.35;
+  font-family: 'IBM Plex Mono', 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 0.84rem;
+}
+
+.sim-events ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  max-height: 170px;
+  overflow: auto;
+  color: #2f374f;
+  font-family: 'IBM Plex Mono', 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 0.8rem;
+}
+
+.sim-error {
+  margin: 0.9rem 0 0;
+  color: #9f2517;
+  font-weight: 700;
+}
+
+@media (max-width: 920px) {
+  .sim-grid {
+    grid-template-columns: 1fr;
+  }
 }

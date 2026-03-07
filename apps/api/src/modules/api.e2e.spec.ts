@@ -13,6 +13,10 @@ function randomEmail(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 100000)}@example.com`;
 }
 
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 describe('API e2e', () => {
   let app: NestFastifyApplication;
 
@@ -138,5 +142,104 @@ describe('API e2e', () => {
       headers: { 'x-user-email': otherEmail },
     });
     expect(listSessionsAsOtherUserResponse.statusCode).toBe(404);
+  });
+
+  it('creates turn and streams completed events', async () => {
+    const email = randomEmail('turn-complete');
+
+    const createProjectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: { name: 'Turn Project' },
+    });
+    expect(createProjectResponse.statusCode).toBe(201);
+    const project = createProjectResponse.json();
+
+    const createSessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Turn Session' },
+    });
+    expect(createSessionResponse.statusCode).toBe(201);
+    const session = createSessionResponse.json();
+
+    const createTurnResponse = await app.inject({
+      method: 'POST',
+      url: `/api/sessions/${session.id}/turns`,
+      headers: { 'x-user-email': email },
+      payload: { content: 'hello from e2e' },
+    });
+    expect(createTurnResponse.statusCode).toBe(201);
+    expect(createTurnResponse.json()).toMatchObject({
+      turnId: expect.any(String),
+      status: 'queued',
+    });
+
+    const { turnId } = createTurnResponse.json() as { turnId: string };
+    await sleep(1200);
+
+    const streamResponse = await app.inject({
+      method: 'GET',
+      url: `/api/turns/${turnId}/stream`,
+      headers: { 'x-user-email': email },
+    });
+    expect(streamResponse.statusCode).toBe(200);
+    expect(streamResponse.headers['content-type']).toContain('text/event-stream');
+    expect(streamResponse.payload).toContain('event: turn.started');
+    expect(streamResponse.payload).toContain('event: assistant.delta');
+    expect(streamResponse.payload).toContain('event: turn.completed');
+  });
+
+  it('cancels active turn', async () => {
+    const email = randomEmail('turn-cancel');
+
+    const createProjectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: { name: 'Cancel Project' },
+    });
+    expect(createProjectResponse.statusCode).toBe(201);
+    const project = createProjectResponse.json();
+
+    const createSessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Cancel Session' },
+    });
+    expect(createSessionResponse.statusCode).toBe(201);
+    const session = createSessionResponse.json();
+
+    const createTurnResponse = await app.inject({
+      method: 'POST',
+      url: `/api/sessions/${session.id}/turns`,
+      headers: { 'x-user-email': email },
+      payload: { content: 'please cancel this turn' },
+    });
+    expect(createTurnResponse.statusCode).toBe(201);
+    const { turnId } = createTurnResponse.json() as { turnId: string };
+
+    const cancelResponse = await app.inject({
+      method: 'POST',
+      url: `/api/turns/${turnId}/cancel`,
+      headers: { 'x-user-email': email },
+    });
+    expect(cancelResponse.statusCode).toBe(201);
+    expect(cancelResponse.json()).toMatchObject({
+      id: turnId,
+      status: 'cancelled',
+    });
+
+    await sleep(300);
+    const streamResponse = await app.inject({
+      method: 'GET',
+      url: `/api/turns/${turnId}/stream`,
+      headers: { 'x-user-email': email },
+    });
+    expect(streamResponse.statusCode).toBe(200);
+    expect(streamResponse.payload).toContain('event: turn.cancelled');
   });
 });
