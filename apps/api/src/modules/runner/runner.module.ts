@@ -1,16 +1,40 @@
-import { Module } from '@nestjs/common';
+import { Inject, Injectable, Logger, Module, OnModuleInit } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
+import { HttpRunnerAdapter } from './http-runner.adapter';
 import { MockRunnerAdapter } from './mock-runner.adapter';
 import { RUNNER_ADAPTER } from './runner.types';
+
+@Injectable()
+class RunnerModeLogger implements OnModuleInit {
+  private readonly logger = new Logger(RunnerModeLogger.name);
+
+  constructor(@Inject(RUNNER_ADAPTER) private readonly runnerAdapter: unknown) {}
+
+  onModuleInit(): void {
+    const adapterName =
+      typeof this.runnerAdapter === 'object' &&
+      this.runnerAdapter !== null &&
+      'constructor' in this.runnerAdapter
+        ? (this.runnerAdapter as { constructor: { name: string } }).constructor.name
+        : 'UnknownRunnerAdapter';
+    this.logger.log(`Using runner adapter: ${adapterName}`);
+  }
+}
 
 @Module({
   imports: [PrismaModule],
   providers: [
     MockRunnerAdapter,
+    HttpRunnerAdapter,
     {
       provide: RUNNER_ADAPTER,
-      useExisting: MockRunnerAdapter,
+      inject: [MockRunnerAdapter, HttpRunnerAdapter],
+      useFactory: (mockRunnerAdapter: MockRunnerAdapter, httpRunnerAdapter: HttpRunnerAdapter) => {
+        const mode = (process.env.RUNNER_MODE ?? 'mock').trim().toLowerCase();
+        return mode === 'http' ? httpRunnerAdapter : mockRunnerAdapter;
+      },
     },
+    RunnerModeLogger,
   ],
   exports: [RUNNER_ADAPTER],
 })

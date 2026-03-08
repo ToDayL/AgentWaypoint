@@ -85,6 +85,18 @@ This project currently runs in hybrid mode:
 3. Simulation API proxy (from web container):
    - `docker compose -f infra/docker/docker-compose.yml exec -T web sh -lc "node -e \"fetch('http://localhost:3000/api/sim/projects',{headers:{'x-user-email':'demo@example.com'}}).then(async r=>{console.log(r.status);console.log(await r.text());})\""`
 
+### Runner Adapter Mode
+`apps/api` supports two runner adapter modes selected by `RUNNER_MODE`:
+- `mock` (default): in-process simulated turn execution.
+- `http`: forwards turn control calls to host `codex-runner`.
+
+When `RUNNER_MODE=http`, API calls:
+- `POST ${RUNNER_BASE_URL}/runner/turns/start` with `{ turnId, sessionId, content }`
+- `POST ${RUNNER_BASE_URL}/runner/turns/cancel` with `{ turnId }`
+
+Optional auth header:
+- `Authorization: Bearer ${RUNNER_AUTH_TOKEN}` (if token is set)
+
 ### 5. Stop All Services
 1. Stop containers:
    - `docker compose -f infra/docker/docker-compose.yml down`
