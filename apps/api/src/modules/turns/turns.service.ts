@@ -26,7 +26,7 @@ export class TurnsService {
           ownerUserId: userId,
         },
       },
-      select: { id: true },
+      select: { id: true, codexThreadId: true },
     });
     if (!session) {
       throw new NotFoundException({ message: 'Session not found' });
@@ -66,6 +66,7 @@ export class TurnsService {
         turnId: turn.id,
         sessionId,
         content: input.content,
+        threadId: session.codexThreadId,
       })
       .catch((error: unknown) => {
         if (error instanceof Error) {
@@ -133,6 +134,13 @@ export class TurnsService {
 
     switch (type) {
       case 'turn.started': {
+        const threadId = payload.threadId;
+        if (typeof threadId === 'string' && threadId.length > 0) {
+          await this.prisma.session.update({
+            where: { id: turn.sessionId },
+            data: { codexThreadId: threadId },
+          });
+        }
         if (turn.status === 'queued') {
           await this.prisma.turn.update({
             where: { id: turnId },

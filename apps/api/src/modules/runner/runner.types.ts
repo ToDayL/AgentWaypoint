@@ -2,6 +2,7 @@ export type StartTurnInput = {
   turnId: string;
   sessionId: string;
   content: string;
+  threadId?: string | null;
 };
 
 export type CancelTurnInput = {

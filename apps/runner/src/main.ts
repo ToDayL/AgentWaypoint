@@ -7,6 +7,7 @@ type StartTurnBody = {
   turnId: string;
   sessionId: string;
   content: string;
+  threadId?: string | null;
 };
 
 type CancelTurnBody = {
@@ -119,6 +120,7 @@ const server = createServer(async (request, response) => {
         turnId: payload.turnId,
         sessionId: payload.sessionId,
         content: payload.content,
+        threadId: payload.threadId ?? null,
       });
       return;
     }
@@ -189,7 +191,8 @@ function parseStartTurnBody(input: unknown): StartTurnBody {
   const turnId = readNonEmptyString(record.turnId, 'turnId');
   const sessionId = readNonEmptyString(record.sessionId, 'sessionId');
   const content = readNonEmptyString(record.content, 'content');
-  return { turnId, sessionId, content };
+  const threadId = readOptionalString(record.threadId);
+  return { turnId, sessionId, content, threadId };
 }
 
 function parseCancelTurnBody(input: unknown): CancelTurnBody {
@@ -207,6 +210,17 @@ function readNonEmptyString(value: unknown, field: string): string {
     throw new Error(`${field} is required`);
   }
   return value.trim();
+}
+
+function readOptionalString(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value !== 'string') {
+    throw new Error('threadId must be a string when provided');
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 async function startMockExecution(turn: ActiveMockTurn): Promise<void> {
@@ -311,19 +325,7 @@ async function startCodexExecution(input: StartTurnBody): Promise<void> {
     });
     sendCodexNotification(turn.turnId, 'initialized', {});
 
-    const threadStartResult = (await sendCodexRequest(turn.turnId, 'thread/start', {
-      cwd: codexDefaultCwd,
-      approvalPolicy: codexApprovalPolicy,
-      sandbox: codexSandboxMode,
-      ephemeral: true,
-      experimentalRawEvents: false,
-      persistExtendedHistory: false,
-    })) as Record<string, unknown>;
-
-    const threadId = readNestedString(threadStartResult, ['thread', 'id']);
-    if (!threadId) {
-      throw new Error('thread/start did not return thread id');
-    }
+    const threadId = await resolveThreadId(turn.turnId, input.threadId ?? null);
     turn.threadId = threadId;
 
     const turnStartParams: Record<string, unknown> = {
@@ -335,12 +337,43 @@ async function startCodexExecution(input: StartTurnBody): Promise<void> {
     }
     const turnStartResult = (await sendCodexRequest(turn.turnId, 'turn/start', turnStartParams)) as Record<string, unknown>;
     turn.codexTurnId = readNestedString(turnStartResult, ['turn', 'id']);
-    await notifyApi(turn.turnId, 'turn.started', {});
+    await notifyApi(turn.turnId, 'turn.started', { threadId });
     await completionPromise;
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'unknown codex execution error';
     await failTurn(turn.turnId, message);
   }
+}
+
+async function resolveThreadId(turnId: string, preferredThreadId: string | null): Promise<string> {
+  if (preferredThreadId) {
+    try {
+      await sendCodexRequest(turnId, 'thread/resume', {
+        threadId: preferredThreadId,
+        persistExtendedHistory: false,
+      });
+      return preferredThreadId;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'unknown resume error';
+      // eslint-disable-next-line no-console
+      console.error(`[codexpanel-runner] thread/resume failed for ${preferredThreadId}: ${message}`);
+    }
+  }
+
+  const threadStartResult = (await sendCodexRequest(turnId, 'thread/start', {
+    cwd: codexDefaultCwd,
+    approvalPolicy: codexApprovalPolicy,
+    sandbox: codexSandboxMode,
+    ephemeral: false,
+    experimentalRawEvents: false,
+    persistExtendedHistory: false,
+  })) as Record<string, unknown>;
+
+  const threadId = readNestedString(threadStartResult, ['thread', 'id']);
+  if (!threadId) {
+    throw new Error('thread/start did not return thread id');
+  }
+  return threadId;
 }
 
 async function handleCodexMessage(turnId: string, line: string): Promise<void> {
