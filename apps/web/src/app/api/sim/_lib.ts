@@ -37,15 +37,16 @@ export async function forwardJson(
     return unauthorizedResponse();
   }
 
-  const body = input.method === 'POST' ? await request.text() : undefined;
+  const rawBody = input.method === 'POST' ? await request.text() : '';
+  const hasJsonBody = rawBody.trim().length > 0;
   try {
     const upstream = await fetch(`${getApiBaseUrl()}${input.path}`, {
       method: input.method,
       headers: {
-        'content-type': 'application/json',
         'x-user-email': email,
+        ...(hasJsonBody ? { 'content-type': 'application/json' } : {}),
       },
-      body,
+      ...(hasJsonBody ? { body: rawBody } : {}),
       cache: 'no-store',
     });
 
