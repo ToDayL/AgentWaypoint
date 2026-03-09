@@ -106,6 +106,18 @@ Optional auth header:
 - Runner callback target:
   - `RUNNER_API_BASE_URL` (default `http://127.0.0.1:4000`)
 
+### Runner Backend
+`apps/runner` supports two execution backends:
+- `RUNNER_BACKEND=codex` (default): starts `codex app-server` over stdio and forwards real streamed deltas.
+- `RUNNER_BACKEND=mock`: legacy echo simulator for local fallback/debugging.
+
+Codex backend env options:
+- `RUNNER_CODEX_BIN` (default `codex`)
+- `RUNNER_CODEX_CWD` (default current working directory)
+- `RUNNER_CODEX_MODEL` (optional model override)
+- `RUNNER_CODEX_APPROVAL_POLICY` (default `never`)
+- `RUNNER_CODEX_SANDBOX` (optional sandbox override)
+
 ### 5. Stop All Services
 1. Stop containers:
    - `docker compose -f infra/docker/docker-compose.yml down`

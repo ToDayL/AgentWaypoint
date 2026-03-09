@@ -38,6 +38,9 @@ Use this when debugging startup/runtime drift or verifying from scratch.
    - `./scripts/dev-runner-host.sh`
 2. Switch API to runner mode:
    - set `RUNNER_MODE=http` in `.env` (default is `mock`)
+3. Choose runner backend:
+   - `RUNNER_BACKEND=codex` for real Codex app-server integration (default)
+   - `RUNNER_BACKEND=mock` for local echo fallback
 
 ## 4. Verify
 1. API health:
