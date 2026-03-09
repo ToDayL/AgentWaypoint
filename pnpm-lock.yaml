@@ -70,6 +70,8 @@ importers:
         specifier: ^6.6.0
         version: 6.19.2(typescript@5.9.3)
 
+  apps/runner: {}
+
   apps/web:
     dependencies:
       '@codexpanel/shared':

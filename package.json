@@ -10,7 +10,11 @@
   },
   "scripts": {
     "dev": "pnpm -r --parallel --if-present dev",
+    "dev:up": "./scripts/dev-up.sh",
+    "dev:down": "./scripts/dev-down.sh",
+    "dev:status": "./scripts/dev-status.sh",
     "dev:api:host": "./scripts/dev-api-host.sh",
+    "dev:runner:host": "./scripts/dev-runner-host.sh",
     "dev:docker": "docker compose -f infra/docker/docker-compose.yml up --build -d",
     "build": "pnpm -r --if-present build",
     "test": "pnpm -r --if-present test",

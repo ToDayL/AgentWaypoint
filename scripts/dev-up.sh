@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE_FILE="$ROOT_DIR/infra/docker/docker-compose.yml"
+STATE_DIR="/tmp/codexpanel-dev"
+mkdir -p "$STATE_DIR"
+
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT_DIR/.env"
+  set +a
+fi
+
+cd "$ROOT_DIR"
+
+echo "[dev-up] Starting Docker services (web/postgres/redis)..."
+docker compose -f "$COMPOSE_FILE" up --build -d
+
+if [[ "${SKIP_MIGRATE:-0}" != "1" ]]; then
+  echo "[dev-up] Running API migration..."
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT_DIR/.env"
+  set +a
+  corepack pnpm --filter @codexpanel/api prisma:migrate:dev
+fi
+
+start_bg() {
+  local name="$1"
+  local pid_file="$STATE_DIR/${name}.pid"
+  local log_file="$STATE_DIR/${name}.log"
+  shift
+  if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" >/dev/null 2>&1; then
+    echo "[dev-up] ${name} already running (pid=$(cat "$pid_file"))."
+    return
+  fi
+
+  nohup "$@" >"$log_file" 2>&1 &
+  local pid=$!
+  echo "$pid" >"$pid_file"
+  echo "[dev-up] Started ${name} (pid=${pid}, log=${log_file})."
+}
+
+echo "[dev-up] Starting host runner..."
+start_bg runner bash -lc "cd '$ROOT_DIR'; set -a; source .env; set +a; RUNNER_WATCH_MODE=1 bash scripts/dev-runner-host.sh"
+
+echo "[dev-up] Starting host api..."
+start_bg api bash -lc "cd '$ROOT_DIR'; set -a; source .env; set +a; RUNNER_MODE=http API_WATCH_MODE=1 bash scripts/dev-api-host.sh"
+
+wait_health() {
+  local name="$1"
+  local url="$2"
+  local i
+  for i in $(seq 1 60); do
+    if curl -fsS "$url" >/dev/null 2>&1; then
+      echo "[dev-up] ${name} ready: ${url}"
+      return
+    fi
+    sleep 1
+  done
+  echo "[dev-up] ${name} failed health check: ${url}"
+  exit 1
+}
+
+wait_health api "http://127.0.0.1:4000/api/health"
+wait_health runner "http://127.0.0.1:4700/runner/health"
+
+echo "[dev-up] All dev services are up."

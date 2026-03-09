@@ -36,27 +36,26 @@ scripts/
 1. Copy environment template:
    - `cp .env.example .env`
    - Optional: set `HTTP_PROXY`/`HTTPS_PROXY` in `.env` for constrained networks.
-2. Build and start Docker services (`web + postgres + redis`):
-   - `docker compose -f infra/docker/docker-compose.yml up --build -d`
-3. Start API on host:
-   - `./scripts/dev-api-host.sh`
-4. Run DB migration on host (new terminal):
-   - `corepack pnpm --filter @codexpanel/api prisma:migrate:dev`
+2. Start full dev stack (container + host services):
+   - `pnpm dev:up`
 
 Expected local ports:
 - `web`: `http://localhost:3000`
 - `api`: `http://localhost:4000`
+- `runner`: `http://127.0.0.1:4700`
 - health check: `http://localhost:4000/api/health`
 
 Stop stack:
-- `docker compose -f infra/docker/docker-compose.yml down`
-- Stop host API:
-  - terminate the `./scripts/dev-api-host.sh` process (`Ctrl+C` if foreground)
+- `pnpm dev:down`
+- Optional clean reset (also remove volumes/orphans):
+  - `CLEAN_VOLUMES=1 pnpm dev:down`
+- Check status:
+  - `pnpm dev:status`
 
 ## Development Workflow (Verified)
 This project currently runs in hybrid mode:
 - Container: `web + postgres + redis`
-- Host: `api`
+- Host: `api + codex-runner`
 
 ### 1. Clean Reset (optional but recommended when debugging)
 1. Stop and remove containers + networks + volumes:
@@ -75,6 +74,12 @@ This project currently runs in hybrid mode:
    - `API_WATCH_MODE=1 ./scripts/dev-api-host.sh`
 3. If DB schema is not initialized yet, run once:
    - `set -a; source .env; set +a; corepack pnpm --filter @codexpanel/api prisma:migrate:dev`
+
+### 3.5 Start Host Runner
+1. Start runner daemon:
+   - `./scripts/dev-runner-host.sh`
+2. Configure API to call runner:
+   - set `RUNNER_MODE=http` in `.env`
 
 ### 4. Verify End-to-End
 1. API health:
@@ -96,12 +101,21 @@ When `RUNNER_MODE=http`, API calls:
 
 Optional auth header:
 - `Authorization: Bearer ${RUNNER_AUTH_TOKEN}` (if token is set)
+- Runner health endpoint:
+  - `GET ${RUNNER_BASE_URL}/runner/health`
+- Runner callback target:
+  - `RUNNER_API_BASE_URL` (default `http://127.0.0.1:4000`)
 
 ### 5. Stop All Services
 1. Stop containers:
    - `docker compose -f infra/docker/docker-compose.yml down`
 2. Stop host API process:
    - terminate `./scripts/dev-api-host.sh`
+
+### Optional Orchestration Scripts
+- `pnpm dev:up`: starts Docker services, runs migration, starts host runner + host api in background, and checks health.
+- `pnpm dev:status`: prints Docker service status, host pid status, and health checks.
+- `pnpm dev:down`: stops host processes and Docker services.
 
 ## Documentation
 - [PRD](./doc/PRD.md)

@@ -1,12 +1,18 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
 import { CreateTurnBody } from './turns.schemas';
 
 const ACTIVE_TURN_STATUSES = ['queued', 'running'];
+const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
+
+export type RunnerEventType = 'turn.started' | 'assistant.delta' | 'turn.completed' | 'turn.failed' | 'turn.cancelled';
 
 @Injectable()
 export class TurnsService {
+  private readonly logger = new Logger(TurnsService.name);
+
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(RUNNER_ADAPTER) private readonly runnerAdapter: RunnerAdapter,
@@ -55,11 +61,19 @@ export class TurnsService {
       });
     });
 
-    void this.runnerAdapter.startTurn({
-      turnId: turn.id,
-      sessionId,
-      content: input.content,
-    });
+    void this.runnerAdapter
+      .startTurn({
+        turnId: turn.id,
+        sessionId,
+        content: input.content,
+      })
+      .catch((error: unknown) => {
+        if (error instanceof Error) {
+          this.logger.error(`Failed to dispatch turn ${turn.id} to runner: ${error.message}`, error.stack);
+          return;
+        }
+        this.logger.error(`Failed to dispatch turn ${turn.id} to runner`);
+      });
 
     return {
       turnId: turn.id,
@@ -106,5 +120,124 @@ export class TurnsService {
     }
 
     return turn;
+  }
+
+  async ingestRunnerEvent(turnId: string, type: RunnerEventType, payload: Record<string, unknown>) {
+    const turn = await this.prisma.turn.findUnique({
+      where: { id: turnId },
+      select: { id: true, sessionId: true, status: true },
+    });
+    if (!turn) {
+      throw new NotFoundException({ message: 'Turn not found' });
+    }
+
+    switch (type) {
+      case 'turn.started': {
+        if (turn.status === 'queued') {
+          await this.prisma.turn.update({
+            where: { id: turnId },
+            data: { status: 'running', startedAt: new Date() },
+          });
+        }
+        await this.appendEvent(turnId, 'turn.started', this.normalizePayload(payload));
+        return;
+      }
+      case 'assistant.delta': {
+        if (TERMINAL_STATUSES.includes(turn.status)) {
+          return;
+        }
+        const text = payload.text;
+        if (typeof text !== 'string' || text.length === 0) {
+          throw new ConflictException({ message: 'assistant.delta requires payload.text' });
+        }
+        await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text }));
+        return;
+      }
+      case 'turn.completed': {
+        if (TERMINAL_STATUSES.includes(turn.status)) {
+          return;
+        }
+        const content = payload.content;
+        if (typeof content !== 'string') {
+          throw new ConflictException({ message: 'turn.completed requires payload.content' });
+        }
+
+        await this.prisma.$transaction(async (tx) => {
+          const assistantMessage = await tx.message.create({
+            data: {
+              sessionId: turn.sessionId,
+              role: 'assistant',
+              content,
+            },
+          });
+
+          await tx.turn.update({
+            where: { id: turnId },
+            data: {
+              assistantMessageId: assistantMessage.id,
+              status: 'completed',
+              endedAt: new Date(),
+              startedAt: turn.status === 'queued' ? new Date() : undefined,
+            },
+          });
+        });
+
+        await this.appendEvent(turnId, 'turn.completed', this.normalizePayload({}));
+        return;
+      }
+      case 'turn.cancelled': {
+        if (TERMINAL_STATUSES.includes(turn.status)) {
+          return;
+        }
+        await this.prisma.turn.update({
+          where: { id: turnId },
+          data: {
+            status: 'cancelled',
+            endedAt: new Date(),
+            startedAt: turn.status === 'queued' ? new Date() : undefined,
+          },
+        });
+        await this.appendEvent(turnId, 'turn.cancelled', this.normalizePayload(payload));
+        return;
+      }
+      case 'turn.failed': {
+        if (TERMINAL_STATUSES.includes(turn.status)) {
+          return;
+        }
+        await this.prisma.turn.update({
+          where: { id: turnId },
+          data: {
+            status: 'failed',
+            endedAt: new Date(),
+            startedAt: turn.status === 'queued' ? new Date() : undefined,
+          },
+        });
+        await this.appendEvent(turnId, 'turn.failed', this.normalizePayload(payload));
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  private async appendEvent(turnId: string, type: RunnerEventType, payload: Prisma.InputJsonValue): Promise<void> {
+    const latest = await this.prisma.event.findFirst({
+      where: { turnId },
+      orderBy: { seq: 'desc' },
+      select: { seq: true },
+    });
+
+    await this.prisma.event.create({
+      data: {
+        turnId,
+        seq: (latest?.seq ?? 0) + 1,
+        type,
+        payload,
+      },
+    });
+  }
+
+  private normalizePayload(payload: Record<string, unknown>): Prisma.InputJsonValue {
+    return JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue;
   }
 }
