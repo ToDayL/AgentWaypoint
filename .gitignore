@@ -35,3 +35,7 @@ pnpm-debug.log*
 *.pid
 *.seed
 *.pid.lock
+
+# Local TLS assets for nginx reverse proxy
+infra/docker/nginx/certs/*
+!infra/docker/nginx/certs/.gitkeep

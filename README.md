@@ -40,10 +40,17 @@ scripts/
    - `pnpm dev:up`
 
 Expected local ports:
-- `web`: `http://localhost:3000`
+- `web`: `https://localhost:3000`
 - `api`: `http://localhost:4000`
 - `runner`: `http://127.0.0.1:4700`
 - health check: `http://localhost:4000/api/health`
+
+TLS termination is handled by the `nginx` container in front of `web`.
+Only the HTTPS listener is published by default.
+Place your certificate and key in `infra/docker/nginx/certs/` and set:
+- `NGINX_SSL_CERT_FILE`
+- `NGINX_SSL_KEY_FILE`
+- optional `NGINX_SSL_TRUSTED_CERT_FILE` for a mounted CA bundle or chain file
 
 Stop stack:
 - `pnpm dev:down`
@@ -64,7 +71,11 @@ This project currently runs in hybrid mode:
    - `rm -rf apps/web/.next`
 
 ### 2. Start Container Services
-1. Start web/postgres/redis:
+1. Add TLS assets for nginx:
+   - certificate: `infra/docker/nginx/certs/${NGINX_SSL_CERT_FILE:-localhost.crt}`
+   - key: `infra/docker/nginx/certs/${NGINX_SSL_KEY_FILE:-localhost.key}`
+   - optional CA chain: `infra/docker/nginx/certs/${NGINX_SSL_TRUSTED_CERT_FILE}`
+2. Start nginx/web/postgres/redis:
    - `docker compose -f infra/docker/docker-compose.yml up --build -d`
 
 ### 3. Start Host API
@@ -86,7 +97,7 @@ This project currently runs in hybrid mode:
    - `curl http://localhost:4000/api/health`
    - expected: `{"status":"ok"}`
 2. Web app:
-   - open `http://localhost:3000`
+   - open `https://localhost:3000`
 3. Simulation API proxy (from web container):
    - `docker compose -f infra/docker/docker-compose.yml exec -T web sh -lc "node -e \"fetch('http://localhost:3000/api/sim/projects',{headers:{'x-user-email':'demo@example.com'}}).then(async r=>{console.log(r.status);console.log(await r.text());})\""`
 

@@ -5,6 +5,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="$ROOT_DIR/infra/docker/docker-compose.yml"
 STATE_DIR="/tmp/codexpanel-dev"
 
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT_DIR/.env"
+  set +a
+fi
+
 status_bg() {
   local name="$1"
   local pid_file="$STATE_DIR/${name}.pid"
@@ -33,3 +40,4 @@ echo
 echo "[dev-status] Health checks:"
 curl -fsS http://127.0.0.1:4000/api/health || echo "api health unavailable"
 curl -fsS http://127.0.0.1:4700/runner/health || echo "runner health unavailable"
+curl -kfsS "https://127.0.0.1:${NGINX_HTTPS_PORT:-443}" >/dev/null || echo "web https unavailable"

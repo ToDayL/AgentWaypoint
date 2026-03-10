@@ -1,6 +1,28 @@
 name: codexpanel
 
 services:
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: codexpanel-nginx
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_started
+    environment:
+      WEB_UPSTREAM: web:3000
+      SERVER_NAME: ${NGINX_SERVER_NAME:-localhost}
+      SSL_CERT_PATH: /etc/nginx/certs/${NGINX_SSL_CERT_FILE:-localhost.crt}
+      SSL_KEY_PATH: /etc/nginx/certs/${NGINX_SSL_KEY_FILE:-localhost.key}
+      SSL_TRUSTED_CERT_FILE: ${NGINX_SSL_TRUSTED_CERT_FILE:-}
+    command: >
+      /bin/sh -c "sh /opt/nginx/generate-config.sh && exec nginx -g 'daemon off;'"
+    ports:
+      - '${NGINX_HTTPS_PORT:-3000}:443'
+    volumes:
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/default.conf.template:/opt/nginx/default.conf.template:ro
+      - ./nginx/generate-config.sh:/opt/nginx/generate-config.sh:ro
+
   web:
     build:
       context: ../..
@@ -24,8 +46,8 @@ services:
       WEB_PORT: 3000
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:4000}
       API_BASE_URL: ${API_BASE_URL:-http://host.docker.internal:4000}
-    ports:
-      - '3000:3000'
+    expose:
+      - '3000'
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     volumes:

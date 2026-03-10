@@ -15,7 +15,7 @@ fi
 
 cd "$ROOT_DIR"
 
-echo "[dev-up] Starting Docker services (web/postgres/redis)..."
+echo "[dev-up] Starting Docker services (nginx/web/postgres/redis)..."
 docker compose -f "$COMPOSE_FILE" up --build -d
 
 if [[ "${SKIP_MIGRATE:-0}" != "1" ]]; then
@@ -52,9 +52,13 @@ start_bg api bash -lc "cd '$ROOT_DIR'; set -a; source .env; set +a; RUNNER_MODE=
 wait_health() {
   local name="$1"
   local url="$2"
+  local curl_args=()
+  if [[ "${3:-}" == "insecure" ]]; then
+    curl_args+=(-k)
+  fi
   local i
   for i in $(seq 1 60); do
-    if curl -fsS "$url" >/dev/null 2>&1; then
+    if curl "${curl_args[@]}" -fsS "$url" >/dev/null 2>&1; then
       echo "[dev-up] ${name} ready: ${url}"
       return
     fi
@@ -66,5 +70,6 @@ wait_health() {
 
 wait_health api "http://127.0.0.1:4000/api/health"
 wait_health runner "http://127.0.0.1:4700/runner/health"
+wait_health web "https://127.0.0.1:${NGINX_HTTPS_PORT:-443}" insecure
 
 echo "[dev-up] All dev services are up."
