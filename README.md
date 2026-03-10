@@ -118,6 +118,10 @@ Codex backend env options:
 - `RUNNER_CODEX_APPROVAL_POLICY` (default `never`)
 - `RUNNER_CODEX_SANDBOX` (optional sandbox override)
 
+Workspace validation:
+- Turn execution now requires project `repoPath` to be configured and exist on host.
+- Optional `RUNNER_ALLOWED_REPO_ROOTS` (comma-separated absolute roots) restricts allowed workspaces.
+
 ### 5. Stop All Services
 1. Stop containers:
    - `docker compose -f infra/docker/docker-compose.yml down`

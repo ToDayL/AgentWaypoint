@@ -1,5 +1,7 @@
 import { ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { stat } from 'node:fs/promises';
+import * as path from 'node:path';
 import { PrismaService } from '../prisma/prisma.service';
 import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
 import { CreateTurnBody } from './turns.schemas';
@@ -26,11 +28,19 @@ export class TurnsService {
           ownerUserId: userId,
         },
       },
-      select: { id: true, codexThreadId: true },
+      select: {
+        id: true,
+        codexThreadId: true,
+        project: {
+          select: { repoPath: true },
+        },
+      },
     });
     if (!session) {
       throw new NotFoundException({ message: 'Session not found' });
     }
+
+    const cwd = await this.resolveProjectWorkspace(session.project.repoPath);
 
     const activeTurn = await this.prisma.turn.findFirst({
       where: {
@@ -67,6 +77,7 @@ export class TurnsService {
         sessionId,
         content: input.content,
         threadId: session.codexThreadId,
+        cwd,
       })
       .catch((error: unknown) => {
         if (error instanceof Error) {
@@ -247,5 +258,45 @@ export class TurnsService {
 
   private normalizePayload(payload: Record<string, unknown>): Prisma.InputJsonValue {
     return JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue;
+  }
+
+  private async resolveProjectWorkspace(repoPath: string | null): Promise<string> {
+    const normalizedRepoPath = repoPath?.trim() ?? '';
+    if (!normalizedRepoPath) {
+      throw new ConflictException({ message: 'Project workspace is not configured (repoPath is required)' });
+    }
+
+    const absolutePath = path.resolve(normalizedRepoPath);
+    this.assertWorkspaceAllowed(absolutePath);
+
+    let info;
+    try {
+      info = await stat(absolutePath);
+    } catch {
+      throw new ConflictException({ message: `Project workspace does not exist: ${absolutePath}` });
+    }
+
+    if (!info.isDirectory()) {
+      throw new ConflictException({ message: `Project workspace is not a directory: ${absolutePath}` });
+    }
+
+    return absolutePath;
+  }
+
+  private assertWorkspaceAllowed(absolutePath: string): void {
+    const rootsConfig = process.env.RUNNER_ALLOWED_REPO_ROOTS?.trim();
+    if (!rootsConfig) {
+      return;
+    }
+
+    const allowedRoots = rootsConfig
+      .split(',')
+      .map((entry) => path.resolve(entry.trim()))
+      .filter((entry) => entry.length > 0);
+
+    const isAllowed = allowedRoots.some((root) => absolutePath === root || absolutePath.startsWith(`${root}${path.sep}`));
+    if (!isAllowed) {
+      throw new ConflictException({ message: `Project workspace is outside allowed roots: ${absolutePath}` });
+    }
   }
 }

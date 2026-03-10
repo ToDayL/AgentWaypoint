@@ -9,6 +9,8 @@ if (!process.env.DATABASE_URL) {
   process.env.DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/codexpanel';
 }
 
+const TEST_REPO_PATH = process.cwd();
+
 function randomEmail(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 100000)}@example.com`;
 }
@@ -119,7 +121,7 @@ describe('API e2e', () => {
       method: 'POST',
       url: '/api/projects',
       headers: { 'x-user-email': ownerEmail },
-      payload: { name: 'Private Project' },
+      payload: { name: 'Private Project', repoPath: TEST_REPO_PATH },
     });
     expect(createProjectResponse.statusCode).toBe(201);
     const project = createProjectResponse.json();
@@ -151,7 +153,7 @@ describe('API e2e', () => {
       method: 'POST',
       url: '/api/projects',
       headers: { 'x-user-email': email },
-      payload: { name: 'Turn Project' },
+      payload: { name: 'Turn Project', repoPath: TEST_REPO_PATH },
     });
     expect(createProjectResponse.statusCode).toBe(201);
     const project = createProjectResponse.json();
@@ -199,7 +201,7 @@ describe('API e2e', () => {
       method: 'POST',
       url: '/api/projects',
       headers: { 'x-user-email': email },
-      payload: { name: 'Cancel Project' },
+      payload: { name: 'Cancel Project', repoPath: TEST_REPO_PATH },
     });
     expect(createProjectResponse.statusCode).toBe(201);
     const project = createProjectResponse.json();

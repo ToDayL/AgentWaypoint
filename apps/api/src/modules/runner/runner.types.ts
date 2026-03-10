@@ -3,6 +3,7 @@ export type StartTurnInput = {
   sessionId: string;
   content: string;
   threadId?: string | null;
+  cwd?: string | null;
 };
 
 export type CancelTurnInput = {

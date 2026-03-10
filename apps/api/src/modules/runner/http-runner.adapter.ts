@@ -29,6 +29,7 @@ export class HttpRunnerAdapter implements RunnerAdapter {
         sessionId: input.sessionId,
         content: input.content,
         threadId: input.threadId ?? null,
+        cwd: input.cwd ?? null,
       },
     });
   }

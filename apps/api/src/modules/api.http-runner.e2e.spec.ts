@@ -11,6 +11,8 @@ if (!process.env.DATABASE_URL) {
   process.env.DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/codexpanel';
 }
 
+const TEST_REPO_PATH = process.cwd();
+
 type RunnerEventType = 'turn.started' | 'assistant.delta' | 'turn.completed' | 'turn.cancelled';
 
 type TestRunnerServer = {
@@ -199,7 +201,7 @@ describe.sequential('API e2e (http runner)', () => {
     const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-user-email': email },
-      body: JSON.stringify({ name: 'HTTP Runner Project' }),
+      body: JSON.stringify({ name: 'HTTP Runner Project', repoPath: TEST_REPO_PATH }),
     });
     expect(projectResponse.status).toBe(201);
     const project = (await projectResponse.json()) as { id: string };
@@ -238,7 +240,7 @@ describe.sequential('API e2e (http runner)', () => {
     const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-user-email': email },
-      body: JSON.stringify({ name: 'HTTP Cancel Project' }),
+      body: JSON.stringify({ name: 'HTTP Cancel Project', repoPath: TEST_REPO_PATH }),
     });
     const project = (await projectResponse.json()) as { id: string };
 

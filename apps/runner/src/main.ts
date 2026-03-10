@@ -8,6 +8,7 @@ type StartTurnBody = {
   sessionId: string;
   content: string;
   threadId?: string | null;
+  cwd?: string | null;
 };
 
 type CancelTurnBody = {
@@ -127,6 +128,7 @@ const server = createServer(async (request, response) => {
         sessionId: payload.sessionId,
         content: payload.content,
         threadId: payload.threadId ?? null,
+        cwd: payload.cwd ?? null,
       });
       return;
     }
@@ -198,7 +200,8 @@ function parseStartTurnBody(input: unknown): StartTurnBody {
   const sessionId = readNonEmptyString(record.sessionId, 'sessionId');
   const content = readNonEmptyString(record.content, 'content');
   const threadId = readOptionalString(record.threadId);
-  return { turnId, sessionId, content, threadId };
+  const cwd = readOptionalString(record.cwd);
+  return { turnId, sessionId, content, threadId, cwd };
 }
 
 function parseCancelTurnBody(input: unknown): CancelTurnBody {
@@ -280,12 +283,14 @@ async function startCodexExecution(input: StartTurnBody): Promise<void> {
     const worker = await ensureCodexWorker();
     await worker.readyPromise;
 
-    const threadId = await resolveThreadId(worker, input.threadId ?? null);
+    const workspaceCwd = input.cwd?.trim() || codexDefaultCwd;
+    const threadId = await resolveThreadId(worker, input.threadId ?? null, workspaceCwd);
     turn.threadId = threadId;
 
     const turnStartParams: Record<string, unknown> = {
       threadId,
       input: [{ type: 'text', text: input.content, text_elements: [] }],
+      cwd: workspaceCwd,
     };
     if (codexDefaultModel) {
       turnStartParams.model = codexDefaultModel;
@@ -390,11 +395,12 @@ function handleWorkerExit(worker: CodexWorker, reason: string): void {
   });
 }
 
-async function resolveThreadId(worker: CodexWorker, preferredThreadId: string | null): Promise<string> {
+async function resolveThreadId(worker: CodexWorker, preferredThreadId: string | null, cwd: string): Promise<string> {
   if (preferredThreadId) {
     try {
       await sendWorkerRequest(worker, 'thread/resume', {
         threadId: preferredThreadId,
+        cwd,
         persistExtendedHistory: false,
       });
       return preferredThreadId;
@@ -406,7 +412,7 @@ async function resolveThreadId(worker: CodexWorker, preferredThreadId: string | 
   }
 
   const threadStartResult = (await sendWorkerRequest(worker, 'thread/start', {
-    cwd: codexDefaultCwd,
+    cwd,
     approvalPolicy: codexApprovalPolicy,
     sandbox: codexSandboxMode,
     ephemeral: false,
