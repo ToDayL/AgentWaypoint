@@ -1,6 +1,6 @@
 # CodexPanel Implementation Progress
 
-Last updated: 2026-03-06
+Last updated: 2026-03-10
 
 ## Architecture Decision on 2026-03-05
 1. Chosen integration model: Option 2.
@@ -80,3 +80,71 @@ Last updated: 2026-03-06
 2. Dev tooling updates:
    - `infra/docker/docker-compose.yml` now runs `web` only (plus DB services).
    - `scripts/dev-api-host.sh` added for host API startup.
+
+## Completed on 2026-03-10
+1. Session history read path implemented:
+   - API endpoint: `GET /api/sessions/:id/history`
+   - Returns ordered `messages`, ordered `turns`, `activeTurnId`, and `activeTurnStatus`.
+   - Web proxy route added at `/api/sim/sessions/:sessionId/history`.
+2. Durable turn failure metadata added:
+   - Prisma fields on `Turn`: `failureCode`, `failureMessage`.
+   - Migration added: `20260310152000_add_turn_failure_fields`.
+3. Turn status API added:
+   - API endpoint: `GET /api/turns/:id`.
+   - Includes status, timestamps, and failure metadata.
+   - Web proxy route added at `/api/sim/turns/:turnId`.
+4. Startup reconciliation for in-flight turns implemented:
+   - On API startup, stale `queued/running` turns are marked `failed`.
+   - Reconciliation reason:
+     - `failureCode=RECOVERED_ON_STARTUP`
+     - `failureMessage=Turn marked failed during API startup reconciliation`
+   - `turn.failed` event is appended for reconciled turns.
+5. Web resilience improvements delivered:
+   - Session selection restores persisted history.
+   - Resumed in-flight turns are explicitly indicated in UI.
+   - SSE disconnect falls back to polling `GET /api/sim/turns/:id` until terminal status.
+6. Validation completed:
+   - `@codexpanel/api` typecheck passes.
+   - `@codexpanel/web` typecheck passes.
+   - Workspace tests pass (`8/8` API tests; other packages currently have no test files).
+7. HTTPS reverse proxy added for local web access:
+   - New `nginx` Docker service terminates TLS in front of `web`.
+   - `web` is now exposed only on the Docker network and published through nginx.
+   - TLS cert, key, and optional CA bundle can be mounted from `infra/docker/nginx/certs/`.
+   - Default public entrypoint is `https://localhost:3000`.
+8. Dev stack verification completed for HTTPS entrypoint:
+   - `docker compose` stack starts with `nginx`, `web`, `postgres`, and `redis`.
+   - Host `api` and `runner` health checks pass via `scripts/dev-up.sh`.
+   - `curl -kI https://127.0.0.1:3000` returns `HTTP/2 200` after web startup completes.
+
+## Backfilled Progress (already implemented in repo)
+1. Turn lifecycle APIs and streaming path are implemented:
+   - `POST /api/sessions/:id/turns`
+   - `POST /api/turns/:id/cancel`
+   - `GET /api/turns/:id/stream` (SSE)
+   - Internal runner callback: `POST /internal/runner/turns/:turnId/events`
+2. HTTP runner adapter mode is implemented and tested:
+   - API supports `RUNNER_MODE=http` with runner base URL and optional auth token.
+   - HTTP-runner e2e tests exist in `apps/api/src/modules/api.http-runner.e2e.spec.ts`.
+3. Dev orchestration scripts are implemented:
+   - `scripts/dev-up.sh`, `scripts/dev-down.sh`, `scripts/dev-status.sh`
+   - Host service scripts: `scripts/dev-api-host.sh`, `scripts/dev-runner-host.sh`
+4. Runner Codex backend integration is implemented:
+   - `RUNNER_BACKEND=codex` starts/uses Codex app-server behavior.
+   - `RUNNER_BACKEND=mock` remains available as fallback.
+   - Runner exposes backend state in health response.
+5. Runner execution model was upgraded to persistent worker reuse:
+   - Long-lived Codex worker reused across turns.
+   - No per-turn app-server process startup in the steady state.
+6. Session/thread continuity is implemented:
+   - DB field `Session.codexThreadId` persisted via migration `20260309153100_add_session_codex_thread_id`.
+   - Turn flow supports `thread/start` on first turn and `thread/resume` on follow-up turns.
+   - Fallback to new thread if resume fails.
+7. Workspace and cwd management are implemented:
+   - Project workspace (`repoPath`) validation before dispatching turns.
+   - `cwd` is forwarded to runner/Codex turn operations.
+   - Optional root allowlist via `RUNNER_ALLOWED_REPO_ROOTS`.
+8. Web simulation UX was expanded before current turn:
+   - Project form includes workspace path (`repoPath`).
+   - Proxy empty-body cancel forwarding bug was fixed.
+   - Hydration guard mitigations added for mobile/client attribute mismatch cases.
