@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 type Project = {
   id: string;
   name: string;
+  repoPath?: string | null;
   createdAt: string;
 };
 
@@ -35,12 +36,14 @@ const STREAM_EVENTS = [
 ];
 
 export default function HomePage() {
+  const [mounted, setMounted] = useState(false);
   const [email, setEmail] = useState('demo@codexpanel.local');
   const [projects, setProjects] = useState<Project[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
   const [newProjectName, setNewProjectName] = useState('Simulation Workspace');
+  const [newProjectRepoPath, setNewProjectRepoPath] = useState('');
   const [newSessionTitle, setNewSessionTitle] = useState('First Simulation Session');
   const [prompt, setPrompt] = useState('');
   const [eventLog, setEventLog] = useState<string[]>([]);
@@ -69,9 +72,27 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
     void loadProjects();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  if (!mounted) {
+    return (
+      <main className="sim-shell">
+        <section className="sim-panel">
+          <header className="sim-header">
+            <p className="sim-kicker">CodexPanel Simulation</p>
+            <h1>Web Interface MVP</h1>
+            <p className="sim-subtitle">Loading…</p>
+          </header>
+        </section>
+      </main>
+    );
+  }
 
   async function loadProjects(): Promise<void> {
     setBusy(true);
@@ -121,7 +142,7 @@ export default function HomePage() {
   }
 
   async function handleCreateProject(): Promise<void> {
-    if (!newProjectName.trim()) {
+    if (!newProjectName.trim() || !newProjectRepoPath.trim()) {
       return;
     }
 
@@ -131,7 +152,7 @@ export default function HomePage() {
       const created = await apiRequest<Project>('/api/sim/projects', {
         method: 'POST',
         email,
-        body: { name: newProjectName.trim() },
+        body: { name: newProjectName.trim(), repoPath: newProjectRepoPath.trim() },
       });
       await loadProjects();
       setSelectedProjectId(created.id);
@@ -290,7 +311,19 @@ export default function HomePage() {
                 placeholder="Project name"
               />
             </label>
-            <button type="button" onClick={() => void handleCreateProject()} disabled={busy}>
+            <label>
+              Workspace Path
+              <input
+                value={newProjectRepoPath}
+                onChange={(event) => setNewProjectRepoPath(event.target.value)}
+                placeholder="/absolute/path/to/repo"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => void handleCreateProject()}
+              disabled={busy || !newProjectName.trim() || !newProjectRepoPath.trim()}
+            >
               Create Project
             </button>
             <label>
@@ -346,6 +379,9 @@ export default function HomePage() {
             <p>
               Project: <strong>{selectedProject?.name ?? '-'}</strong> | Session:{' '}
               <strong>{selectedSession?.title ?? '-'}</strong>
+            </p>
+            <p>
+              Workspace: <strong>{selectedProject?.repoPath ?? '-'}</strong>
             </p>
             <p>
               Status: <span className="status-pill">{turnStatus}</span>
