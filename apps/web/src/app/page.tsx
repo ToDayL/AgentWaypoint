@@ -16,12 +16,50 @@ type Session = {
   updatedAt: string;
 };
 
+type ChatMessage = {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  createdAt: string;
+};
+
+type TurnSummary = {
+  id: string;
+  status: string;
+  failureCode: string | null;
+  failureMessage: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  userMessageId: string | null;
+  assistantMessageId: string | null;
+};
+
+type SessionHistory = {
+  session: Session;
+  messages: ChatMessage[];
+  turns: TurnSummary[];
+  activeTurnId: string | null;
+  activeTurnStatus: string | null;
+};
+
 type StreamEnvelope = {
   turnId: string;
   seq: number;
   type: string;
   payload: Record<string, unknown>;
   createdAt: string;
+};
+
+type TurnStatusResponse = {
+  id: string;
+  sessionId: string;
+  status: string;
+  failureCode: string | null;
+  failureMessage: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
 };
 
 const STREAM_EVENTS = [
@@ -34,6 +72,7 @@ const STREAM_EVENTS = [
   'turn.failed',
   'turn.cancelled',
 ];
+const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 export default function HomePage() {
   const [mounted, setMounted] = useState(false);
@@ -47,12 +86,15 @@ export default function HomePage() {
   const [newSessionTitle, setNewSessionTitle] = useState('First Simulation Session');
   const [prompt, setPrompt] = useState('');
   const [eventLog, setEventLog] = useState<string[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [assistantText, setAssistantText] = useState('');
   const [activeTurnId, setActiveTurnId] = useState('');
+  const [resumedTurnHint, setResumedTurnHint] = useState('');
   const [turnStatus, setTurnStatus] = useState('idle');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const eventSourceRef = useRef<EventSource | null>(null);
+  const turnPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const canSendTurn = !!selectedSessionId && prompt.trim().length > 0 && activeTurnId === '';
   const selectedProject = useMemo(
@@ -68,7 +110,9 @@ export default function HomePage() {
     return () => {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
+      stopTurnStatusPolling();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -131,8 +175,15 @@ export default function HomePage() {
       setSessions(items);
       if (items[0]) {
         setSelectedSessionId(items[0].id);
+        await loadSessionHistory(items[0].id, { resumeStream: true });
       } else {
         setSelectedSessionId('');
+        setMessages([]);
+        setAssistantText('');
+        setActiveTurnId('');
+        setResumedTurnHint('');
+        setTurnStatus('idle');
+        setEventLog([]);
       }
     } catch (requestError) {
       setError(extractMessage(requestError));
@@ -179,6 +230,7 @@ export default function HomePage() {
       });
       await loadSessions(selectedProjectId);
       setSelectedSessionId(created.id);
+      await loadSessionHistory(created.id, { resumeStream: true });
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
@@ -195,6 +247,7 @@ export default function HomePage() {
     setError('');
     setEventLog([]);
     setAssistantText('');
+    setResumedTurnHint('');
     setTurnStatus('queued');
 
     try {
@@ -206,7 +259,8 @@ export default function HomePage() {
 
       setActiveTurnId(result.turnId);
       setTurnStatus(result.status);
-      openStream(result.turnId);
+      await loadSessionHistory(selectedSessionId, { resumeStream: false });
+      openStream(result.turnId, selectedSessionId);
       setPrompt('');
     } catch (requestError) {
       setError(extractMessage(requestError));
@@ -229,6 +283,7 @@ export default function HomePage() {
         email,
       });
       setTurnStatus(cancelled.status);
+      await loadSessionHistory(selectedSessionId, { resumeStream: false });
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
@@ -236,7 +291,46 @@ export default function HomePage() {
     }
   }
 
-  function openStream(turnId: string): void {
+  async function loadSessionHistory(sessionId: string, options: { resumeStream: boolean }): Promise<void> {
+    if (!sessionId) {
+      eventSourceRef.current?.close();
+      eventSourceRef.current = null;
+      stopTurnStatusPolling();
+      setMessages([]);
+      setAssistantText('');
+      setActiveTurnId('');
+      setResumedTurnHint('');
+      setTurnStatus('idle');
+      setEventLog([]);
+      return;
+    }
+
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+    stopTurnStatusPolling();
+    setError('');
+    try {
+      const history = await apiRequest<SessionHistory>(`/api/sim/sessions/${sessionId}/history`, {
+        method: 'GET',
+        email,
+      });
+      setMessages(history.messages);
+      setTurnStatus(history.activeTurnStatus ?? 'idle');
+      setActiveTurnId(history.activeTurnId ?? '');
+      setAssistantText('');
+      setEventLog([]);
+      if (options.resumeStream && history.activeTurnId) {
+        setResumedTurnHint(`Resumed in-flight turn: ${history.activeTurnId}`);
+        openStream(history.activeTurnId, sessionId);
+      } else {
+        setResumedTurnHint('');
+      }
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    }
+  }
+
+  function openStream(turnId: string, sessionId: string): void {
     eventSourceRef.current?.close();
     const streamUrl = `/api/sim/turns/${turnId}/stream?email=${encodeURIComponent(email)}`;
     const source = new EventSource(streamUrl);
@@ -266,6 +360,11 @@ export default function HomePage() {
         if (envelope.type === 'turn.completed' || envelope.type === 'turn.failed' || envelope.type === 'turn.cancelled') {
           setTurnStatus(envelope.type.replace('turn.', ''));
           setActiveTurnId('');
+          setResumedTurnHint('');
+          stopTurnStatusPolling();
+          if (sessionId) {
+            void loadSessionHistory(sessionId, { resumeStream: false });
+          }
           source.close();
           eventSourceRef.current = null;
         }
@@ -276,8 +375,46 @@ export default function HomePage() {
       appendEvent('stream disconnected');
       source.close();
       eventSourceRef.current = null;
-      setActiveTurnId('');
+      if (turnId) {
+        appendEvent('switching to turn status polling');
+        startTurnStatusPolling(turnId, sessionId);
+      }
     };
+  }
+
+  function stopTurnStatusPolling(): void {
+    if (turnPollTimerRef.current) {
+      clearInterval(turnPollTimerRef.current);
+      turnPollTimerRef.current = null;
+    }
+  }
+
+  function startTurnStatusPolling(turnId: string, sessionId: string): void {
+    stopTurnStatusPolling();
+    turnPollTimerRef.current = setInterval(() => {
+      void (async () => {
+        try {
+          const status = await apiRequest<TurnStatusResponse>(`/api/sim/turns/${turnId}`, {
+            method: 'GET',
+            email,
+          });
+          setTurnStatus(status.status);
+          if (status.status === 'failed' && status.failureMessage) {
+            setError(status.failureMessage);
+          }
+          if (TERMINAL_TURN_STATUSES.has(status.status)) {
+            stopTurnStatusPolling();
+            setActiveTurnId('');
+            setResumedTurnHint('');
+            if (sessionId) {
+              await loadSessionHistory(sessionId, { resumeStream: false });
+            }
+          }
+        } catch (requestError) {
+          setError(extractMessage(requestError));
+        }
+      })();
+    }, 1200);
   }
 
   return (
@@ -361,7 +498,14 @@ export default function HomePage() {
             </button>
             <label>
               Current Session
-              <select value={selectedSessionId} onChange={(event) => setSelectedSessionId(event.target.value)}>
+              <select
+                value={selectedSessionId}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setSelectedSessionId(value);
+                  void loadSessionHistory(value, { resumeStream: true });
+                }}
+              >
                 <option value="">Select a session</option>
                 {sessions.map((session) => (
                   <option key={session.id} value={session.id}>
@@ -386,6 +530,7 @@ export default function HomePage() {
             <p>
               Status: <span className="status-pill">{turnStatus}</span>
             </p>
+            {resumedTurnHint ? <p>{resumedTurnHint}</p> : null}
           </div>
 
           <label>
@@ -408,7 +553,19 @@ export default function HomePage() {
 
           <article className="sim-output">
             <h3>Assistant Stream</h3>
-            <pre>{assistantText || 'Waiting for stream output...'}</pre>
+            <pre>{assistantText || 'No active stream output.'}</pre>
+          </article>
+
+          <article className="sim-events">
+            <h3>Chat History</h3>
+            <ul>
+              {messages.length === 0 ? <li>No messages yet.</li> : null}
+              {messages.map((message) => (
+                <li key={message.id}>
+                  <strong>{message.role}:</strong> {message.content}
+                </li>
+              ))}
+            </ul>
           </article>
 
           <article className="sim-events">

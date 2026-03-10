@@ -192,6 +192,34 @@ describe('API e2e', () => {
     expect(streamResponse.payload).toContain('event: turn.started');
     expect(streamResponse.payload).toContain('event: assistant.delta');
     expect(streamResponse.payload).toContain('event: turn.completed');
+
+    const turnStatusResponse = await app.inject({
+      method: 'GET',
+      url: `/api/turns/${turnId}`,
+      headers: { 'x-user-email': email },
+    });
+    expect(turnStatusResponse.statusCode).toBe(200);
+    expect(turnStatusResponse.json()).toMatchObject({
+      id: turnId,
+      status: 'completed',
+      failureCode: null,
+      failureMessage: null,
+    });
+
+    const historyResponse = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${session.id}/history`,
+      headers: { 'x-user-email': email },
+    });
+    expect(historyResponse.statusCode).toBe(200);
+    const history = historyResponse.json() as {
+      messages: Array<{ role: string; content: string }>;
+      activeTurnId: string | null;
+    };
+    expect(history.messages.length).toBeGreaterThanOrEqual(2);
+    expect(history.messages[0]).toMatchObject({ role: 'user', content: 'hello from e2e' });
+    expect(history.messages.at(-1)).toMatchObject({ role: 'assistant' });
+    expect(history.activeTurnId).toBeNull();
   });
 
   it('cancels active turn', async () => {
@@ -234,6 +262,16 @@ describe('API e2e', () => {
       id: turnId,
       status: 'cancelled',
     });
+
+    const turnStatusResponse = await app.inject({
+      method: 'GET',
+      url: `/api/turns/${turnId}`,
+      headers: { 'x-user-email': email },
+    });
+    expect(turnStatusResponse.statusCode).toBe(200);
+    expect(['queued', 'running', 'cancelled']).toContain(
+      (turnStatusResponse.json() as { status: string }).status,
+    );
 
     await sleep(300);
     const streamResponse = await app.inject({

@@ -62,6 +62,12 @@ export class TurnsController {
     return this.turnsService.cancelTurnForUser(user.id, id);
   }
 
+  @Get('/turns/:id')
+  async getTurn(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown) {
+    const { id } = parseWithZod(TurnIdParamsSchema, params);
+    return this.turnsService.getTurnStatusForUser(user.id, id);
+  }
+
   @Get('/turns/:id/stream')
   async streamTurn(
     @CurrentUserDecorator() user: CurrentUser,

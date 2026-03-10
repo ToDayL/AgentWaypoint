@@ -1,4 +1,4 @@
-import { ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { stat } from 'node:fs/promises';
 import * as path from 'node:path';
@@ -12,13 +12,17 @@ const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
 export type RunnerEventType = 'turn.started' | 'assistant.delta' | 'turn.completed' | 'turn.failed' | 'turn.cancelled';
 
 @Injectable()
-export class TurnsService {
+export class TurnsService implements OnModuleInit {
   private readonly logger = new Logger(TurnsService.name);
 
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(RUNNER_ADAPTER) private readonly runnerAdapter: RunnerAdapter,
   ) {}
+
+  async onModuleInit(): Promise<void> {
+    await this.reconcileInFlightTurnsOnStartup();
+  }
 
   async createTurnForSession(userId: string, sessionId: string, input: CreateTurnBody) {
     const session = await this.prisma.session.findFirst({
@@ -80,6 +84,14 @@ export class TurnsService {
         cwd,
       })
       .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : 'Runner start failed';
+        void this.failTurn(
+          turn.id,
+          turn.status,
+          'RUNNER_DISPATCH_FAILED',
+          message,
+          this.normalizePayload({ code: 'RUNNER_DISPATCH_FAILED', message }),
+        );
         if (error instanceof Error) {
           this.logger.error(`Failed to dispatch turn ${turn.id} to runner: ${error.message}`, error.stack);
           return;
@@ -132,6 +144,20 @@ export class TurnsService {
     }
 
     return turn;
+  }
+
+  async getTurnStatusForUser(userId: string, turnId: string) {
+    const turn = await this.getTurnForUser(userId, turnId);
+    return {
+      id: turn.id,
+      sessionId: turn.sessionId,
+      status: turn.status,
+      failureCode: turn.failureCode,
+      failureMessage: turn.failureMessage,
+      createdAt: turn.createdAt,
+      startedAt: turn.startedAt,
+      endedAt: turn.endedAt,
+    };
   }
 
   async ingestRunnerEvent(turnId: string, type: RunnerEventType, payload: Record<string, unknown>) {
@@ -223,15 +249,12 @@ export class TurnsService {
         if (TERMINAL_STATUSES.includes(turn.status)) {
           return;
         }
-        await this.prisma.turn.update({
-          where: { id: turnId },
-          data: {
-            status: 'failed',
-            endedAt: new Date(),
-            startedAt: turn.status === 'queued' ? new Date() : undefined,
-          },
-        });
-        await this.appendEvent(turnId, 'turn.failed', this.normalizePayload(payload));
+        const code = typeof payload.code === 'string' && payload.code.trim().length > 0 ? payload.code.trim() : 'RUNNER_FAILED';
+        const message =
+          typeof payload.message === 'string' && payload.message.trim().length > 0
+            ? payload.message.trim()
+            : 'Runner reported a failure';
+        await this.failTurn(turnId, turn.status, code, message, this.normalizePayload(payload));
         return;
       }
       default:
@@ -258,6 +281,51 @@ export class TurnsService {
 
   private normalizePayload(payload: Record<string, unknown>): Prisma.InputJsonValue {
     return JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue;
+  }
+
+  private async reconcileInFlightTurnsOnStartup(): Promise<void> {
+    const inFlightTurns = await this.prisma.turn.findMany({
+      where: { status: { in: ACTIVE_TURN_STATUSES } },
+      select: { id: true, status: true },
+    });
+
+    if (inFlightTurns.length === 0) {
+      return;
+    }
+
+    this.logger.warn(`Reconciling ${inFlightTurns.length} in-flight turn(s) after API startup`);
+    for (const turn of inFlightTurns) {
+      await this.failTurn(
+        turn.id,
+        turn.status,
+        'RECOVERED_ON_STARTUP',
+        'Turn marked failed during API startup reconciliation',
+        this.normalizePayload({
+          code: 'RECOVERED_ON_STARTUP',
+          message: 'Turn marked failed during API startup reconciliation',
+        }),
+      );
+    }
+  }
+
+  private async failTurn(
+    turnId: string,
+    previousStatus: string,
+    failureCode: string,
+    failureMessage: string,
+    eventPayload: Prisma.InputJsonValue,
+  ): Promise<void> {
+    await this.prisma.turn.update({
+      where: { id: turnId },
+      data: {
+        status: 'failed',
+        failureCode,
+        failureMessage,
+        endedAt: new Date(),
+        startedAt: previousStatus === 'queued' ? new Date() : undefined,
+      },
+    });
+    await this.appendEvent(turnId, 'turn.failed', eventPayload);
   }
 
   private async resolveProjectWorkspace(repoPath: string | null): Promise<string> {

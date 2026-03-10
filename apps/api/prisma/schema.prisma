@@ -59,6 +59,8 @@ model Turn {
   userMessageId      String?
   assistantMessageId String?
   status             String
+  failureCode        String?
+  failureMessage     String?
   startedAt          DateTime?
   endedAt            DateTime?
   createdAt          DateTime  @default(now())

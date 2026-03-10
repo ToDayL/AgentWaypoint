@@ -3,6 +3,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ProjectsService } from '../projects/projects.service';
 import { CreateSessionBody } from './sessions.schemas';
 
+const ACTIVE_TURN_STATUSES = new Set(['queued', 'running']);
+
 @Injectable()
 export class SessionsService {
   constructor(
@@ -39,5 +41,66 @@ export class SessionsService {
         status: 'active',
       },
     });
+  }
+
+  async getHistoryForSession(userId: string, sessionId: string) {
+    const session = await this.prisma.session.findFirst({
+      where: {
+        id: sessionId,
+        project: {
+          ownerUserId: userId,
+        },
+      },
+      select: {
+        id: true,
+        projectId: true,
+        title: true,
+        status: true,
+        updatedAt: true,
+        messages: {
+          orderBy: { createdAt: 'asc' },
+          select: {
+            id: true,
+            role: true,
+            content: true,
+            createdAt: true,
+          },
+        },
+        turns: {
+          orderBy: { createdAt: 'asc' },
+          select: {
+            id: true,
+            status: true,
+            failureCode: true,
+            failureMessage: true,
+            userMessageId: true,
+            assistantMessageId: true,
+            createdAt: true,
+            startedAt: true,
+            endedAt: true,
+          },
+        },
+      },
+    });
+
+    if (!session) {
+      throw new NotFoundException({ message: 'Session not found' });
+    }
+
+    const activeTurn = [...session.turns].reverse().find((turn) => ACTIVE_TURN_STATUSES.has(turn.status));
+
+    return {
+      session: {
+        id: session.id,
+        projectId: session.projectId,
+        title: session.title,
+        status: session.status,
+        updatedAt: session.updatedAt,
+      },
+      messages: session.messages,
+      turns: session.turns,
+      activeTurnId: activeTurn?.id ?? null,
+      activeTurnStatus: activeTurn?.status ?? null,
+    };
   }
 }
