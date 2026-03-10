@@ -42,28 +42,34 @@ type ActiveMockTurn = ActiveTurnBase & {
   timers: ReturnType<typeof setTimeout>[];
 };
 
-type PendingRequest = {
-  resolve: (result: unknown) => void;
-  reject: (error: Error) => void;
-  timeout: ReturnType<typeof setTimeout>;
-};
-
 type ActiveCodexTurn = ActiveTurnBase & {
   backend: 'codex';
-  process: ChildProcessWithoutNullStreams;
   threadId: string | null;
   codexTurnId: string | null;
-  nextRequestId: number;
-  pendingRequests: Map<number, PendingRequest>;
   assistantText: string;
-  notificationQueue: Promise<void>;
   completionResolve: (() => void) | null;
   completionReject: ((error: Error) => void) | null;
 };
 
 type ActiveTurn = ActiveMockTurn | ActiveCodexTurn;
 
+type PendingRequest = {
+  resolve: (result: unknown) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
+type CodexWorker = {
+  process: ChildProcessWithoutNullStreams;
+  nextRequestId: number;
+  pendingRequests: Map<number, PendingRequest>;
+  notificationQueue: Promise<void>;
+  readyPromise: Promise<void>;
+  closed: boolean;
+};
+
 const activeTurns = new Map<string, ActiveTurn>();
+let codexWorkerPromise: Promise<CodexWorker> | null = null;
 
 const server = createServer(async (request, response) => {
   try {
@@ -248,84 +254,33 @@ async function startMockExecution(turn: ActiveMockTurn): Promise<void> {
 }
 
 async function startCodexExecution(input: StartTurnBody): Promise<void> {
-  const codexProcess = spawn(codexBin, ['app-server', '--listen', 'stdio://'], {
-    cwd: codexDefaultCwd,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: process.env,
-  });
-
   let completionResolve: (() => void) | null = null;
   let completionReject: ((error: Error) => void) | null = null;
   const completionPromise = new Promise<void>((resolve, reject) => {
     completionResolve = resolve;
     completionReject = reject;
-    const turn: ActiveCodexTurn = {
-      backend: 'codex',
-      turnId: input.turnId,
-      sessionId: input.sessionId,
-      content: input.content,
-      startedAt: new Date().toISOString(),
-      finalized: false,
-      process: codexProcess,
-      threadId: null,
-      codexTurnId: null,
-      nextRequestId: 1,
-      pendingRequests: new Map<number, PendingRequest>(),
-      assistantText: '',
-      notificationQueue: Promise.resolve(),
-      completionResolve,
-      completionReject,
-    };
-    activeTurns.set(input.turnId, turn);
   });
 
-  const turn = activeTurns.get(input.turnId);
-  if (!turn || turn.backend !== 'codex') {
-    return;
-  }
-
-  const stdoutReader = createInterface({ input: codexProcess.stdout });
-  stdoutReader.on('line', (line) => {
-    turn.notificationQueue = turn.notificationQueue
-      .then(async () => {
-        await handleCodexMessage(turn.turnId, line);
-      })
-      .catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : 'unknown notification error';
-        // eslint-disable-next-line no-console
-        console.error(`[codexpanel-runner] notification error (${turn.turnId}): ${message}`);
-      });
-  });
-
-  codexProcess.stderr.on('data', (chunk) => {
-    const message = chunk.toString('utf8').trim();
-    if (message) {
-      // eslint-disable-next-line no-console
-      console.error(`[codexpanel-runner] codex stderr (${turn.turnId}): ${message}`);
-    }
-  });
-
-  codexProcess.on('error', (error) => {
-    void failTurn(turn.turnId, `Failed to start codex app-server: ${error.message}`);
-  });
-
-  codexProcess.on('close', (code, signal) => {
-    const active = activeTurns.get(turn.turnId);
-    if (!active || active.backend !== 'codex' || active.finalized) {
-      return;
-    }
-    const detail = `codex app-server exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`;
-    void failTurn(turn.turnId, detail);
-  });
+  const turn: ActiveCodexTurn = {
+    backend: 'codex',
+    turnId: input.turnId,
+    sessionId: input.sessionId,
+    content: input.content,
+    startedAt: new Date().toISOString(),
+    finalized: false,
+    threadId: null,
+    codexTurnId: null,
+    assistantText: '',
+    completionResolve,
+    completionReject,
+  };
+  activeTurns.set(input.turnId, turn);
 
   try {
-    await sendCodexRequest(turn.turnId, 'initialize', {
-      clientInfo: { name: 'codexpanel-runner', version: '0.1.0' },
-      capabilities: null,
-    });
-    sendCodexNotification(turn.turnId, 'initialized', {});
+    const worker = await ensureCodexWorker();
+    await worker.readyPromise;
 
-    const threadId = await resolveThreadId(turn.turnId, input.threadId ?? null);
+    const threadId = await resolveThreadId(worker, input.threadId ?? null);
     turn.threadId = threadId;
 
     const turnStartParams: Record<string, unknown> = {
@@ -335,8 +290,10 @@ async function startCodexExecution(input: StartTurnBody): Promise<void> {
     if (codexDefaultModel) {
       turnStartParams.model = codexDefaultModel;
     }
-    const turnStartResult = (await sendCodexRequest(turn.turnId, 'turn/start', turnStartParams)) as Record<string, unknown>;
+
+    const turnStartResult = (await sendWorkerRequest(worker, 'turn/start', turnStartParams)) as Record<string, unknown>;
     turn.codexTurnId = readNestedString(turnStartResult, ['turn', 'id']);
+
     await notifyApi(turn.turnId, 'turn.started', { threadId });
     await completionPromise;
   } catch (error: unknown) {
@@ -345,10 +302,98 @@ async function startCodexExecution(input: StartTurnBody): Promise<void> {
   }
 }
 
-async function resolveThreadId(turnId: string, preferredThreadId: string | null): Promise<string> {
+async function ensureCodexWorker(): Promise<CodexWorker> {
+  if (runnerBackend !== 'codex') {
+    throw new Error('Codex worker requested when backend is not codex');
+  }
+  if (codexWorkerPromise) {
+    return codexWorkerPromise;
+  }
+
+  codexWorkerPromise = (async () => {
+    const child = spawn(codexBin, ['app-server', '--listen', 'stdio://'], {
+      cwd: codexDefaultCwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: process.env,
+    });
+
+    const worker: CodexWorker = {
+      process: child,
+      nextRequestId: 1,
+      pendingRequests: new Map<number, PendingRequest>(),
+      notificationQueue: Promise.resolve(),
+      readyPromise: Promise.resolve(),
+      closed: false,
+    };
+
+    const stdoutReader = createInterface({ input: child.stdout });
+    stdoutReader.on('line', (line) => {
+      worker.notificationQueue = worker.notificationQueue
+        .then(async () => {
+          await handleWorkerMessage(worker, line);
+        })
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : 'unknown worker message error';
+          // eslint-disable-next-line no-console
+          console.error(`[codexpanel-runner] worker notification error: ${message}`);
+        });
+    });
+
+    child.stderr.on('data', (chunk) => {
+      const message = chunk.toString('utf8').trim();
+      if (message) {
+        // eslint-disable-next-line no-console
+        console.error(`[codexpanel-runner] codex stderr: ${message}`);
+      }
+    });
+
+    child.on('error', (error) => {
+      handleWorkerExit(worker, `Failed to start codex app-server: ${error.message}`);
+    });
+
+    child.on('close', (code, signal) => {
+      handleWorkerExit(worker, `codex app-server exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`);
+    });
+
+    worker.readyPromise = (async () => {
+      await sendWorkerRequest(worker, 'initialize', {
+        clientInfo: { name: 'codexpanel-runner', version: '0.1.0' },
+        capabilities: null,
+      });
+      sendWorkerNotification(worker, 'initialized', {});
+    })();
+
+    return worker;
+  })();
+
+  return codexWorkerPromise;
+}
+
+function handleWorkerExit(worker: CodexWorker, reason: string): void {
+  if (worker.closed) {
+    return;
+  }
+  worker.closed = true;
+
+  worker.pendingRequests.forEach(({ timeout, reject }) => {
+    clearTimeout(timeout);
+    reject(new Error(reason));
+  });
+  worker.pendingRequests.clear();
+
+  codexWorkerPromise = null;
+
+  activeTurns.forEach((turn) => {
+    if (turn.backend === 'codex' && !turn.finalized) {
+      void failTurn(turn.turnId, reason);
+    }
+  });
+}
+
+async function resolveThreadId(worker: CodexWorker, preferredThreadId: string | null): Promise<string> {
   if (preferredThreadId) {
     try {
-      await sendCodexRequest(turnId, 'thread/resume', {
+      await sendWorkerRequest(worker, 'thread/resume', {
         threadId: preferredThreadId,
         persistExtendedHistory: false,
       });
@@ -360,7 +405,7 @@ async function resolveThreadId(turnId: string, preferredThreadId: string | null)
     }
   }
 
-  const threadStartResult = (await sendCodexRequest(turnId, 'thread/start', {
+  const threadStartResult = (await sendWorkerRequest(worker, 'thread/start', {
     cwd: codexDefaultCwd,
     approvalPolicy: codexApprovalPolicy,
     sandbox: codexSandboxMode,
@@ -376,12 +421,7 @@ async function resolveThreadId(turnId: string, preferredThreadId: string | null)
   return threadId;
 }
 
-async function handleCodexMessage(turnId: string, line: string): Promise<void> {
-  const turn = activeTurns.get(turnId);
-  if (!turn || turn.backend !== 'codex') {
-    return;
-  }
-
+async function handleWorkerMessage(worker: CodexWorker, line: string): Promise<void> {
   const trimmed = line.trim();
   if (!trimmed) {
     return;
@@ -392,7 +432,7 @@ async function handleCodexMessage(turnId: string, line: string): Promise<void> {
     message = JSON.parse(trimmed) as unknown;
   } catch {
     // eslint-disable-next-line no-console
-    console.error(`[codexpanel-runner] invalid JSON from codex (${turnId}): ${trimmed}`);
+    console.error(`[codexpanel-runner] invalid JSON from codex worker: ${trimmed}`);
     return;
   }
 
@@ -402,7 +442,7 @@ async function handleCodexMessage(turnId: string, line: string): Promise<void> {
 
   const record = message as Record<string, unknown>;
   if (typeof record.id === 'number' && ('result' in record || 'error' in record)) {
-    resolveCodexRequest(turnId, record);
+    resolveWorkerRequest(worker, record);
     return;
   }
 
@@ -411,17 +451,68 @@ async function handleCodexMessage(turnId: string, line: string): Promise<void> {
     return;
   }
   const params = (record.params ?? {}) as Record<string, unknown>;
-  await handleCodexNotification(turnId, method, params);
+  await handleCodexNotification(method, params);
 }
 
-async function handleCodexNotification(turnId: string, method: string, params: Record<string, unknown>): Promise<void> {
-  const turn = activeTurns.get(turnId);
-  if (!turn || turn.backend !== 'codex' || turn.finalized) {
+async function sendWorkerRequest(worker: CodexWorker, method: string, params: unknown): Promise<unknown> {
+  if (worker.closed || !worker.process.stdin.writable) {
+    throw new Error(`codex worker unavailable for request: ${method}`);
+  }
+
+  const id = worker.nextRequestId++;
+  const payload = JSON.stringify({ id, method, params });
+
+  const response = new Promise<unknown>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      worker.pendingRequests.delete(id);
+      reject(new Error(`codex request timeout: ${method}`));
+    }, 15000);
+    worker.pendingRequests.set(id, { resolve, reject, timeout });
+  });
+
+  worker.process.stdin.write(`${payload}\n`);
+  return response;
+}
+
+function sendWorkerNotification(worker: CodexWorker, method: string, params: unknown): void {
+  if (worker.closed || !worker.process.stdin.writable) {
+    return;
+  }
+  worker.process.stdin.write(`${JSON.stringify({ method, params })}\n`);
+}
+
+function resolveWorkerRequest(worker: CodexWorker, message: Record<string, unknown>): void {
+  const id = message.id;
+  if (typeof id !== 'number') {
     return;
   }
 
+  const pending = worker.pendingRequests.get(id);
+  if (!pending) {
+    return;
+  }
+  clearTimeout(pending.timeout);
+  worker.pendingRequests.delete(id);
+
+  if ('error' in message && message.error) {
+    const errorMessage = readNestedString(message, ['error', 'message']) || 'codex request failed';
+    pending.reject(new Error(errorMessage));
+    return;
+  }
+  pending.resolve(message.result);
+}
+
+async function handleCodexNotification(method: string, params: Record<string, unknown>): Promise<void> {
   if (method === 'turn/started') {
+    const threadId = readNestedString(params, ['threadId']);
     const codexTurnId = readNestedString(params, ['turn', 'id']);
+    if (!threadId) {
+      return;
+    }
+    const turn = findTurnByThread(threadId, codexTurnId);
+    if (!turn || turn.finalized) {
+      return;
+    }
     if (codexTurnId) {
       turn.codexTurnId = codexTurnId;
     }
@@ -429,15 +520,35 @@ async function handleCodexNotification(turnId: string, method: string, params: R
   }
 
   if (method === 'item/agentMessage/delta') {
+    const threadId = readNestedString(params, ['threadId']);
+    const codexTurnId = readNestedString(params, ['turnId']);
     const delta = readNestedString(params, ['delta']);
-    if (delta) {
-      turn.assistantText += delta;
-      await notifyApi(turnId, 'assistant.delta', { text: delta });
+    if (!threadId || !delta) {
+      return;
     }
+    const turn = findTurnByThread(threadId, codexTurnId);
+    if (!turn || turn.finalized) {
+      return;
+    }
+    if (codexTurnId && !turn.codexTurnId) {
+      turn.codexTurnId = codexTurnId;
+    }
+    turn.assistantText += delta;
+    await notifyApi(turn.turnId, 'assistant.delta', { text: delta });
     return;
   }
 
   if (method === 'item/completed') {
+    const threadId = readNestedString(params, ['threadId']);
+    const codexTurnId = readNestedString(params, ['turnId']);
+    if (!threadId) {
+      return;
+    }
+    const turn = findTurnByThread(threadId, codexTurnId);
+    if (!turn || turn.finalized) {
+      return;
+    }
+
     const itemType = readNestedString(params, ['item', 'type']);
     if (itemType === 'agentMessage') {
       const text = readNestedString(params, ['item', 'text']);
@@ -449,83 +560,62 @@ async function handleCodexNotification(turnId: string, method: string, params: R
   }
 
   if (method === 'turn/completed') {
+    const threadId = readNestedString(params, ['threadId']);
+    const codexTurnId = readNestedString(params, ['turn', 'id']);
+    if (!threadId) {
+      return;
+    }
+    const turn = findTurnByThread(threadId, codexTurnId);
+    if (!turn || turn.finalized) {
+      return;
+    }
+
     const status = readNestedString(params, ['turn', 'status']);
     if (status === 'failed') {
       const message = readNestedString(params, ['turn', 'error', 'message']) || 'Codex turn failed';
-      await finalizeTurn(turnId, 'turn.failed', { message });
+      await finalizeTurn(turn.turnId, 'turn.failed', { message });
       return;
     }
     if (status === 'interrupted') {
-      await finalizeTurn(turnId, 'turn.cancelled', {});
+      await finalizeTurn(turn.turnId, 'turn.cancelled', {});
       return;
     }
 
     const content = turn.assistantText || extractAssistantTextFromTurn(params) || '(no assistant output)';
-    await finalizeTurn(turnId, 'turn.completed', { content });
+    await finalizeTurn(turn.turnId, 'turn.completed', { content });
     return;
   }
 
   if (method === 'error') {
+    const threadId = readNestedString(params, ['threadId']);
+    const codexTurnId = readNestedString(params, ['turnId']);
+    if (!threadId) {
+      return;
+    }
+    const turn = findTurnByThread(threadId, codexTurnId);
+    if (!turn || turn.finalized) {
+      return;
+    }
+
     const message = readNestedString(params, ['error', 'message']) || 'Codex runner error';
-    await finalizeTurn(turnId, 'turn.failed', { message });
+    await finalizeTurn(turn.turnId, 'turn.failed', { message });
   }
 }
 
-async function sendCodexRequest(turnId: string, method: string, params: unknown): Promise<unknown> {
-  const turn = activeTurns.get(turnId);
-  if (!turn || turn.backend !== 'codex' || turn.finalized) {
-    throw new Error('Turn not active');
+function findTurnByThread(threadId: string, codexTurnId: string | null): ActiveCodexTurn | null {
+  let fallback: ActiveCodexTurn | null = null;
+  for (const turn of activeTurns.values()) {
+    if (turn.backend !== 'codex' || turn.finalized || turn.threadId !== threadId) {
+      continue;
+    }
+    if (codexTurnId && turn.codexTurnId === codexTurnId) {
+      return turn;
+    }
+    if (!fallback) {
+      fallback = turn;
+    }
   }
-  if (!turn.process.stdin.writable) {
-    throw new Error(`codex stdin not writable for request: ${method}`);
-  }
-
-  const id = turn.nextRequestId++;
-  const payload = JSON.stringify({ id, method, params });
-
-  const response = new Promise<unknown>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      turn.pendingRequests.delete(id);
-      reject(new Error(`codex request timeout: ${method}`));
-    }, 15000);
-    turn.pendingRequests.set(id, { resolve, reject, timeout });
-  });
-
-  turn.process.stdin.write(`${payload}\n`);
-  return response;
-}
-
-function sendCodexNotification(turnId: string, method: string, params: unknown): void {
-  const turn = activeTurns.get(turnId);
-  if (!turn || turn.backend !== 'codex' || turn.finalized || !turn.process.stdin.writable) {
-    return;
-  }
-  turn.process.stdin.write(`${JSON.stringify({ method, params })}\n`);
-}
-
-function resolveCodexRequest(turnId: string, message: Record<string, unknown>): void {
-  const turn = activeTurns.get(turnId);
-  if (!turn || turn.backend !== 'codex') {
-    return;
-  }
-
-  const id = message.id;
-  if (typeof id !== 'number') {
-    return;
-  }
-  const pending = turn.pendingRequests.get(id);
-  if (!pending) {
-    return;
-  }
-  clearTimeout(pending.timeout);
-  turn.pendingRequests.delete(id);
-
-  if ('error' in message && message.error) {
-    const errorMessage = readNestedString(message, ['error', 'message']) || 'codex request failed';
-    pending.reject(new Error(errorMessage));
-    return;
-  }
-  pending.resolve(message.result);
+  return fallback;
 }
 
 async function failTurn(turnId: string, message: string): Promise<void> {
@@ -543,12 +633,6 @@ async function finalizeTurn(turnId: string, type: RunnerEventType, payload: Reco
   if (turn.backend === 'mock') {
     clearTurnTimers(turn.timers);
   } else {
-    turn.pendingRequests.forEach(({ timeout, reject }, requestId) => {
-      clearTimeout(timeout);
-      reject(new Error(`Turn ended before request ${requestId} resolved`));
-    });
-    turn.pendingRequests.clear();
-    turn.process.kill('SIGTERM');
     turn.completionResolve?.();
   }
 
@@ -568,7 +652,8 @@ async function cancelActiveTurn(turn: ActiveTurn, options: { emitCancelEvent: bo
 
   if (turn.threadId && turn.codexTurnId) {
     try {
-      await sendCodexRequest(turn.turnId, 'turn/interrupt', {
+      const worker = await ensureCodexWorker();
+      await sendWorkerRequest(worker, 'turn/interrupt', {
         threadId: turn.threadId,
         turnId: turn.codexTurnId,
       });
@@ -589,12 +674,6 @@ function silentlyDisposeTurn(turn: ActiveTurn): void {
     clearTurnTimers(turn.timers);
     return;
   }
-  turn.pendingRequests.forEach(({ timeout, reject }, requestId) => {
-    clearTimeout(timeout);
-    reject(new Error(`Turn replaced before request ${requestId} resolved`));
-  });
-  turn.pendingRequests.clear();
-  turn.process.kill('SIGTERM');
   turn.completionResolve?.();
 }
 

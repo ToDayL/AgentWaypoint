@@ -135,6 +135,7 @@ Codex backend env options:
 - [Codex App Server Notes](./doc/Codex-App-Server-Documentation.md)
 - [v1 Tech Stack and Repo Structure](./doc/V1-Tech-Stack-and-Repo-Structure.md)
 - [Development Workflow](./doc/Development-Workflow.md)
+- [Runner Design Decisions](./doc/Runner-Design-Decisions.md)
 - [Implementation Plan](./doc/Implementation-Plan.md)
 - [Implementation Progress](./doc/Implementation-Progress.md)
 
