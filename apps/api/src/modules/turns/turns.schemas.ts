@@ -12,9 +12,30 @@ export const CreateTurnBodySchema = z.object({
   content: z.string().trim().min(1).max(10000),
 });
 
+const ApprovalDecisionSchema = z.union([
+  z.enum(['approve', 'reject', 'accept', 'acceptForSession', 'decline', 'cancel']),
+  z
+    .object({
+      acceptWithExecpolicyAmendment: z.object({
+        execpolicy_amendment: z.array(z.string().trim().min(1)).min(1),
+      }),
+    })
+    .strict(),
+  z
+    .object({
+      applyNetworkPolicyAmendment: z.object({
+        network_policy_amendment: z.object({
+          action: z.enum(['allow', 'deny']),
+          host: z.string().trim().min(1),
+        }),
+      }),
+    })
+    .strict(),
+]);
+
 export const ResolveTurnApprovalBodySchema = z.object({
   approvalId: z.string().trim().min(1),
-  decision: z.enum(['approve', 'reject']),
+  decision: ApprovalDecisionSchema,
 });
 
 export const StreamTurnQuerySchema = z.object({

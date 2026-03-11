@@ -18,7 +18,24 @@ type CancelTurnBody = {
 type ResolveApprovalBody = {
   turnId: string;
   requestId: string;
-  decision: 'approve' | 'reject';
+  decision:
+    | 'accept'
+    | 'acceptForSession'
+    | 'decline'
+    | 'cancel'
+    | {
+        acceptWithExecpolicyAmendment: {
+          execpolicy_amendment: string[];
+        };
+      }
+    | {
+        applyNetworkPolicyAmendment: {
+          network_policy_amendment: {
+            action: 'allow' | 'deny';
+            host: string;
+          };
+        };
+      };
 };
 
 type RunnerEventType =
@@ -258,15 +275,11 @@ function parseResolveApprovalBody(input: unknown): ResolveApprovalBody {
     throw new Error('Invalid approval payload');
   }
   const record = input as Record<string, unknown>;
-  const decision = readNonEmptyString(record.decision, 'decision');
-  if (decision !== 'approve' && decision !== 'reject') {
-    throw new Error('decision must be approve or reject');
-  }
 
   return {
     turnId: readNonEmptyString(record.turnId, 'turnId'),
     requestId: readNonEmptyString(record.requestId, 'requestId'),
-    decision,
+    decision: parseApprovalDecision(record.decision),
   };
 }
 
@@ -838,7 +851,7 @@ async function finalizeTurn(turnId: string, type: RunnerEventType, payload: Reco
     return;
   }
   turn.finalized = true;
-  await disposePendingApprovalsForTurn(turnId, 'reject');
+  await disposePendingApprovalsForTurn(turnId, 'decline');
   activeTurns.delete(turnId);
 
   if (turn.backend === 'mock') {
@@ -880,7 +893,7 @@ function silentlyDisposeTurn(turn: ActiveTurn): void {
     return;
   }
   turn.finalized = true;
-  void disposePendingApprovalsForTurn(turn.turnId, 'reject');
+  void disposePendingApprovalsForTurn(turn.turnId, 'decline');
   activeTurns.delete(turn.turnId);
   if (turn.backend === 'mock') {
     clearTurnTimers(turn.timers);
@@ -970,11 +983,11 @@ async function resolvePendingApproval(input: ResolveApprovalBody): Promise<void>
   pendingApprovalRequests.delete(input.requestId);
   await notifyApi(input.turnId, 'turn.approval.resolved', {
     requestId: input.requestId,
-    decision: input.decision,
+    decision: describeApprovalDecision(input.decision),
   });
 }
 
-async function disposePendingApprovalsForTurn(turnId: string, decision: 'approve' | 'reject'): Promise<void> {
+async function disposePendingApprovalsForTurn(turnId: string, decision: 'decline' | 'cancel'): Promise<void> {
   const pendingIds = [...pendingApprovalRequests.values()]
     .filter((entry) => entry.turnId === turnId)
     .map((entry) => entry.requestId);
@@ -989,7 +1002,7 @@ async function disposePendingApprovalsForTurn(turnId: string, decision: 'approve
     pendingApprovalRequests.delete(requestId);
     await notifyApi(turnId, 'turn.approval.resolved', {
       requestId,
-      decision,
+      decision: describeApprovalDecision(decision),
     });
   }
 }
@@ -1030,6 +1043,14 @@ function buildApprovalRequestedPayload(
       availableDecisions: Array.isArray(params.availableDecisions) ? params.availableDecisions : [],
       additionalPermissions: readOptionalObject(params.additionalPermissions),
       networkApprovalContext: readOptionalObject(params.networkApprovalContext),
+      proposedExecpolicyAmendment: Array.isArray(params.proposedExecpolicyAmendment)
+        ? params.proposedExecpolicyAmendment
+        : [],
+      proposedNetworkPolicyAmendments: Array.isArray(params.proposedNetworkPolicyAmendments)
+        ? params.proposedNetworkPolicyAmendments
+        : [],
+      commandActions: Array.isArray(params.commandActions) ? params.commandActions : [],
+      skillMetadata: readOptionalObject(params.skillMetadata),
     };
   }
 
@@ -1092,23 +1113,100 @@ function buildToolOutputPayload(method: string, params: Record<string, unknown>)
 function buildApprovalResponse(
   method: PendingApprovalRequest['method'],
   params: Record<string, unknown>,
-  decision: 'approve' | 'reject',
+  decision: ResolveApprovalBody['decision'],
 ): Record<string, unknown> {
   if (method === 'item/commandExecution/requestApproval') {
     return {
-      decision: decision === 'approve' ? 'accept' : 'decline',
+      decision: normalizeCommandApprovalDecision(decision),
     };
   }
 
   if (method === 'item/fileChange/requestApproval') {
     return {
-      decision: decision === 'approve' ? 'accept' : 'decline',
+      decision: normalizeSimpleApprovalDecision(decision) === 'accept' ? 'accept' : 'decline',
     };
   }
 
   return {
-    permissions: decision === 'approve' ? readOptionalObject(params.permissions) ?? {} : {},
+    permissions: normalizeSimpleApprovalDecision(decision) === 'accept' ? readOptionalObject(params.permissions) ?? {} : {},
   };
+}
+
+function parseApprovalDecision(input: unknown): ResolveApprovalBody['decision'] {
+  if (typeof input === 'string') {
+    const value = input.trim();
+    if (value === 'approve') return 'accept';
+    if (value === 'reject') return 'decline';
+    if (value === 'accept' || value === 'acceptForSession' || value === 'decline' || value === 'cancel') {
+      return value;
+    }
+    throw new Error('Unsupported approval decision');
+  }
+
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Unsupported approval decision');
+  }
+
+  const record = input as Record<string, unknown>;
+  const execPolicy = record.acceptWithExecpolicyAmendment;
+  if (execPolicy && typeof execPolicy === 'object' && !Array.isArray(execPolicy)) {
+    const entries = (execPolicy as Record<string, unknown>).execpolicy_amendment;
+    if (!Array.isArray(entries) || entries.length === 0 || entries.some((entry) => typeof entry !== 'string' || entry.trim().length === 0)) {
+      throw new Error('acceptWithExecpolicyAmendment requires a non-empty execpolicy_amendment array');
+    }
+    return {
+      acceptWithExecpolicyAmendment: {
+        execpolicy_amendment: entries.map((entry) => String(entry).trim()),
+      },
+    };
+  }
+
+  const networkPolicy = record.applyNetworkPolicyAmendment;
+  if (networkPolicy && typeof networkPolicy === 'object' && !Array.isArray(networkPolicy)) {
+    const amendment = (networkPolicy as Record<string, unknown>).network_policy_amendment;
+    if (!amendment || typeof amendment !== 'object' || Array.isArray(amendment)) {
+      throw new Error('applyNetworkPolicyAmendment requires network_policy_amendment');
+    }
+    const action = readNonEmptyString((amendment as Record<string, unknown>).action, 'network_policy_amendment.action');
+    const host = readNonEmptyString((amendment as Record<string, unknown>).host, 'network_policy_amendment.host');
+    if (action !== 'allow' && action !== 'deny') {
+      throw new Error('network_policy_amendment.action must be allow or deny');
+    }
+    return {
+      applyNetworkPolicyAmendment: {
+        network_policy_amendment: {
+          action,
+          host,
+        },
+      },
+    };
+  }
+
+  throw new Error('Unsupported approval decision');
+}
+
+function normalizeCommandApprovalDecision(decision: ResolveApprovalBody['decision']): unknown {
+  if (typeof decision === 'string') {
+    return decision;
+  }
+  return decision;
+}
+
+function normalizeSimpleApprovalDecision(decision: ResolveApprovalBody['decision']): 'accept' | 'decline' {
+  if (typeof decision === 'string') {
+    return decision === 'accept' || decision === 'acceptForSession' ? 'accept' : 'decline';
+  }
+  return 'accept';
+}
+
+function describeApprovalDecision(decision: ResolveApprovalBody['decision']): string {
+  if (typeof decision === 'string') {
+    return decision;
+  }
+  if ('acceptWithExecpolicyAmendment' in decision) {
+    return `acceptWithExecpolicyAmendment:${decision.acceptWithExecpolicyAmendment.execpolicy_amendment.join(',')}`;
+  }
+  return `applyNetworkPolicyAmendment:${decision.applyNetworkPolicyAmendment.network_policy_amendment.action}:${decision.applyNetworkPolicyAmendment.network_policy_amendment.host}`;
 }
 
 function readOptionalPayloadString(value: unknown): string | null {

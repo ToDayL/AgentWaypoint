@@ -10,10 +10,29 @@ export type CancelTurnInput = {
   turnId: string;
 };
 
+export type ApprovalDecisionInput =
+  | 'accept'
+  | 'acceptForSession'
+  | 'decline'
+  | 'cancel'
+  | {
+      acceptWithExecpolicyAmendment: {
+        execpolicy_amendment: string[];
+      };
+    }
+  | {
+      applyNetworkPolicyAmendment: {
+        network_policy_amendment: {
+          action: 'allow' | 'deny';
+          host: string;
+        };
+      };
+    };
+
 export type ResolveTurnApprovalInput = {
   turnId: string;
   requestId: string;
-  decision: 'approve' | 'reject';
+  decision: ApprovalDecisionInput;
 };
 
 export interface RunnerAdapter {

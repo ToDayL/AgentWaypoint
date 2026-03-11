@@ -73,6 +73,32 @@ type PendingApproval = {
   payload: Record<string, unknown>;
 };
 
+type ApprovalDecisionInput =
+  | 'accept'
+  | 'acceptForSession'
+  | 'decline'
+  | 'cancel'
+  | {
+      acceptWithExecpolicyAmendment: {
+        execpolicy_amendment: string[];
+      };
+    }
+  | {
+      applyNetworkPolicyAmendment: {
+        network_policy_amendment: {
+          action: 'allow' | 'deny';
+          host: string;
+        };
+      };
+    };
+
+type ApprovalActionOption = {
+  key: string;
+  label: string;
+  decision: ApprovalDecisionInput;
+  secondary?: boolean;
+};
+
 const STREAM_EVENTS = [
   'turn.started',
   'assistant.delta',
@@ -196,7 +222,7 @@ export default function HomePage() {
       setSessions(items);
       if (items[0]) {
         setSelectedSessionId(items[0].id);
-        await loadSessionHistory(items[0].id, { resumeStream: true });
+        await loadSessionHistory(items[0].id, { resumeStream: true, resetEventLog: true });
       } else {
         setSelectedSessionId('');
         setMessages([]);
@@ -256,7 +282,7 @@ export default function HomePage() {
       });
       await loadSessions(selectedProjectId);
       setSelectedSessionId(created.id);
-      await loadSessionHistory(created.id, { resumeStream: true });
+      await loadSessionHistory(created.id, { resumeStream: true, resetEventLog: true });
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
@@ -289,7 +315,7 @@ export default function HomePage() {
 
       setActiveTurnId(result.turnId);
       setTurnStatus(result.status);
-      await loadSessionHistory(selectedSessionId, { resumeStream: false });
+      await loadSessionHistory(selectedSessionId, { resumeStream: false, resetEventLog: false });
       openStream(result.turnId, selectedSessionId);
       setPrompt('');
     } catch (requestError) {
@@ -313,7 +339,7 @@ export default function HomePage() {
         email,
       });
       setTurnStatus(cancelled.status);
-      await loadSessionHistory(selectedSessionId, { resumeStream: false });
+      await loadSessionHistory(selectedSessionId, { resumeStream: false, resetEventLog: false });
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
@@ -321,7 +347,7 @@ export default function HomePage() {
     }
   }
 
-  async function handleResolveApproval(decision: 'approve' | 'reject'): Promise<void> {
+  async function handleResolveApproval(decision: ApprovalDecisionInput): Promise<void> {
     if (!activeTurnId || !pendingApproval) {
       return;
     }
@@ -345,7 +371,10 @@ export default function HomePage() {
     }
   }
 
-  async function loadSessionHistory(sessionId: string, options: { resumeStream: boolean }): Promise<void> {
+  async function loadSessionHistory(
+    sessionId: string,
+    options: { resumeStream: boolean; resetEventLog: boolean },
+  ): Promise<void> {
     if (!sessionId) {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
@@ -360,7 +389,9 @@ export default function HomePage() {
       setResumedTurnHint('');
       setTurnStatus('idle');
       setPendingApproval(null);
-      setEventLog([]);
+      if (options.resetEventLog) {
+        setEventLog([]);
+      }
       return;
     }
 
@@ -382,7 +413,9 @@ export default function HomePage() {
       setLatestPlan('');
       setToolOutput('');
       setDiffSummary('');
-      setEventLog([]);
+      if (options.resetEventLog) {
+        setEventLog([]);
+      }
       if (history.activeTurnId) {
         await syncTurnState(history.activeTurnId);
       }
@@ -484,7 +517,7 @@ export default function HomePage() {
           setReasoningText('');
           stopTurnStatusPolling();
           if (sessionId) {
-            void loadSessionHistory(sessionId, { resumeStream: false });
+            void loadSessionHistory(sessionId, { resumeStream: false, resetEventLog: false });
           }
           source.close();
           eventSourceRef.current = null;
@@ -531,7 +564,7 @@ export default function HomePage() {
             setPendingApproval(null);
             setReasoningText('');
             if (sessionId) {
-              await loadSessionHistory(sessionId, { resumeStream: false });
+              await loadSessionHistory(sessionId, { resumeStream: false, resetEventLog: false });
             }
           }
         } catch (requestError) {
@@ -627,7 +660,7 @@ export default function HomePage() {
                 onChange={(event) => {
                   const value = event.target.value;
                   setSelectedSessionId(value);
-                  void loadSessionHistory(value, { resumeStream: true });
+                  void loadSessionHistory(value, { resumeStream: true, resetEventLog: true });
                 }}
               >
                 <option value="">Select a session</option>
@@ -692,18 +725,26 @@ export default function HomePage() {
                   Working directory: <code>{pendingApproval.payload.cwd}</code>
                 </p>
               ) : null}
+              {Array.isArray(pendingApproval.payload.proposedExecpolicyAmendment) &&
+              pendingApproval.payload.proposedExecpolicyAmendment.length > 0 ? (
+                <p>Exec policy amendment available.</p>
+              ) : null}
+              {Array.isArray(pendingApproval.payload.proposedNetworkPolicyAmendments) &&
+              pendingApproval.payload.proposedNetworkPolicyAmendments.length > 0 ? (
+                <p>Network policy amendment available.</p>
+              ) : null}
               <div className="sim-actions sim-actions-approval">
-                <button type="button" onClick={() => void handleResolveApproval('approve')} disabled={busy}>
-                  Approve
-                </button>
-                <button
-                  type="button"
-                  className="button-secondary"
-                  onClick={() => void handleResolveApproval('reject')}
-                  disabled={busy}
-                >
-                  Reject
-                </button>
+                {getApprovalActionOptions(pendingApproval).map((option) => (
+                  <button
+                    key={option.key}
+                    type="button"
+                    className={option.secondary ? 'button-secondary' : undefined}
+                    onClick={() => void handleResolveApproval(option.decision)}
+                    disabled={busy}
+                  >
+                    {option.label}
+                  </button>
+                ))}
               </div>
             </article>
           ) : null}
@@ -901,4 +942,105 @@ function formatDiffPayload(payload: Record<string, unknown>): string {
     return 'Diff update available.';
   }
   return '';
+}
+
+function getApprovalActionOptions(approval: PendingApproval): ApprovalActionOption[] {
+  if (approval.kind !== 'command_execution') {
+    return [
+      { key: 'accept', label: 'Approve', decision: 'accept' },
+      { key: 'decline', label: 'Reject', decision: 'decline', secondary: true },
+    ];
+  }
+
+  const options: ApprovalActionOption[] = [];
+  const available = normalizeAvailableDecisions(approval.payload.availableDecisions);
+  const allowed = new Set(available);
+
+  if (allowed.size === 0 || allowed.has('accept')) {
+    options.push({ key: 'accept', label: 'Approve', decision: 'accept' });
+  }
+  if (allowed.has('acceptForSession')) {
+    options.push({ key: 'acceptForSession', label: 'Approve for Session', decision: 'acceptForSession' });
+  }
+
+  const execPolicy = readExecpolicyAmendment(approval.payload.proposedExecpolicyAmendment);
+  if (execPolicy.length > 0) {
+    options.push({
+      key: 'execpolicy',
+      label: 'Approve + Remember Rule',
+      decision: {
+        acceptWithExecpolicyAmendment: {
+          execpolicy_amendment: execPolicy,
+        },
+      },
+    });
+  }
+
+  const networkPolicies = readNetworkPolicyAmendments(approval.payload.proposedNetworkPolicyAmendments);
+  networkPolicies.forEach((policy, index) => {
+    options.push({
+      key: `network-${index}`,
+      label: `${policy.action === 'allow' ? 'Allow' : 'Deny'} ${policy.host}`,
+      decision: {
+        applyNetworkPolicyAmendment: {
+          network_policy_amendment: policy,
+        },
+      },
+    });
+  });
+
+  if (allowed.size === 0 || allowed.has('decline')) {
+    options.push({ key: 'decline', label: 'Reject', decision: 'decline', secondary: true });
+  }
+  if (allowed.has('cancel')) {
+    options.push({ key: 'cancel', label: 'Reject + Cancel Turn', decision: 'cancel', secondary: true });
+  }
+
+  return options;
+}
+
+function normalizeAvailableDecisions(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry) => {
+    if (typeof entry === 'string') {
+      return [entry];
+    }
+    if (!entry || typeof entry !== 'object') {
+      return [];
+    }
+    if ('acceptWithExecpolicyAmendment' in entry) {
+      return ['acceptWithExecpolicyAmendment'];
+    }
+    if ('applyNetworkPolicyAmendment' in entry) {
+      return ['applyNetworkPolicyAmendment'];
+    }
+    return [];
+  });
+}
+
+function readExecpolicyAmendment(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+}
+
+function readNetworkPolicyAmendments(value: unknown): Array<{ action: 'allow' | 'deny'; host: string }> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      return [];
+    }
+    const record = entry as Record<string, unknown>;
+    const action = record.action;
+    const host = record.host;
+    if ((action === 'allow' || action === 'deny') && typeof host === 'string' && host.trim().length > 0) {
+      return [{ action, host: host.trim() }];
+    }
+    return [];
+  });
 }

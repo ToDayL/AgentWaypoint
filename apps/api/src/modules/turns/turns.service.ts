@@ -158,7 +158,7 @@ export class TurnsService implements OnModuleInit {
     await this.runnerAdapter.resolveTurnApproval({
       turnId,
       requestId: approval.requestId,
-      decision: input.decision,
+      decision: normalizeApprovalDecisionInput(input.decision),
     });
 
     return this.getTurnStatusForUser(userId, turnId);
@@ -312,7 +312,7 @@ export class TurnsService implements OnModuleInit {
           await tx.turnApproval.updateMany({
             where: { turnId, requestId, status: 'pending' },
             data: {
-              status: decision === 'approve' ? 'approved' : 'rejected',
+              status: isApprovalAccepted(decision) ? 'approved' : 'rejected',
               decision,
               resolvedAt: new Date(),
             },
@@ -533,4 +533,24 @@ export class TurnsService implements OnModuleInit {
       payload: (approval.payload as Record<string, unknown>) ?? {},
     };
   }
+}
+
+function isApprovalAccepted(decision: string): boolean {
+  return (
+    decision === 'approve' ||
+    decision === 'accept' ||
+    decision === 'acceptForSession' ||
+    decision.startsWith('acceptWithExecpolicyAmendment') ||
+    decision.startsWith('applyNetworkPolicyAmendment')
+  );
+}
+
+function normalizeApprovalDecisionInput(decision: ResolveTurnApprovalBody['decision']) {
+  if (decision === 'approve') {
+    return 'accept' as const;
+  }
+  if (decision === 'reject') {
+    return 'decline' as const;
+  }
+  return decision;
 }
