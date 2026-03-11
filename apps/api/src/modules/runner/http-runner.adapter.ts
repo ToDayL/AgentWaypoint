@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { CancelTurnInput, RunnerAdapter, StartTurnInput } from './runner.types';
+import { CancelTurnInput, ResolveTurnApprovalInput, RunnerAdapter, StartTurnInput } from './runner.types';
 
 type RunnerHttpRequestOptions = {
   method: 'POST';
@@ -40,6 +40,18 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       path: '/runner/turns/cancel',
       body: {
         turnId: input.turnId,
+      },
+    });
+  }
+
+  async resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void> {
+    await this.request({
+      method: 'POST',
+      path: '/runner/turns/approval',
+      body: {
+        turnId: input.turnId,
+        requestId: input.requestId,
+        decision: input.decision,
       },
     });
   }

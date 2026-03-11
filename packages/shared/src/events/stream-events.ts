@@ -1,6 +1,8 @@
 export type StreamEventType =
   | 'turn.started'
   | 'assistant.delta'
+  | 'turn.approval.requested'
+  | 'turn.approval.resolved'
   | 'tool.started'
   | 'tool.output'
   | 'tool.completed'

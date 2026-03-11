@@ -15,7 +15,20 @@ type CancelTurnBody = {
   turnId: string;
 };
 
-type RunnerEventType = 'turn.started' | 'assistant.delta' | 'turn.completed' | 'turn.failed' | 'turn.cancelled';
+type ResolveApprovalBody = {
+  turnId: string;
+  requestId: string;
+  decision: 'approve' | 'reject';
+};
+
+type RunnerEventType =
+  | 'turn.started'
+  | 'assistant.delta'
+  | 'turn.approval.requested'
+  | 'turn.approval.resolved'
+  | 'turn.completed'
+  | 'turn.failed'
+  | 'turn.cancelled';
 type RunnerBackend = 'codex' | 'mock';
 
 const port = Number(process.env.RUNNER_PORT ?? 4700);
@@ -60,6 +73,15 @@ type PendingRequest = {
   timeout: ReturnType<typeof setTimeout>;
 };
 
+type PendingApprovalRequest = {
+  worker: CodexWorker;
+  rawRequestId: string | number;
+  requestId: string;
+  turnId: string;
+  method: 'item/commandExecution/requestApproval' | 'item/fileChange/requestApproval' | 'item/permissions/requestApproval';
+  params: Record<string, unknown>;
+};
+
 type CodexWorker = {
   process: ChildProcessWithoutNullStreams;
   nextRequestId: number;
@@ -70,6 +92,7 @@ type CodexWorker = {
 };
 
 const activeTurns = new Map<string, ActiveTurn>();
+const pendingApprovalRequests = new Map<string, PendingApprovalRequest>();
 let codexWorkerPromise: Promise<CodexWorker> | null = null;
 
 const server = createServer(async (request, response) => {
@@ -148,6 +171,16 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (request.url === '/runner/turns/approval') {
+      const payload = parseResolveApprovalBody(await readJsonBody(request));
+      await resolvePendingApproval(payload);
+      sendJson(response, 202, {
+        accepted: true,
+        runnerRequestId: randomUUID(),
+      });
+      return;
+    }
+
     sendJson(response, 404, {
       error: { code: 'NOT_FOUND', message: 'Route not found' },
     });
@@ -211,6 +244,23 @@ function parseCancelTurnBody(input: unknown): CancelTurnBody {
   const record = input as Record<string, unknown>;
   return {
     turnId: readNonEmptyString(record.turnId, 'turnId'),
+  };
+}
+
+function parseResolveApprovalBody(input: unknown): ResolveApprovalBody {
+  if (!input || typeof input !== 'object') {
+    throw new Error('Invalid approval payload');
+  }
+  const record = input as Record<string, unknown>;
+  const decision = readNonEmptyString(record.decision, 'decision');
+  if (decision !== 'approve' && decision !== 'reject') {
+    throw new Error('decision must be approve or reject');
+  }
+
+  return {
+    turnId: readNonEmptyString(record.turnId, 'turnId'),
+    requestId: readNonEmptyString(record.requestId, 'requestId'),
+    decision,
   };
 }
 
@@ -452,6 +502,11 @@ async function handleWorkerMessage(worker: CodexWorker, line: string): Promise<v
     return;
   }
 
+  if ((typeof record.id === 'number' || typeof record.id === 'string') && typeof record.method === 'string') {
+    await handleServerRequest(worker, record);
+    return;
+  }
+
   const method = record.method;
   if (typeof method !== 'string') {
     return;
@@ -608,6 +663,55 @@ async function handleCodexNotification(method: string, params: Record<string, un
   }
 }
 
+async function handleServerRequest(worker: CodexWorker, message: Record<string, unknown>): Promise<void> {
+  const rawRequestId = message.id;
+  if (typeof rawRequestId !== 'number' && typeof rawRequestId !== 'string') {
+    return;
+  }
+
+  const method = message.method;
+  if (
+    method !== 'item/commandExecution/requestApproval' &&
+    method !== 'item/fileChange/requestApproval' &&
+    method !== 'item/permissions/requestApproval'
+  ) {
+    respondToServerRequest(worker, rawRequestId, { error: { message: `Unsupported server request: ${String(method)}` } });
+    return;
+  }
+
+  const params = message.params;
+  if (!params || typeof params !== 'object') {
+    respondToServerRequest(worker, rawRequestId, { error: { message: 'Server request params must be an object' } });
+    return;
+  }
+
+  const paramsRecord = params as Record<string, unknown>;
+  const threadId = readNestedString(paramsRecord, ['threadId']);
+  const codexTurnId = readNestedString(paramsRecord, ['turnId']);
+  if (!threadId) {
+    respondToServerRequest(worker, rawRequestId, { error: { message: 'Approval request missing threadId' } });
+    return;
+  }
+
+  const turn = findTurnByThread(threadId, codexTurnId);
+  if (!turn || turn.finalized) {
+    respondToServerRequest(worker, rawRequestId, { error: { message: 'Approval request turn is no longer active' } });
+    return;
+  }
+
+  const requestId = String(rawRequestId);
+  pendingApprovalRequests.set(requestId, {
+    worker,
+    rawRequestId,
+    requestId,
+    turnId: turn.turnId,
+    method,
+    params: paramsRecord,
+  });
+
+  await notifyApi(turn.turnId, 'turn.approval.requested', buildApprovalRequestedPayload(requestId, method, paramsRecord));
+}
+
 function findTurnByThread(threadId: string, codexTurnId: string | null): ActiveCodexTurn | null {
   let fallback: ActiveCodexTurn | null = null;
   for (const turn of activeTurns.values()) {
@@ -634,6 +738,7 @@ async function finalizeTurn(turnId: string, type: RunnerEventType, payload: Reco
     return;
   }
   turn.finalized = true;
+  await disposePendingApprovalsForTurn(turnId, 'reject');
   activeTurns.delete(turnId);
 
   if (turn.backend === 'mock') {
@@ -675,6 +780,7 @@ function silentlyDisposeTurn(turn: ActiveTurn): void {
     return;
   }
   turn.finalized = true;
+  void disposePendingApprovalsForTurn(turn.turnId, 'reject');
   activeTurns.delete(turn.turnId);
   if (turn.backend === 'mock') {
     clearTurnTimers(turn.timers);
@@ -751,4 +857,127 @@ function chunkText(text: string, size: number): string[] {
 function clearTurnTimers(timers: ReturnType<typeof setTimeout>[]): void {
   timers.forEach((timer) => clearTimeout(timer));
   timers.length = 0;
+}
+
+async function resolvePendingApproval(input: ResolveApprovalBody): Promise<void> {
+  const pending = pendingApprovalRequests.get(input.requestId);
+  if (!pending || pending.turnId !== input.turnId) {
+    throw new Error('Pending approval not found');
+  }
+
+  const result = buildApprovalResponse(pending.method, pending.params, input.decision);
+  respondToServerRequest(pending.worker, pending.rawRequestId, { result });
+  pendingApprovalRequests.delete(input.requestId);
+  await notifyApi(input.turnId, 'turn.approval.resolved', {
+    requestId: input.requestId,
+    decision: input.decision,
+  });
+}
+
+async function disposePendingApprovalsForTurn(turnId: string, decision: 'approve' | 'reject'): Promise<void> {
+  const pendingIds = [...pendingApprovalRequests.values()]
+    .filter((entry) => entry.turnId === turnId)
+    .map((entry) => entry.requestId);
+
+  for (const requestId of pendingIds) {
+    const pending = pendingApprovalRequests.get(requestId);
+    if (!pending) {
+      continue;
+    }
+    const result = buildApprovalResponse(pending.method, pending.params, decision);
+    respondToServerRequest(pending.worker, pending.rawRequestId, { result });
+    pendingApprovalRequests.delete(requestId);
+    await notifyApi(turnId, 'turn.approval.resolved', {
+      requestId,
+      decision,
+    });
+  }
+}
+
+function respondToServerRequest(
+  worker: CodexWorker,
+  requestId: string | number,
+  response: { result?: unknown; error?: { message: string } },
+): void {
+  if (worker.closed || !worker.process.stdin.writable) {
+    return;
+  }
+
+  if (response.error) {
+    worker.process.stdin.write(
+      `${JSON.stringify({ id: requestId, error: { code: -32603, message: response.error.message } })}\n`,
+    );
+    return;
+  }
+
+  worker.process.stdin.write(`${JSON.stringify({ id: requestId, result: response.result ?? {} })}\n`);
+}
+
+function buildApprovalRequestedPayload(
+  requestId: string,
+  method: PendingApprovalRequest['method'],
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  if (method === 'item/commandExecution/requestApproval') {
+    return {
+      requestId,
+      kind: 'command_execution',
+      reason: readOptionalPayloadString(params.reason),
+      command: readOptionalPayloadString(params.command),
+      cwd: readOptionalPayloadString(params.cwd),
+      itemId: readOptionalPayloadString(params.itemId),
+      approvalId: readOptionalPayloadString(params.approvalId),
+      availableDecisions: Array.isArray(params.availableDecisions) ? params.availableDecisions : [],
+      additionalPermissions: readOptionalObject(params.additionalPermissions),
+      networkApprovalContext: readOptionalObject(params.networkApprovalContext),
+    };
+  }
+
+  if (method === 'item/fileChange/requestApproval') {
+    return {
+      requestId,
+      kind: 'file_change',
+      reason: readOptionalPayloadString(params.reason),
+      itemId: readOptionalPayloadString(params.itemId),
+      grantRoot: readOptionalPayloadString(params.grantRoot),
+    };
+  }
+
+  return {
+    requestId,
+    kind: 'permissions',
+    reason: readOptionalPayloadString(params.reason),
+    itemId: readOptionalPayloadString(params.itemId),
+    permissions: readOptionalObject(params.permissions),
+  };
+}
+
+function buildApprovalResponse(
+  method: PendingApprovalRequest['method'],
+  params: Record<string, unknown>,
+  decision: 'approve' | 'reject',
+): Record<string, unknown> {
+  if (method === 'item/commandExecution/requestApproval') {
+    return {
+      decision: decision === 'approve' ? 'accept' : 'decline',
+    };
+  }
+
+  if (method === 'item/fileChange/requestApproval') {
+    return {
+      decision: decision === 'approve' ? 'accept' : 'decline',
+    };
+  }
+
+  return {
+    permissions: decision === 'approve' ? readOptionalObject(params.permissions) ?? {} : {},
+  };
+}
+
+function readOptionalPayloadString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function readOptionalObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }

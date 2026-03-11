@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+RUNNER_DIR="$ROOT_DIR/apps/runner"
 
 if [[ -f ".env" ]]; then
   set -a
@@ -21,8 +22,9 @@ fi
 CI=true "${PM[@]}" install --no-frozen-lockfile --reporter=append-only
 
 if [[ "${RUNNER_WATCH_MODE:-1}" == "1" ]]; then
-  exec "${PM[@]}" --filter @codexpanel/runner dev
+  cd "$RUNNER_DIR"
+  exec "$ROOT_DIR/node_modules/.bin/tsx" watch src/main.ts
 fi
 
-"${PM[@]}" --filter @codexpanel/runner build
-exec "${PM[@]}" --filter @codexpanel/runner start
+cd "$RUNNER_DIR"
+exec node --import tsx src/main.ts

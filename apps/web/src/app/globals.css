@@ -144,8 +144,35 @@ button:disabled {
   cursor: not-allowed;
 }
 
+.button-secondary {
+  background: linear-gradient(90deg, #65748b, #465466);
+}
+
 .sim-chat {
   margin-top: 0.95rem;
+}
+
+.sim-approval {
+  margin-top: 0.9rem;
+  border: 1px solid #f2c48b;
+  border-radius: 14px;
+  background: #fff4e4;
+  padding: 0.85rem;
+}
+
+.sim-approval p {
+  margin: 0.35rem 0;
+}
+
+.sim-approval pre {
+  margin: 0.55rem 0 0;
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid #ead7bd;
+  padding: 0.7rem;
+  white-space: pre-wrap;
+  font-family: 'IBM Plex Mono', 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 0.8rem;
 }
 
 .sim-chat-head p {
@@ -168,6 +195,10 @@ button:disabled {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.6rem;
+}
+
+.sim-actions-approval {
+  margin-top: 0.7rem;
 }
 
 .sim-output pre {

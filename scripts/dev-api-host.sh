@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+API_DIR="$ROOT_DIR/apps/api"
 
 if [[ -f ".env" ]]; then
   set -a
@@ -34,8 +35,9 @@ if [[ -n "${PRISMA_CLIENT_DIR}" ]]; then
 fi
 
 if [[ "${API_WATCH_MODE:-0}" == "1" ]]; then
-  exec "${PM[@]}" --filter @codexpanel/api dev
+  cd "$API_DIR"
+  exec "$ROOT_DIR/node_modules/.bin/tsx" watch src/main.ts
 fi
 
-"${PM[@]}" --filter @codexpanel/api build
-exec "${PM[@]}" --filter @codexpanel/api start
+cd "$API_DIR"
+exec node --import tsx src/main.ts

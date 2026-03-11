@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { CancelTurnInput, RunnerAdapter, StartTurnInput } from './runner.types';
+import { CancelTurnInput, ResolveTurnApprovalInput, RunnerAdapter, StartTurnInput } from './runner.types';
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
@@ -68,6 +68,10 @@ export class MockRunnerAdapter implements RunnerAdapter {
       data: { status: 'cancelled', endedAt: new Date() },
     });
     await this.appendEvent(input.turnId, 'turn.cancelled', {});
+  }
+
+  async resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void> {
+    throw new Error(`Mock runner does not support approvals for turn ${input.turnId}`);
   }
 
   private async handleDelta(turnId: string, chunk: string): Promise<void> {

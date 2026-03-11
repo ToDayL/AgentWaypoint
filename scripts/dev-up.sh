@@ -37,17 +37,17 @@ start_bg() {
     return
   fi
 
-  nohup "$@" >"$log_file" 2>&1 &
+  nohup setsid "$@" </dev/null >"$log_file" 2>&1 &
   local pid=$!
   echo "$pid" >"$pid_file"
   echo "[dev-up] Started ${name} (pid=${pid}, log=${log_file})."
 }
 
 echo "[dev-up] Starting host runner..."
-start_bg runner bash -lc "cd '$ROOT_DIR'; set -a; source .env; set +a; RUNNER_WATCH_MODE=1 bash scripts/dev-runner-host.sh"
+start_bg runner bash -lc "cd '$ROOT_DIR'; set -a; source .env; set +a; RUNNER_WATCH_MODE=${RUNNER_WATCH_MODE:-0} exec bash scripts/dev-runner-host.sh"
 
 echo "[dev-up] Starting host api..."
-start_bg api bash -lc "cd '$ROOT_DIR'; set -a; source .env; set +a; RUNNER_MODE=http API_WATCH_MODE=1 bash scripts/dev-api-host.sh"
+start_bg api bash -lc "cd '$ROOT_DIR'; set -a; source .env; set +a; RUNNER_MODE=http API_WATCH_MODE=${API_WATCH_MODE:-0} exec bash scripts/dev-api-host.sh"
 
 wait_health() {
   local name="$1"

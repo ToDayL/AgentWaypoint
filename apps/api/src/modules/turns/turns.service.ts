@@ -4,12 +4,29 @@ import { stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import { PrismaService } from '../prisma/prisma.service';
 import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
-import { CreateTurnBody } from './turns.schemas';
+import { CreateTurnBody, ResolveTurnApprovalBody } from './turns.schemas';
 
-const ACTIVE_TURN_STATUSES = ['queued', 'running'];
+const ACTIVE_TURN_STATUSES = ['queued', 'running', 'waiting_approval'];
 const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
 
-export type RunnerEventType = 'turn.started' | 'assistant.delta' | 'turn.completed' | 'turn.failed' | 'turn.cancelled';
+export type RunnerEventType =
+  | 'turn.started'
+  | 'assistant.delta'
+  | 'turn.approval.requested'
+  | 'turn.approval.resolved'
+  | 'turn.completed'
+  | 'turn.failed'
+  | 'turn.cancelled';
+
+type PendingApprovalSummary = {
+  id: string;
+  kind: string;
+  status: string;
+  decision: string | null;
+  createdAt: Date;
+  resolvedAt: Date | null;
+  payload: Record<string, unknown>;
+};
 
 @Injectable()
 export class TurnsService implements OnModuleInit {
@@ -114,6 +131,33 @@ export class TurnsService implements OnModuleInit {
     });
   }
 
+  async resolveTurnApprovalForUser(userId: string, turnId: string, input: ResolveTurnApprovalBody) {
+    await this.getTurnForUser(userId, turnId);
+
+    const approval = await this.prisma.turnApproval.findFirst({
+      where: {
+        requestId: input.approvalId,
+        turnId,
+        status: 'pending',
+      },
+      select: {
+        id: true,
+        requestId: true,
+      },
+    });
+    if (!approval) {
+      throw new NotFoundException({ message: 'Pending approval not found' });
+    }
+
+    await this.runnerAdapter.resolveTurnApproval({
+      turnId,
+      requestId: approval.requestId,
+      decision: input.decision,
+    });
+
+    return this.getTurnStatusForUser(userId, turnId);
+  }
+
   async getEventsForTurn(userId: string, turnId: string, sinceSeq: number) {
     await this.getTurnForUser(userId, turnId);
     return this.prisma.event.findMany({
@@ -148,6 +192,7 @@ export class TurnsService implements OnModuleInit {
 
   async getTurnStatusForUser(userId: string, turnId: string) {
     const turn = await this.getTurnForUser(userId, turnId);
+    const pendingApproval = await this.getPendingApproval(turn.id);
     return {
       id: turn.id,
       sessionId: turn.sessionId,
@@ -157,6 +202,7 @@ export class TurnsService implements OnModuleInit {
       createdAt: turn.createdAt,
       startedAt: turn.startedAt,
       endedAt: turn.endedAt,
+      pendingApproval,
     };
   }
 
@@ -196,6 +242,85 @@ export class TurnsService implements OnModuleInit {
           throw new ConflictException({ message: 'assistant.delta requires payload.text' });
         }
         await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text }));
+        return;
+      }
+      case 'turn.approval.requested': {
+        if (TERMINAL_STATUSES.includes(turn.status)) {
+          return;
+        }
+        const requestId = typeof payload.requestId === 'string' ? payload.requestId.trim() : '';
+        const kind = typeof payload.kind === 'string' ? payload.kind.trim() : '';
+        if (!requestId || !kind) {
+          throw new ConflictException({ message: 'turn.approval.requested requires payload.requestId and payload.kind' });
+        }
+
+        const normalizedPayload = this.normalizePayload(payload);
+        await this.prisma.$transaction(async (tx) => {
+          await tx.turn.update({
+            where: { id: turnId },
+            data: {
+              status: 'waiting_approval',
+              startedAt: turn.status === 'queued' ? new Date() : undefined,
+            },
+          });
+
+          await tx.turnApproval.upsert({
+            where: {
+              turnId_requestId: {
+                turnId,
+                requestId,
+              },
+            },
+            update: {
+              kind,
+              status: 'pending',
+              decision: null,
+              resolvedAt: null,
+              payload: normalizedPayload,
+            },
+            create: {
+              turnId,
+              requestId,
+              kind,
+              status: 'pending',
+              payload: normalizedPayload,
+            },
+          });
+        });
+
+        await this.appendEvent(turnId, 'turn.approval.requested', normalizedPayload);
+        return;
+      }
+      case 'turn.approval.resolved': {
+        if (TERMINAL_STATUSES.includes(turn.status)) {
+          return;
+        }
+        const requestId = typeof payload.requestId === 'string' ? payload.requestId.trim() : '';
+        const decision = typeof payload.decision === 'string' ? payload.decision.trim() : '';
+        if (!requestId || !decision) {
+          throw new ConflictException({ message: 'turn.approval.resolved requires payload.requestId and payload.decision' });
+        }
+
+        const normalizedPayload = this.normalizePayload(payload);
+        await this.prisma.$transaction(async (tx) => {
+          await tx.turnApproval.updateMany({
+            where: { turnId, requestId, status: 'pending' },
+            data: {
+              status: decision === 'approve' ? 'approved' : 'rejected',
+              decision,
+              resolvedAt: new Date(),
+            },
+          });
+
+          if (turn.status === 'waiting_approval') {
+            await tx.turn.update({
+              where: { id: turnId },
+              data: { status: 'running' },
+            });
+          }
+        });
+
+        await this.appendEvent(turnId, 'turn.approval.resolved', normalizedPayload);
         return;
       }
       case 'turn.completed': {
@@ -366,5 +491,28 @@ export class TurnsService implements OnModuleInit {
     if (!isAllowed) {
       throw new ConflictException({ message: `Project workspace is outside allowed roots: ${absolutePath}` });
     }
+  }
+
+  private async getPendingApproval(turnId: string): Promise<PendingApprovalSummary | null> {
+    const approval = await this.prisma.turnApproval.findFirst({
+      where: {
+        turnId,
+        status: 'pending',
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!approval) {
+      return null;
+    }
+
+    return {
+      id: approval.requestId,
+      kind: approval.kind,
+      status: approval.status,
+      decision: approval.decision,
+      createdAt: approval.createdAt,
+      resolvedAt: approval.resolvedAt,
+      payload: (approval.payload as Record<string, unknown>) ?? {},
+    };
   }
 }

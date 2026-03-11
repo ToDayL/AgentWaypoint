@@ -60,11 +60,24 @@ type TurnStatusResponse = {
   createdAt: string;
   startedAt: string | null;
   endedAt: string | null;
+  pendingApproval: PendingApproval | null;
+};
+
+type PendingApproval = {
+  id: string;
+  kind: string;
+  status: string;
+  decision: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+  payload: Record<string, unknown>;
 };
 
 const STREAM_EVENTS = [
   'turn.started',
   'assistant.delta',
+  'turn.approval.requested',
+  'turn.approval.resolved',
   'tool.started',
   'tool.output',
   'tool.completed',
@@ -91,6 +104,7 @@ export default function HomePage() {
   const [activeTurnId, setActiveTurnId] = useState('');
   const [resumedTurnHint, setResumedTurnHint] = useState('');
   const [turnStatus, setTurnStatus] = useState('idle');
+  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -180,11 +194,12 @@ export default function HomePage() {
         setSelectedSessionId('');
         setMessages([]);
         setAssistantText('');
-        setActiveTurnId('');
-        setResumedTurnHint('');
-        setTurnStatus('idle');
-        setEventLog([]);
-      }
+      setActiveTurnId('');
+      setResumedTurnHint('');
+      setTurnStatus('idle');
+      setPendingApproval(null);
+      setEventLog([]);
+    }
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
@@ -291,6 +306,30 @@ export default function HomePage() {
     }
   }
 
+  async function handleResolveApproval(decision: 'approve' | 'reject'): Promise<void> {
+    if (!activeTurnId || !pendingApproval) {
+      return;
+    }
+
+    setBusy(true);
+    setError('');
+    try {
+      await apiRequest<TurnStatusResponse>(`/api/sim/turns/${activeTurnId}/approval`, {
+        method: 'POST',
+        email,
+        body: {
+          approvalId: pendingApproval.id,
+          decision,
+        },
+      });
+      await syncTurnState(activeTurnId);
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function loadSessionHistory(sessionId: string, options: { resumeStream: boolean }): Promise<void> {
     if (!sessionId) {
       eventSourceRef.current?.close();
@@ -301,6 +340,7 @@ export default function HomePage() {
       setActiveTurnId('');
       setResumedTurnHint('');
       setTurnStatus('idle');
+      setPendingApproval(null);
       setEventLog([]);
       return;
     }
@@ -317,8 +357,12 @@ export default function HomePage() {
       setMessages(history.messages);
       setTurnStatus(history.activeTurnStatus ?? 'idle');
       setActiveTurnId(history.activeTurnId ?? '');
+      setPendingApproval(null);
       setAssistantText('');
       setEventLog([]);
+      if (history.activeTurnId) {
+        await syncTurnState(history.activeTurnId);
+      }
       if (options.resumeStream && history.activeTurnId) {
         setResumedTurnHint(`Resumed in-flight turn: ${history.activeTurnId}`);
         openStream(history.activeTurnId, sessionId);
@@ -327,6 +371,18 @@ export default function HomePage() {
       }
     } catch (requestError) {
       setError(extractMessage(requestError));
+    }
+  }
+
+  async function syncTurnState(turnId: string): Promise<void> {
+    const status = await apiRequest<TurnStatusResponse>(`/api/sim/turns/${turnId}`, {
+      method: 'GET',
+      email,
+    });
+    setTurnStatus(status.status);
+    setPendingApproval(status.pendingApproval);
+    if (status.status === 'failed' && status.failureMessage) {
+      setError(status.failureMessage);
     }
   }
 
@@ -344,7 +400,7 @@ export default function HomePage() {
       source.addEventListener(eventType, (evt) => {
         const message = evt as MessageEvent<string>;
         const envelope = JSON.parse(message.data) as StreamEnvelope;
-        appendEvent(`#${envelope.seq} ${envelope.type}`);
+        appendEvent(describeStreamEvent(envelope));
 
         if (envelope.type === 'assistant.delta') {
           const delta = envelope.payload.text;
@@ -357,10 +413,29 @@ export default function HomePage() {
           setTurnStatus('running');
         }
 
+        if (envelope.type === 'turn.approval.requested') {
+          setTurnStatus('waiting_approval');
+          setPendingApproval({
+            id: String(envelope.payload.requestId ?? ''),
+            kind: typeof envelope.payload.kind === 'string' ? envelope.payload.kind : 'approval',
+            status: 'pending',
+            decision: null,
+            createdAt: envelope.createdAt,
+            resolvedAt: null,
+            payload: envelope.payload,
+          });
+        }
+
+        if (envelope.type === 'turn.approval.resolved') {
+          setTurnStatus('running');
+          setPendingApproval(null);
+        }
+
         if (envelope.type === 'turn.completed' || envelope.type === 'turn.failed' || envelope.type === 'turn.cancelled') {
           setTurnStatus(envelope.type.replace('turn.', ''));
           setActiveTurnId('');
           setResumedTurnHint('');
+          setPendingApproval(null);
           stopTurnStatusPolling();
           if (sessionId) {
             void loadSessionHistory(sessionId, { resumeStream: false });
@@ -399,6 +474,7 @@ export default function HomePage() {
             email,
           });
           setTurnStatus(status.status);
+          setPendingApproval(status.pendingApproval);
           if (status.status === 'failed' && status.failureMessage) {
             setError(status.failureMessage);
           }
@@ -406,6 +482,7 @@ export default function HomePage() {
             stopTurnStatusPolling();
             setActiveTurnId('');
             setResumedTurnHint('');
+            setPendingApproval(null);
             if (sessionId) {
               await loadSessionHistory(sessionId, { resumeStream: false });
             }
@@ -551,6 +628,39 @@ export default function HomePage() {
             </button>
           </div>
 
+          {pendingApproval ? (
+            <article className="sim-approval">
+              <h3>Approval Required</h3>
+              <p>
+                <strong>{formatApprovalKind(pendingApproval.kind)}</strong>
+                {typeof pendingApproval.payload.reason === 'string' && pendingApproval.payload.reason.length > 0
+                  ? `: ${pendingApproval.payload.reason}`
+                  : ''}
+              </p>
+              {typeof pendingApproval.payload.command === 'string' && pendingApproval.payload.command.length > 0 ? (
+                <pre>{pendingApproval.payload.command}</pre>
+              ) : null}
+              {typeof pendingApproval.payload.cwd === 'string' && pendingApproval.payload.cwd.length > 0 ? (
+                <p>
+                  Working directory: <code>{pendingApproval.payload.cwd}</code>
+                </p>
+              ) : null}
+              <div className="sim-actions sim-actions-approval">
+                <button type="button" onClick={() => void handleResolveApproval('approve')} disabled={busy}>
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() => void handleResolveApproval('reject')}
+                  disabled={busy}
+                >
+                  Reject
+                </button>
+              </div>
+            </article>
+          ) : null}
+
           <article className="sim-output">
             <h3>Assistant Stream</h3>
             <pre>{assistantText || 'No active stream output.'}</pre>
@@ -629,4 +739,34 @@ function extractMessage(error: unknown): string {
     return error.message;
   }
   return 'Unexpected error';
+}
+
+function formatApprovalKind(kind: string): string {
+  if (kind === 'command_execution') {
+    return 'Command execution';
+  }
+  if (kind === 'file_change') {
+    return 'File change';
+  }
+  if (kind === 'permissions') {
+    return 'Additional permissions';
+  }
+  return kind;
+}
+
+function describeStreamEvent(envelope: StreamEnvelope): string {
+  if (envelope.type === 'turn.approval.requested') {
+    const kind = typeof envelope.payload.kind === 'string' ? envelope.payload.kind : 'approval';
+    const reason =
+      typeof envelope.payload.reason === 'string' && envelope.payload.reason.length > 0
+        ? `: ${envelope.payload.reason}`
+        : '';
+    return `#${envelope.seq} ${formatApprovalKind(kind)} requested${reason}`;
+  }
+
+  if (envelope.type === 'turn.approval.resolved') {
+    return `#${envelope.seq} approval ${String(envelope.payload.decision ?? 'resolved')}`;
+  }
+
+  return `#${envelope.seq} ${envelope.type}`;
 }

@@ -8,7 +8,15 @@ const RunnerEventParamsSchema = z.object({
 });
 
 const RunnerEventBodySchema = z.object({
-  type: z.enum(['turn.started', 'assistant.delta', 'turn.completed', 'turn.failed', 'turn.cancelled']),
+  type: z.enum([
+    'turn.started',
+    'assistant.delta',
+    'turn.approval.requested',
+    'turn.approval.resolved',
+    'turn.completed',
+    'turn.failed',
+    'turn.cancelled',
+  ]),
   payload: z.record(z.string(), z.unknown()).default({}),
 });
 
