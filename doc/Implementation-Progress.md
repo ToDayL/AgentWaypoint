@@ -1,4 +1,4 @@
-# CodexPanel Implementation Progress
+# AgentWaypoint Implementation Progress
 
 Last updated: 2026-03-12
 
@@ -45,9 +45,9 @@ Last updated: 2026-03-12
 
 ## Runtime Status Snapshot (2026-03-05)
 1. Docker services running:
-   - `codexpanel-app`
-   - `codexpanel-postgres`
-   - `codexpanel-redis`
+   - `agentwaypoint-app`
+   - `agentwaypoint-postgres`
+   - `agentwaypoint-redis`
 2. API health check passes from inside container:
    - `GET /api/health -> {"status":"ok"}`
 
@@ -69,13 +69,13 @@ Last updated: 2026-03-12
    - `apps/api/src/modules/api.e2e.spec.ts`
    - Covers auth missing header (`401`), create/list flows, validation errors (`400`), and cross-user access control.
 5. Containerized verification completed:
-   - `pnpm --filter @codexpanel/api typecheck` passes in `codexpanel-app`.
-   - `pnpm --filter @codexpanel/api test` passes in `codexpanel-app`.
+   - `pnpm --filter @agentwaypoint/api typecheck` passes in `agentwaypoint-app`.
+   - `pnpm --filter @agentwaypoint/api test` passes in `agentwaypoint-app`.
    - Host-level smoke tests against `localhost:4000` confirm project/session CRUD works.
 
 ## Runtime Topology Update on 2026-03-06
 1. Local runtime switched to hybrid mode:
-   - Docker: `codexpanel-web`, `codexpanel-postgres`, `codexpanel-redis`
+   - Docker: `agentwaypoint-web`, `agentwaypoint-postgres`, `agentwaypoint-redis`
    - Host: `apps/api` process
 2. Dev tooling updates:
    - `infra/docker/docker-compose.yml` now runs `web` only (plus DB services).
@@ -104,8 +104,8 @@ Last updated: 2026-03-12
    - Resumed in-flight turns are explicitly indicated in UI.
    - SSE disconnect falls back to polling `GET /api/sim/turns/:id` until terminal status.
 6. Validation completed:
-   - `@codexpanel/api` typecheck passes.
-   - `@codexpanel/web` typecheck passes.
+   - `@agentwaypoint/api` typecheck passes.
+   - `@agentwaypoint/web` typecheck passes.
    - Workspace tests pass (`8/8` API tests; other packages currently have no test files).
 7. HTTPS reverse proxy added for local web access:
    - New `nginx` Docker service terminates TLS in front of `web`.
@@ -171,9 +171,9 @@ Last updated: 2026-03-12
    - `apps/api/src/modules/api.e2e.spec.ts` now covers approval event persistence and `pendingApproval` turn status.
    - `apps/api/src/modules/api.http-runner.e2e.spec.ts` now covers approve/resume flow through the HTTP runner adapter.
 6. Validation status for this update:
-   - `@codexpanel/api` typecheck passes.
-   - `@codexpanel/web` typecheck passes.
-   - `corepack pnpm --filter @codexpanel/api test` passes locally (`10/10` tests).
+   - `@agentwaypoint/api` typecheck passes.
+   - `@agentwaypoint/web` typecheck passes.
+   - `corepack pnpm --filter @agentwaypoint/api test` passes locally (`10/10` tests).
 
 ## Completed on 2026-03-12
 1. Rich runner event mapping implemented:
@@ -189,7 +189,7 @@ Last updated: 2026-03-12
    - Legacy web/API `approve` and `reject` aliases are still normalized for compatibility.
    - Approval UI now renders richer command-approval actions when the app server provides available decisions or amendment proposals.
 4. Validation and live verification completed for this update:
-   - `@codexpanel/api` typecheck passes.
-   - `@codexpanel/web` typecheck passes.
-   - `corepack pnpm --filter @codexpanel/api test` passes locally (`10/10` tests).
+   - `@agentwaypoint/api` typecheck passes.
+   - `@agentwaypoint/web` typecheck passes.
+   - `corepack pnpm --filter @agentwaypoint/api test` passes locally (`10/10` tests).
    - Live host API and runner were restarted successfully and exercised against the updated event and approval surfaces.

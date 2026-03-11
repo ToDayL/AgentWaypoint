@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'CodexPanel',
+  title: 'AgentWaypoint',
   description: 'Web panel for Codex app server integration',
   other: {
     'format-detection': 'telephone=no, date=no, email=no, address=no',

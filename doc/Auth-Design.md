@@ -1,10 +1,10 @@
-# CodexPanel Authentication and Authorization Design
+# AgentWaypoint Authentication and Authorization Design
 
 Last updated: 2026-03-10
 
 ## 1. Goals
 
-This design defines a first-party authentication model for CodexPanel that:
+This design defines a first-party authentication model for AgentWaypoint that:
 
 - Allows access only for explicitly approved users.
 - Avoids third-party OAuth as a required dependency.
@@ -24,7 +24,7 @@ This design defines a first-party authentication model for CodexPanel that:
 
 ## 3. Recommended Model
 
-CodexPanel should use a unified internal principal model with two principal types:
+AgentWaypoint should use a unified internal principal model with two principal types:
 
 1. `user`
    - Human account used by the web UI.
@@ -240,14 +240,14 @@ The Discord bot should authenticate as a `service_account`, not as a browser use
 Recommended model:
 
 - Discord bot owns one or more service API keys.
-- The bot receives Discord events and maps them to CodexPanel actions.
-- CodexPanel authorizes the bot using service scopes.
-- Discord identities remain separate from CodexPanel identities.
+- The bot receives Discord events and maps them to AgentWaypoint actions.
+- AgentWaypoint authorizes the bot using service scopes.
+- Discord identities remain separate from AgentWaypoint identities.
 
-Later, if needed, CodexPanel may support optional linking between:
+Later, if needed, AgentWaypoint may support optional linking between:
 
 - a Discord user
-- an internal CodexPanel user
+- an internal AgentWaypoint user
 
 But Discord should not be the primary identity provider for the system.
 
@@ -566,7 +566,7 @@ Preferred option:
 
 Example:
 
-- `pnpm --filter @codexpanel/api auth:bootstrap-admin`
+- `pnpm --filter @agentwaypoint/api auth:bootstrap-admin`
 
 Behavior:
 
@@ -640,4 +640,4 @@ Preferred final design:
 - Authorization is principal-based and scoped.
 - No third-party OAuth dependency is required.
 
-This is the best fit for CodexPanel’s current requirements and future Discord bot integration.
+This is the best fit for AgentWaypoint’s current requirements and future Discord bot integration.

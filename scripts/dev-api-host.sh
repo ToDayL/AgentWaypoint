@@ -21,7 +21,7 @@ fi
 
 CI=true "${PM[@]}" install --no-frozen-lockfile --reporter=append-only
 if [[ "${SKIP_PRISMA_GENERATE:-0}" != "1" ]]; then
-  "${PM[@]}" --filter @codexpanel/api prisma:generate
+  "${PM[@]}" --filter @agentwaypoint/api prisma:generate
 fi
 
 # pnpm may skip lifecycle scripts in hardened mode, which leaves

@@ -1,7 +1,7 @@
-# CodexPanel Product Requirements Document (PRD)
+# AgentWaypoint Product Requirements Document (PRD)
 
 ## 1. Document Information
-- Product name: CodexPanel
+- Product name: AgentWaypoint
 - Version: v0.1 (Initial)
 - Date: March 5, 2026
 - Author: Project team
@@ -10,7 +10,7 @@
 ## 2. Background and Problem Statement
 Codex is powerful for coding workflows, but terminal-first interaction creates friction for users who prefer browser-based collaboration, fast context switching, and shareable sessions.
 
-This project provides CodexPanel, a WebUI that connects to the Codex app server interface so users can:
+This project provides AgentWaypoint, a WebUI that connects to the Codex app server interface so users can:
 - Chat with Codex in a browser.
 - Start “vibe coding” sessions (interactive coding loops with streaming feedback).
 - Manage session context and artifacts in a more visual workflow.

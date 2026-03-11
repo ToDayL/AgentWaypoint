@@ -1,4 +1,4 @@
-# CodexPanel Implementation Plan
+# AgentWaypoint Implementation Plan
 
 Last updated: 2026-03-11
 

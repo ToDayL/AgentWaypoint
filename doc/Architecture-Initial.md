@@ -1,4 +1,4 @@
-# CodexPanel Initial Architecture Design
+# AgentWaypoint Initial Architecture Design
 
 ## 1. Overview
 This architecture enables a browser-based Codex experience by placing a Web application in front of a host-side API backend and host-side Codex runner daemon that manages Codex app-server processes.

@@ -1,8 +1,8 @@
 {
-  "name": "codexpanel",
+  "name": "agentwaypoint",
   "version": "0.1.0",
   "private": true,
-  "description": "CodexPanel monorepo workspace",
+  "description": "AgentWaypoint monorepo workspace",
   "packageManager": "pnpm@10.6.2",
   "engines": {
     "node": ">=22 <23",

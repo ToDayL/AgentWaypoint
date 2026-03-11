@@ -118,7 +118,7 @@ const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 export default function HomePage() {
   const [mounted, setMounted] = useState(false);
-  const [email, setEmail] = useState('demo@codexpanel.local');
+  const [email, setEmail] = useState('demo@agentwaypoint.local');
   const [projects, setProjects] = useState<Project[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
@@ -176,7 +176,7 @@ export default function HomePage() {
       <main className="sim-shell">
         <section className="sim-panel">
           <header className="sim-header">
-            <p className="sim-kicker">CodexPanel Simulation</p>
+            <p className="sim-kicker">AgentWaypoint Simulation</p>
             <h1>Web Interface MVP</h1>
             <p className="sim-subtitle">Loading…</p>
           </header>
@@ -578,7 +578,7 @@ export default function HomePage() {
     <main className="sim-shell">
       <section className="sim-panel">
         <header className="sim-header">
-          <p className="sim-kicker">CodexPanel Simulation</p>
+          <p className="sim-kicker">AgentWaypoint Simulation</p>
           <h1>Web Interface MVP</h1>
           <p className="sim-subtitle">Project/session setup + mock turn streaming through the real API surface.</p>
         </header>

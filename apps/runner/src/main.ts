@@ -217,7 +217,7 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, host, () => {
   // eslint-disable-next-line no-console
-  console.log(`[codexpanel-runner] listening on http://${host}:${port} (backend=${runnerBackend})`);
+  console.log(`[agentwaypoint-runner] listening on http://${host}:${port} (backend=${runnerBackend})`);
 });
 
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
@@ -409,7 +409,7 @@ async function ensureCodexWorker(): Promise<CodexWorker> {
         .catch((error: unknown) => {
           const message = error instanceof Error ? error.message : 'unknown worker message error';
           // eslint-disable-next-line no-console
-          console.error(`[codexpanel-runner] worker notification error: ${message}`);
+          console.error(`[agentwaypoint-runner] worker notification error: ${message}`);
         });
     });
 
@@ -417,7 +417,7 @@ async function ensureCodexWorker(): Promise<CodexWorker> {
       const message = chunk.toString('utf8').trim();
       if (message) {
         // eslint-disable-next-line no-console
-        console.error(`[codexpanel-runner] codex stderr: ${message}`);
+        console.error(`[agentwaypoint-runner] codex stderr: ${message}`);
       }
     });
 
@@ -431,7 +431,7 @@ async function ensureCodexWorker(): Promise<CodexWorker> {
 
     worker.readyPromise = (async () => {
       await sendWorkerRequest(worker, 'initialize', {
-        clientInfo: { name: 'codexpanel-runner', version: '0.1.0' },
+        clientInfo: { name: 'agentwaypoint-runner', version: '0.1.0' },
         capabilities: null,
       });
       sendWorkerNotification(worker, 'initialized', {});
@@ -476,7 +476,7 @@ async function resolveThreadId(worker: CodexWorker, preferredThreadId: string | 
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'unknown resume error';
       // eslint-disable-next-line no-console
-      console.error(`[codexpanel-runner] thread/resume failed for ${preferredThreadId}: ${message}`);
+      console.error(`[agentwaypoint-runner] thread/resume failed for ${preferredThreadId}: ${message}`);
     }
   }
 
@@ -507,7 +507,7 @@ async function handleWorkerMessage(worker: CodexWorker, line: string): Promise<v
     message = JSON.parse(trimmed) as unknown;
   } catch {
     // eslint-disable-next-line no-console
-    console.error(`[codexpanel-runner] invalid JSON from codex worker: ${trimmed}`);
+    console.error(`[agentwaypoint-runner] invalid JSON from codex worker: ${trimmed}`);
     return;
   }
 
@@ -950,12 +950,12 @@ async function notifyApi(turnId: string, type: RunnerEventType, payload: Record<
     if (!response.ok) {
       const body = await response.text();
       // eslint-disable-next-line no-console
-      console.error(`[codexpanel-runner] callback failed: ${type} -> ${response.status} ${body}`);
+      console.error(`[agentwaypoint-runner] callback failed: ${type} -> ${response.status} ${body}`);
     }
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'unknown callback error';
     // eslint-disable-next-line no-console
-    console.error(`[codexpanel-runner] callback error: ${type} -> ${message}`);
+    console.error(`[agentwaypoint-runner] callback error: ${type} -> ${message}`);
   }
 }
 

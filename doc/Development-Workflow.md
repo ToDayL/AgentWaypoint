@@ -1,4 +1,4 @@
-# CodexPanel Development Workflow
+# AgentWaypoint Development Workflow
 
 Last verified: 2026-03-07
 
@@ -31,7 +31,7 @@ Use this when debugging startup/runtime drift or verifying from scratch.
 2. If host Node is not v22 (for example v24), run watch mode:
    - `API_WATCH_MODE=1 ./scripts/dev-api-host.sh`
 3. Initialize DB schema from host (after clean DB reset):
-   - `set -a; source .env; set +a; corepack pnpm --filter @codexpanel/api prisma:migrate:dev`
+   - `set -a; source .env; set +a; corepack pnpm --filter @agentwaypoint/api prisma:migrate:dev`
 
 ## 3.5 Start Host Runner
 1. Start runner daemon:

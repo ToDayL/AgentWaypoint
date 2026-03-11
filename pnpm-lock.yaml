@@ -41,7 +41,7 @@ importers:
 
   apps/api:
     dependencies:
-      '@codexpanel/shared':
+      '@agentwaypoint/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@nestjs/common':
@@ -74,7 +74,7 @@ importers:
 
   apps/web:
     dependencies:
-      '@codexpanel/shared':
+      '@agentwaypoint/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       next:

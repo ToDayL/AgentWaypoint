@@ -6,7 +6,7 @@ This document records the current and target design decisions for `apps/runner` 
 
 ## 1. Identity Mapping
 
-- `sessionId` (CodexPanel) is the conversation container in our app.
+- `sessionId` (AgentWaypoint) is the conversation container in our app.
 - `threadId` (Codex app-server) is the conversation container in Codex runtime.
 - Mapping rule: `1 sessionId -> 1 threadId`.
 - Mapping is persisted in API DB on `Session.codexThreadId`.

@@ -8,7 +8,7 @@ import { AppModule } from '../app.module';
 import { HttpExceptionFilter } from '../common/filters/http-exception.filter';
 
 if (!process.env.DATABASE_URL) {
-  process.env.DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/codexpanel';
+  process.env.DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/agentwaypoint';
 }
 
 const TEST_REPO_PATH = process.cwd();

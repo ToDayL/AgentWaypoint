@@ -2,7 +2,7 @@
 
 - Source URL: https://developers.openai.com/codex/app-server/
 - Checked on: 2026-03-05
-- Purpose: Project-local reference for CodexPanel integration planning.
+- Purpose: Project-local reference for AgentWaypoint integration planning.
 
 ## 1. What It Is
 Codex App Server is the interface used by Codex rich clients. It is intended for deep product integration (auth, history, approvals, streamed agent events). For CI/job automation, the docs recommend using Codex SDK instead.
@@ -80,7 +80,7 @@ Docs indicate generation commands to lock schema to your installed Codex version
 - Recommended: also send a `skill` input item so full instructions are injected directly.
 - `skills/list` supports scoped lookup by `cwds`, optional `forceReload`, and extra roots.
 
-## 13. CodexPanel Integration Guidance (Initial)
+## 13. AgentWaypoint Integration Guidance (Initial)
 - Start with `stdio` transport in host `codex-runner` daemon for lower complexity.
 - Normalize app-server notifications to frontend event model:
   - `item/started` -> tool/event timeline start

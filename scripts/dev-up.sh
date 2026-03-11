@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="$ROOT_DIR/infra/docker/docker-compose.yml"
-STATE_DIR="/tmp/codexpanel-dev"
+STATE_DIR="/tmp/agentwaypoint-dev"
 mkdir -p "$STATE_DIR"
 
 if [[ -f "$ROOT_DIR/.env" ]]; then
@@ -24,7 +24,7 @@ if [[ "${SKIP_MIGRATE:-0}" != "1" ]]; then
   # shellcheck disable=SC1091
   source "$ROOT_DIR/.env"
   set +a
-  corepack pnpm --filter @codexpanel/api prisma:migrate:dev
+  corepack pnpm --filter @agentwaypoint/api prisma:migrate:dev
 fi
 
 start_bg() {

@@ -1,9 +1,9 @@
-name: codexpanel
+name: agentwaypoint
 
 services:
   nginx:
     image: nginx:1.27-alpine
-    container_name: codexpanel-nginx
+    container_name: agentwaypoint-nginx
     restart: unless-stopped
     depends_on:
       web:
@@ -27,12 +27,12 @@ services:
     build:
       context: ../..
       dockerfile: infra/docker/Dockerfile.dev
-    container_name: codexpanel-web
+    container_name: agentwaypoint-web
     working_dir: /workspace
     command: >
       sh -lc "
       pnpm install --no-frozen-lockfile --reporter=append-only &&
-      pnpm --filter @codexpanel/web dev
+      pnpm --filter @agentwaypoint/web dev
       "
     environment:
       NODE_ENV: development
@@ -62,10 +62,10 @@ services:
 
   postgres:
     image: postgres:16-alpine
-    container_name: codexpanel-postgres
+    container_name: agentwaypoint-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: codexpanel
+      POSTGRES_DB: agentwaypoint
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
@@ -75,7 +75,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: codexpanel-redis
+    container_name: agentwaypoint-redis
     restart: unless-stopped
     ports:
       - '6379:6379'

@@ -1,4 +1,4 @@
-# CodexPanel v1 Tech Stack and Repo Structure
+# AgentWaypoint v1 Tech Stack and Repo Structure
 
 ## 1. Recommended v1 Stack
 
@@ -41,7 +41,7 @@
 ## 2. Monorepo Layout (v1)
 
 ```text
-CodexPanel/
+AgentWaypoint/
   apps/
     web/                      # Next.js frontend
     api/                      # NestJS backend (BFF + runner adapter module)

@@ -1,6 +1,6 @@
-# CodexPanel
+# AgentWaypoint
 
-CodexPanel is a web interface for chatting and vibe coding with Codex through the Codex app server interface.
+AgentWaypoint is a web interface for chatting and vibe coding with Codex through the Codex app server interface.
 
 ## Status
 Hybrid local dev stack is implemented with project/session management, turn streaming, session resume, host runner integration, and approval pause/resume support.
@@ -84,7 +84,7 @@ This project currently runs in hybrid mode:
 2. If your host Node is not v22 (for example v24), use watch mode:
    - `API_WATCH_MODE=1 ./scripts/dev-api-host.sh`
 3. If DB schema is not initialized yet, run once:
-   - `set -a; source .env; set +a; corepack pnpm --filter @codexpanel/api prisma:migrate:dev`
+   - `set -a; source .env; set +a; corepack pnpm --filter @agentwaypoint/api prisma:migrate:dev`
 
 ### 3.5 Start Host Runner
 1. Start runner daemon:
@@ -129,7 +129,7 @@ Codex backend env options:
 - `RUNNER_CODEX_APPROVAL_POLICY` (default `on-request`)
 - `RUNNER_CODEX_SANDBOX` (optional sandbox override)
 
-When approvals are enabled, CodexPanel pauses the active turn and exposes approve/reject controls in the web UI before side-effecting actions continue.
+When approvals are enabled, AgentWaypoint pauses the active turn and exposes approve/reject controls in the web UI before side-effecting actions continue.
 
 Workspace validation:
 - Turn execution now requires project `repoPath` to be configured and exist on host.

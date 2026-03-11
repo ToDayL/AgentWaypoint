@@ -3,7 +3,7 @@ map $http_upgrade $connection_upgrade {
     '' close;
 }
 
-upstream codexpanel_web {
+upstream agentwaypoint_web {
     server ${WEB_UPSTREAM};
     keepalive 32;
 }
@@ -34,6 +34,6 @@ server {
     proxy_buffering off;
 
     location / {
-        proxy_pass http://codexpanel_web;
+        proxy_pass http://agentwaypoint_web;
     }
 }
