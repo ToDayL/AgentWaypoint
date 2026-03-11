@@ -1,6 +1,6 @@
 # CodexPanel Implementation Plan
 
-Last updated: 2026-03-06
+Last updated: 2026-03-11
 
 ## 1. Phase 0: Foundation and Tooling
 1. Set up monorepo root files (`package.json`, `pnpm-workspace.yaml`, `.gitignore`, `.editorconfig`, `.env.example`).
@@ -42,11 +42,8 @@ Last updated: 2026-03-06
 3. Add observability baseline (structured logs, metrics/tracing hooks).
 
 ## 8. Immediate Next Work
-1. Update local runtime topology to hybrid mode:
-   - Keep `web + postgres (+redis)` in Docker.
-   - Run `apps/api` on host.
-2. Define and implement API <-> host runner contract.
-3. Add turn lifecycle endpoints and runner adapter module.
-4. Add SSE stream endpoint and reconnect behavior.
-5. Build first real web pages: login, projects/sessions list, chat shell.
-6. Add CI for lint/typecheck/test.
+1. Stabilize and harden the approval flow:
+   - Add more edge-case coverage for rejected approvals, duplicate resolutions, and startup recovery while waiting on approval.
+2. Add CI for lint/typecheck/test with the required database service.
+3. Expand observability around runner/approval state transitions.
+4. Move beyond the simulation shell toward real auth/session UX.

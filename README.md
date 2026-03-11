@@ -3,7 +3,7 @@
 CodexPanel is a web interface for chatting and vibe coding with Codex through the Codex app server interface.
 
 ## Status
-Scaffolded monorepo baseline with initial `web`, `api`, shared packages, and local Docker infra.
+Hybrid local dev stack is implemented with project/session management, turn streaming, session resume, host runner integration, and approval pause/resume support.
 
 ## Goals (MVP)
 - Browser chat experience for Codex
@@ -126,8 +126,10 @@ Codex backend env options:
 - `RUNNER_CODEX_BIN` (default `codex`)
 - `RUNNER_CODEX_CWD` (default current working directory)
 - `RUNNER_CODEX_MODEL` (optional model override)
-- `RUNNER_CODEX_APPROVAL_POLICY` (default `never`)
+- `RUNNER_CODEX_APPROVAL_POLICY` (default `on-request`)
 - `RUNNER_CODEX_SANDBOX` (optional sandbox override)
+
+When approvals are enabled, CodexPanel pauses the active turn and exposes approve/reject controls in the web UI before side-effecting actions continue.
 
 Workspace validation:
 - Turn execution now requires project `repoPath` to be configured and exist on host.
@@ -141,12 +143,14 @@ Workspace validation:
 
 ### Optional Orchestration Scripts
 - `pnpm dev:up`: starts Docker services, runs migration, starts host runner + host api in background, and checks health.
+- Background host services started by `pnpm dev:up` run in non-watch mode by default for stability. Set `API_WATCH_MODE=1` and/or `RUNNER_WATCH_MODE=1` explicitly if you want watch mode.
 - `pnpm dev:status`: prints Docker service status, host pid status, and health checks.
 - `pnpm dev:down`: stops host processes and Docker services.
 
 ## Documentation
 - [PRD](./doc/PRD.md)
 - [Initial Architecture](./doc/Architecture-Initial.md)
+- [Auth Design](./doc/Auth-Design.md)
 - [Codex App Server Notes](./doc/Codex-App-Server-Documentation.md)
 - [v1 Tech Stack and Repo Structure](./doc/V1-Tech-Stack-and-Repo-Structure.md)
 - [Development Workflow](./doc/Development-Workflow.md)
@@ -155,10 +159,10 @@ Workspace validation:
 - [Implementation Progress](./doc/Implementation-Progress.md)
 
 ## Next Steps
-1. Shift local runtime to hybrid mode (`web + db` in Docker, `api` on host).
-2. Define and implement API <-> host runner contract.
-3. Add API runner adapter + SSE streaming endpoints.
-4. Add API client + session list page in `apps/web`.
+1. Harden approval edge cases such as rejection handling, duplicate approvals, and recovery from paused turns.
+2. Add CI coverage for lint, typecheck, and database-backed tests.
+3. Improve observability around runner lifecycle and approval state transitions.
+4. Replace the current simulation-first UX with fuller auth and session management flows.
 
 ## License
 Apache License 2.0. See [LICENSE](./LICENSE).

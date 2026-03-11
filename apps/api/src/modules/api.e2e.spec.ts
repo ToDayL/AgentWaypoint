@@ -4,6 +4,7 @@ import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from '../app.module';
 import { HttpExceptionFilter } from '../common/filters/http-exception.filter';
+import { PrismaService } from './prisma/prisma.service';
 
 if (!process.env.DATABASE_URL) {
   process.env.DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/codexpanel';
@@ -21,12 +22,14 @@ async function sleep(ms: number): Promise<void> {
 
 describe('API e2e', () => {
   let app: NestFastifyApplication;
+  let prisma: PrismaService;
 
   beforeAll(async () => {
     app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter());
     app.useGlobalFilters(new HttpExceptionFilter());
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
+    prisma = app.get(PrismaService);
   });
 
   afterAll(async () => {
@@ -281,5 +284,130 @@ describe('API e2e', () => {
     });
     expect(streamResponse.statusCode).toBe(200);
     expect(streamResponse.payload).toContain('event: turn.cancelled');
+  });
+
+  it('persists approval events and exposes pending approval in turn status', async () => {
+    const email = randomEmail('turn-approval');
+
+    const createProjectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: { name: 'Approval Project', repoPath: TEST_REPO_PATH },
+    });
+    expect(createProjectResponse.statusCode).toBe(201);
+    const project = createProjectResponse.json();
+
+    const createSessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Approval Session' },
+    });
+    expect(createSessionResponse.statusCode).toBe(201);
+    const session = createSessionResponse.json();
+
+    const user = await prisma.user.findUnique({
+      where: { email },
+      select: { id: true },
+    });
+    expect(user?.id).toBeTruthy();
+
+    const userMessage = await prisma.message.create({
+      data: {
+        sessionId: session.id,
+        role: 'user',
+        content: 'approval state should be persisted',
+      },
+    });
+    const turn = await prisma.turn.create({
+      data: {
+        sessionId: session.id,
+        userMessageId: userMessage.id,
+        status: 'queued',
+      },
+      select: { id: true },
+    });
+    const turnId = turn.id;
+
+    const approvalRequestedResponse = await app.inject({
+      method: 'POST',
+      url: `/internal/runner/turns/${turnId}/events`,
+      payload: {
+        type: 'turn.approval.requested',
+        payload: {
+          requestId: 'approval-e2e-1',
+          kind: 'command_execution',
+          reason: 'Need approval to run a command',
+          command: 'git status',
+          cwd: TEST_REPO_PATH,
+        },
+      },
+    });
+    expect(approvalRequestedResponse.statusCode).toBe(201);
+
+    const pendingStatusResponse = await app.inject({
+      method: 'GET',
+      url: `/api/turns/${turnId}`,
+      headers: { 'x-user-email': email },
+    });
+    expect(pendingStatusResponse.statusCode).toBe(200);
+    expect(pendingStatusResponse.json()).toMatchObject({
+      id: turnId,
+      status: 'waiting_approval',
+      pendingApproval: {
+        id: 'approval-e2e-1',
+        kind: 'command_execution',
+        status: 'pending',
+        decision: null,
+      },
+    });
+
+    const approvalResolvedResponse = await app.inject({
+      method: 'POST',
+      url: `/internal/runner/turns/${turnId}/events`,
+      payload: {
+        type: 'turn.approval.resolved',
+        payload: {
+          requestId: 'approval-e2e-1',
+          decision: 'approve',
+        },
+      },
+    });
+    expect(approvalResolvedResponse.statusCode).toBe(201);
+
+    const resolvedStatusResponse = await app.inject({
+      method: 'GET',
+      url: `/api/turns/${turnId}`,
+      headers: { 'x-user-email': email },
+    });
+    expect(resolvedStatusResponse.statusCode).toBe(200);
+    expect(resolvedStatusResponse.json()).toMatchObject({
+      id: turnId,
+      status: 'running',
+      pendingApproval: null,
+    });
+
+    const completionResponse = await app.inject({
+      method: 'POST',
+      url: `/internal/runner/turns/${turnId}/events`,
+      payload: {
+        type: 'turn.completed',
+        payload: {
+          content: 'Approval path finished',
+        },
+      },
+    });
+    expect(completionResponse.statusCode).toBe(201);
+
+    const streamResponse = await app.inject({
+      method: 'GET',
+      url: `/api/turns/${turnId}/stream`,
+      headers: { 'x-user-email': email },
+    });
+    expect(streamResponse.statusCode).toBe(200);
+    expect(streamResponse.payload).toContain('event: turn.approval.requested');
+    expect(streamResponse.payload).toContain('event: turn.approval.resolved');
+    expect(streamResponse.payload).toContain('event: turn.completed');
   });
 });

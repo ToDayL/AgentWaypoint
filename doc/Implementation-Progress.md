@@ -1,6 +1,6 @@
 # CodexPanel Implementation Progress
 
-Last updated: 2026-03-10
+Last updated: 2026-03-11
 
 ## Architecture Decision on 2026-03-05
 1. Chosen integration model: Option 2.
@@ -148,3 +148,29 @@ Last updated: 2026-03-10
    - Project form includes workspace path (`repoPath`).
    - Proxy empty-body cancel forwarding bug was fixed.
    - Hydration guard mitigations added for mobile/client attribute mismatch cases.
+
+## Completed on 2026-03-11
+1. Approval pause/resume flow implemented end-to-end:
+   - API accepts runner callbacks for `turn.approval.requested` and `turn.approval.resolved`.
+   - Turn status now exposes `pendingApproval` details while a turn is blocked on approval.
+   - User action endpoint added: `POST /api/turns/:id/approval`.
+   - Web proxy route added at `/api/sim/turns/:turnId/approval`.
+2. Approval persistence added to the data model:
+   - New Prisma model: `TurnApproval`.
+   - Migration added: `20260310164000_add_turn_approvals`.
+   - Pending approval state survives polling/history reloads because it is stored in the database.
+3. Runner approval bridge implemented:
+   - Host runner now captures Codex approval requests from the app-server stream.
+   - Approval decisions are forwarded back to Codex through `/runner/turns/approval`.
+   - Runner emits normalized approval request/resolution events back to the API.
+4. Web simulation UI supports human approval:
+   - Active turn panel renders approval-required state and payload details.
+   - Approve/reject controls resume the paused turn.
+   - SSE and polling paths both hydrate approval state correctly after reload/reconnect.
+5. E2E coverage expanded for approval behavior:
+   - `apps/api/src/modules/api.e2e.spec.ts` now covers approval event persistence and `pendingApproval` turn status.
+   - `apps/api/src/modules/api.http-runner.e2e.spec.ts` now covers approve/resume flow through the HTTP runner adapter.
+6. Validation status for this update:
+   - `@codexpanel/api` typecheck passes.
+   - `@codexpanel/web` typecheck passes.
+   - `corepack pnpm --filter @codexpanel/api test` passes locally (`10/10` tests).
