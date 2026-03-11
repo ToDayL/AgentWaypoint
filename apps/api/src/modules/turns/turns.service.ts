@@ -14,6 +14,12 @@ export type RunnerEventType =
   | 'assistant.delta'
   | 'turn.approval.requested'
   | 'turn.approval.resolved'
+  | 'plan.updated'
+  | 'reasoning.delta'
+  | 'diff.updated'
+  | 'tool.started'
+  | 'tool.output'
+  | 'tool.completed'
   | 'turn.completed'
   | 'turn.failed'
   | 'turn.cancelled';
@@ -321,6 +327,18 @@ export class TurnsService implements OnModuleInit {
         });
 
         await this.appendEvent(turnId, 'turn.approval.resolved', normalizedPayload);
+        return;
+      }
+      case 'plan.updated':
+      case 'reasoning.delta':
+      case 'diff.updated':
+      case 'tool.started':
+      case 'tool.output':
+      case 'tool.completed': {
+        if (TERMINAL_STATUSES.includes(turn.status)) {
+          return;
+        }
+        await this.appendEvent(turnId, type, this.normalizePayload(payload));
         return;
       }
       case 'turn.completed': {

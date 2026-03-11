@@ -174,3 +174,15 @@ Last updated: 2026-03-11
    - `@codexpanel/api` typecheck passes.
    - `@codexpanel/web` typecheck passes.
    - `corepack pnpm --filter @codexpanel/api test` passes locally (`10/10` tests).
+
+## In Progress on 2026-03-11 (uncommitted working tree)
+1. Runner event surface is being expanded beyond approvals:
+   - Runner now forwards `plan.updated`, `reasoning.delta`, `diff.updated`, `tool.started`, `tool.output`, and `tool.completed`.
+   - API runner callback validation and turn event ingestion now accept and persist the same event types.
+   - Shared stream event typings are updated so clients can consume the new events consistently.
+2. Web simulation UI is being upgraded to expose richer live execution state:
+   - Active turn view now accumulates separate panes for tool output, reasoning deltas, latest plan, and diff summary.
+   - Stream event log descriptions were extended for plan/reasoning/diff/tool lifecycle updates.
+   - UI state reset and session reload paths now clear and rehydrate the richer streamed output model.
+3. Current validation status for the uncommitted changes:
+   - No new verification has been recorded in this document yet for the richer event-stream UI/API changes.

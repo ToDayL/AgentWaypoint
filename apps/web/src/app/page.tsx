@@ -78,6 +78,9 @@ const STREAM_EVENTS = [
   'assistant.delta',
   'turn.approval.requested',
   'turn.approval.resolved',
+  'plan.updated',
+  'reasoning.delta',
+  'diff.updated',
   'tool.started',
   'tool.output',
   'tool.completed',
@@ -101,6 +104,10 @@ export default function HomePage() {
   const [eventLog, setEventLog] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [assistantText, setAssistantText] = useState('');
+  const [reasoningText, setReasoningText] = useState('');
+  const [latestPlan, setLatestPlan] = useState('');
+  const [toolOutput, setToolOutput] = useState('');
+  const [diffSummary, setDiffSummary] = useState('');
   const [activeTurnId, setActiveTurnId] = useState('');
   const [resumedTurnHint, setResumedTurnHint] = useState('');
   const [turnStatus, setTurnStatus] = useState('idle');
@@ -194,12 +201,16 @@ export default function HomePage() {
         setSelectedSessionId('');
         setMessages([]);
         setAssistantText('');
-      setActiveTurnId('');
-      setResumedTurnHint('');
-      setTurnStatus('idle');
-      setPendingApproval(null);
-      setEventLog([]);
-    }
+        setReasoningText('');
+        setLatestPlan('');
+        setToolOutput('');
+        setDiffSummary('');
+        setActiveTurnId('');
+        setResumedTurnHint('');
+        setTurnStatus('idle');
+        setPendingApproval(null);
+        setEventLog([]);
+      }
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
@@ -262,6 +273,10 @@ export default function HomePage() {
     setError('');
     setEventLog([]);
     setAssistantText('');
+    setReasoningText('');
+    setLatestPlan('');
+    setToolOutput('');
+    setDiffSummary('');
     setResumedTurnHint('');
     setTurnStatus('queued');
 
@@ -337,6 +352,10 @@ export default function HomePage() {
       stopTurnStatusPolling();
       setMessages([]);
       setAssistantText('');
+      setReasoningText('');
+      setLatestPlan('');
+      setToolOutput('');
+      setDiffSummary('');
       setActiveTurnId('');
       setResumedTurnHint('');
       setTurnStatus('idle');
@@ -359,6 +378,10 @@ export default function HomePage() {
       setActiveTurnId(history.activeTurnId ?? '');
       setPendingApproval(null);
       setAssistantText('');
+      setReasoningText('');
+      setLatestPlan('');
+      setToolOutput('');
+      setDiffSummary('');
       setEventLog([]);
       if (history.activeTurnId) {
         await syncTurnState(history.activeTurnId);
@@ -409,6 +432,28 @@ export default function HomePage() {
           }
         }
 
+        if (envelope.type === 'reasoning.delta') {
+          const delta = envelope.payload.delta;
+          if (typeof delta === 'string') {
+            setReasoningText((current) => current + delta);
+          }
+        }
+
+        if (envelope.type === 'plan.updated') {
+          setLatestPlan(formatPlanPayload(envelope.payload));
+        }
+
+        if (envelope.type === 'tool.output') {
+          const delta = envelope.payload.text;
+          if (typeof delta === 'string') {
+            setToolOutput((current) => current + delta);
+          }
+        }
+
+        if (envelope.type === 'diff.updated') {
+          setDiffSummary(formatDiffPayload(envelope.payload));
+        }
+
         if (envelope.type === 'turn.started') {
           setTurnStatus('running');
         }
@@ -436,6 +481,7 @@ export default function HomePage() {
           setActiveTurnId('');
           setResumedTurnHint('');
           setPendingApproval(null);
+          setReasoningText('');
           stopTurnStatusPolling();
           if (sessionId) {
             void loadSessionHistory(sessionId, { resumeStream: false });
@@ -483,6 +529,7 @@ export default function HomePage() {
             setActiveTurnId('');
             setResumedTurnHint('');
             setPendingApproval(null);
+            setReasoningText('');
             if (sessionId) {
               await loadSessionHistory(sessionId, { resumeStream: false });
             }
@@ -666,6 +713,30 @@ export default function HomePage() {
             <pre>{assistantText || 'No active stream output.'}</pre>
           </article>
 
+          <div className="sim-output-grid">
+            <article className="sim-output">
+              <h3>Tool Output</h3>
+              <pre>{toolOutput || 'No tool output yet.'}</pre>
+            </article>
+
+            <article className="sim-output">
+              <h3>Reasoning</h3>
+              <pre>{reasoningText || 'No reasoning deltas yet.'}</pre>
+            </article>
+          </div>
+
+          <div className="sim-output-grid">
+            <article className="sim-output">
+              <h3>Latest Plan</h3>
+              <pre>{latestPlan || 'No plan updates yet.'}</pre>
+            </article>
+
+            <article className="sim-output">
+              <h3>Diff Summary</h3>
+              <pre>{diffSummary || 'No diff updates yet.'}</pre>
+            </article>
+          </div>
+
           <article className="sim-events">
             <h3>Chat History</h3>
             <ul>
@@ -755,6 +826,18 @@ function formatApprovalKind(kind: string): string {
 }
 
 function describeStreamEvent(envelope: StreamEnvelope): string {
+  if (envelope.type === 'plan.updated') {
+    return `#${envelope.seq} plan updated`;
+  }
+
+  if (envelope.type === 'reasoning.delta') {
+    return `#${envelope.seq} reasoning ${String(envelope.payload.kind ?? 'delta')}`;
+  }
+
+  if (envelope.type === 'diff.updated') {
+    return `#${envelope.seq} diff updated`;
+  }
+
   if (envelope.type === 'turn.approval.requested') {
     const kind = typeof envelope.payload.kind === 'string' ? envelope.payload.kind : 'approval';
     const reason =
@@ -768,5 +851,54 @@ function describeStreamEvent(envelope: StreamEnvelope): string {
     return `#${envelope.seq} approval ${String(envelope.payload.decision ?? 'resolved')}`;
   }
 
+  if (envelope.type === 'tool.started' || envelope.type === 'tool.completed') {
+    const title =
+      typeof envelope.payload.title === 'string' && envelope.payload.title.length > 0
+        ? envelope.payload.title
+        : String(envelope.payload.kind ?? 'tool');
+    return `#${envelope.seq} ${envelope.type.replace('tool.', 'tool ')}: ${title}`;
+  }
+
+  if (envelope.type === 'tool.output') {
+    return `#${envelope.seq} tool output`;
+  }
+
   return `#${envelope.seq} ${envelope.type}`;
+}
+
+function formatPlanPayload(payload: Record<string, unknown>): string {
+  const lines: string[] = [];
+  if (typeof payload.explanation === 'string' && payload.explanation.length > 0) {
+    lines.push(payload.explanation);
+  }
+
+  if (Array.isArray(payload.plan)) {
+    payload.plan.forEach((entry, index) => {
+      if (!entry || typeof entry !== 'object') {
+        return;
+      }
+      const record = entry as Record<string, unknown>;
+      const step = typeof record.step === 'string' ? record.step : `Step ${index + 1}`;
+      const status = typeof record.status === 'string' ? record.status : 'pending';
+      lines.push(`[${status}] ${step}`);
+    });
+  }
+
+  return lines.join('\n');
+}
+
+function formatDiffPayload(payload: Record<string, unknown>): string {
+  if (typeof payload.unifiedDiff === 'string' && payload.unifiedDiff.length > 0) {
+    return payload.unifiedDiff;
+  }
+  if (typeof payload.diff === 'string' && payload.diff.length > 0) {
+    return payload.diff;
+  }
+  if (payload.diffStat && typeof payload.diffStat === 'object') {
+    return JSON.stringify(payload.diffStat, null, 2);
+  }
+  if (payload.diffAvailable === true) {
+    return 'Diff update available.';
+  }
+  return '';
 }

@@ -26,6 +26,12 @@ type RunnerEventType =
   | 'assistant.delta'
   | 'turn.approval.requested'
   | 'turn.approval.resolved'
+  | 'plan.updated'
+  | 'reasoning.delta'
+  | 'diff.updated'
+  | 'tool.started'
+  | 'tool.output'
+  | 'tool.completed'
   | 'turn.completed'
   | 'turn.failed'
   | 'turn.cancelled';
@@ -599,6 +605,24 @@ async function handleCodexNotification(method: string, params: Record<string, un
     return;
   }
 
+  if (method === 'item/commandExecution/outputDelta' || method === 'item/fileChange/outputDelta') {
+    const threadId = readNestedString(params, ['threadId']);
+    const codexTurnId = readNestedString(params, ['turnId']);
+    if (!threadId) {
+      return;
+    }
+    const turn = findTurnByThread(threadId, codexTurnId);
+    if (!turn || turn.finalized) {
+      return;
+    }
+    const payload = buildToolOutputPayload(method, params);
+    if (!payload.text) {
+      return;
+    }
+    await notifyApi(turn.turnId, 'tool.output', payload);
+    return;
+  }
+
   if (method === 'item/completed') {
     const threadId = readNestedString(params, ['threadId']);
     const codexTurnId = readNestedString(params, ['turnId']);
@@ -616,7 +640,83 @@ async function handleCodexNotification(method: string, params: Record<string, un
       if (text && turn.assistantText.length === 0) {
         turn.assistantText = text;
       }
+      return;
     }
+
+    await notifyApi(turn.turnId, 'tool.completed', buildToolLifecyclePayload('completed', params));
+    return;
+  }
+
+  if (method === 'item/started') {
+    const threadId = readNestedString(params, ['threadId']);
+    const codexTurnId = readNestedString(params, ['turnId']);
+    if (!threadId) {
+      return;
+    }
+    const turn = findTurnByThread(threadId, codexTurnId);
+    if (!turn || turn.finalized) {
+      return;
+    }
+    await notifyApi(turn.turnId, 'tool.started', buildToolLifecyclePayload('started', params));
+    return;
+  }
+
+  if (method === 'turn/plan/updated') {
+    const threadId = readNestedString(params, ['threadId']);
+    const codexTurnId = readNestedString(params, ['turnId']);
+    if (!threadId) {
+      return;
+    }
+    const turn = findTurnByThread(threadId, codexTurnId);
+    if (!turn || turn.finalized) {
+      return;
+    }
+    await notifyApi(turn.turnId, 'plan.updated', {
+      explanation: typeof params.explanation === 'string' ? params.explanation : null,
+      plan: Array.isArray(params.plan) ? params.plan : [],
+    });
+    return;
+  }
+
+  if (
+    method === 'item/reasoning/textDelta' ||
+    method === 'item/reasoning/summaryTextDelta' ||
+    method === 'item/plan/delta'
+  ) {
+    const threadId = readNestedString(params, ['threadId']);
+    const codexTurnId = readNestedString(params, ['turnId']);
+    const delta = readNestedString(params, ['delta']);
+    if (!threadId || !delta) {
+      return;
+    }
+    const turn = findTurnByThread(threadId, codexTurnId);
+    if (!turn || turn.finalized) {
+      return;
+    }
+    await notifyApi(turn.turnId, 'reasoning.delta', {
+      kind: method === 'item/plan/delta' ? 'plan' : method === 'item/reasoning/summaryTextDelta' ? 'summary' : 'reasoning',
+      itemId: readNestedString(params, ['itemId']),
+      delta,
+    });
+    return;
+  }
+
+  if (method === 'turn/diff/updated') {
+    const threadId = readNestedString(params, ['threadId']);
+    const codexTurnId = readNestedString(params, ['turnId']);
+    if (!threadId) {
+      return;
+    }
+    const turn = findTurnByThread(threadId, codexTurnId);
+    if (!turn || turn.finalized) {
+      return;
+    }
+    await notifyApi(turn.turnId, 'diff.updated', {
+      diffStat: readOptionalObject(params.diffStat),
+      diffAvailable: params.diff !== undefined || params.unifiedDiff !== undefined,
+      unifiedDiff: readOptionalPayloadString(params.unifiedDiff),
+      diff: readOptionalPayloadString(params.diff),
+    });
     return;
   }
 
@@ -949,6 +1049,43 @@ function buildApprovalRequestedPayload(
     reason: readOptionalPayloadString(params.reason),
     itemId: readOptionalPayloadString(params.itemId),
     permissions: readOptionalObject(params.permissions),
+  };
+}
+
+function buildToolLifecyclePayload(phase: 'started' | 'completed', params: Record<string, unknown>): Record<string, unknown> {
+  const item = readOptionalObject(params.item) ?? {};
+  const kind = readOptionalPayloadString(item.type) ?? 'tool';
+  const title =
+    readOptionalPayloadString(item.title) ??
+    readOptionalPayloadString(item.name) ??
+    readOptionalPayloadString(item.command) ??
+    kind;
+
+  return {
+    phase,
+    itemId: readOptionalPayloadString(item.id) ?? readOptionalPayloadString(params.itemId),
+    kind,
+    title,
+    status: readOptionalPayloadString(item.status),
+    command: readOptionalPayloadString(item.command),
+    text: readOptionalPayloadString(item.text),
+    path: readOptionalPayloadString(item.path),
+    item,
+  };
+}
+
+function buildToolOutputPayload(method: string, params: Record<string, unknown>): Record<string, unknown> & { text: string | null } {
+  const kind = method === 'item/fileChange/outputDelta' ? 'file_change' : 'command_execution';
+  const text =
+    readOptionalPayloadString(params.delta) ??
+    readOptionalPayloadString(params.output) ??
+    readOptionalPayloadString(params.text);
+
+  return {
+    kind,
+    itemId: readOptionalPayloadString(params.itemId),
+    stream: readOptionalPayloadString(params.stream),
+    text,
   };
 }
 
