@@ -1,6 +1,6 @@
 # CodexPanel Implementation Progress
 
-Last updated: 2026-03-11
+Last updated: 2026-03-12
 
 ## Architecture Decision on 2026-03-05
 1. Chosen integration model: Option 2.
@@ -175,14 +175,21 @@ Last updated: 2026-03-11
    - `@codexpanel/web` typecheck passes.
    - `corepack pnpm --filter @codexpanel/api test` passes locally (`10/10` tests).
 
-## In Progress on 2026-03-11 (uncommitted working tree)
-1. Runner event surface is being expanded beyond approvals:
+## Completed on 2026-03-12
+1. Rich runner event mapping implemented:
    - Runner now forwards `plan.updated`, `reasoning.delta`, `diff.updated`, `tool.started`, `tool.output`, and `tool.completed`.
    - API runner callback validation and turn event ingestion now accept and persist the same event types.
-   - Shared stream event typings are updated so clients can consume the new events consistently.
-2. Web simulation UI is being upgraded to expose richer live execution state:
-   - Active turn view now accumulates separate panes for tool output, reasoning deltas, latest plan, and diff summary.
-   - Stream event log descriptions were extended for plan/reasoning/diff/tool lifecycle updates.
-   - UI state reset and session reload paths now clear and rehydrate the richer streamed output model.
-3. Current validation status for the uncommitted changes:
-   - No new verification has been recorded in this document yet for the richer event-stream UI/API changes.
+   - Shared stream event typings were expanded so clients can consume the richer stream consistently.
+2. Web simulation UI exposes richer live execution state:
+   - Active turn view now renders separate panes for tool output, reasoning deltas, latest plan, and diff summary.
+   - Event timeline descriptions were extended for plan/reasoning/diff/tool lifecycle updates.
+   - Event log behavior was adjusted so the list is preserved after turn completion and only cleared when a new turn starts or the session changes.
+3. Approval decision handling expanded beyond binary approve/reject:
+   - API and runner now support `accept`, `acceptForSession`, `decline`, `cancel`, `acceptWithExecpolicyAmendment`, and `applyNetworkPolicyAmendment`.
+   - Legacy web/API `approve` and `reject` aliases are still normalized for compatibility.
+   - Approval UI now renders richer command-approval actions when the app server provides available decisions or amendment proposals.
+4. Validation and live verification completed for this update:
+   - `@codexpanel/api` typecheck passes.
+   - `@codexpanel/web` typecheck passes.
+   - `corepack pnpm --filter @codexpanel/api test` passes locally (`10/10` tests).
+   - Live host API and runner were restarted successfully and exercised against the updated event and approval surfaces.
