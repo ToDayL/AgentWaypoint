@@ -84,13 +84,14 @@ type RunnerBackend = 'codex' | 'mock';
 const port = Number(process.env.RUNNER_PORT ?? 4700);
 const host = process.env.RUNNER_HOST ?? '127.0.0.1';
 const authToken = process.env.RUNNER_AUTH_TOKEN?.trim() || null;
-const apiBaseUrl = (process.env.RUNNER_API_BASE_URL ?? 'http://127.0.0.1:4000').replace(/\/+$/, '');
 const runnerBackend: RunnerBackend = (process.env.RUNNER_BACKEND ?? 'codex').trim().toLowerCase() === 'mock' ? 'mock' : 'codex';
 const codexBin = process.env.RUNNER_CODEX_BIN?.trim() || 'codex';
 const codexDefaultCwd = process.env.RUNNER_CODEX_CWD?.trim() || process.cwd();
 const codexDefaultModel = process.env.RUNNER_CODEX_MODEL?.trim() || null;
 const codexApprovalPolicy = process.env.RUNNER_CODEX_APPROVAL_POLICY?.trim() || 'never';
 const codexSandboxMode = process.env.RUNNER_CODEX_SANDBOX?.trim() || null;
+const runnerEventRetentionMs = Number(process.env.RUNNER_EVENT_RETENTION_MS ?? 5 * 60 * 1000);
+const runnerEventBufferLimit = Number(process.env.RUNNER_EVENT_BUFFER_LIMIT ?? 1000);
 
 type ActiveTurnBase = {
   turnId: string;
@@ -117,6 +118,24 @@ type ActiveCodexTurn = ActiveTurnBase & {
 
 type ActiveTurn = ActiveMockTurn | ActiveCodexTurn;
 
+type BufferedRunnerEvent = {
+  turnId: string;
+  seq: number;
+  type: RunnerEventType;
+  payload: Record<string, unknown>;
+  createdAt: string;
+};
+
+type RunnerTurnStreamState = {
+  turnId: string;
+  sessionId: string;
+  status: 'queued' | 'running' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled';
+  nextSeq: number;
+  events: BufferedRunnerEvent[];
+  listeners: Set<ServerResponse>;
+  cleanupTimer: ReturnType<typeof setTimeout> | null;
+};
+
 type PendingRequest = {
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
@@ -142,12 +161,16 @@ type CodexWorker = {
 };
 
 const activeTurns = new Map<string, ActiveTurn>();
+const turnStreams = new Map<string, RunnerTurnStreamState>();
 const pendingApprovalRequests = new Map<string, PendingApprovalRequest>();
 let codexWorkerPromise: Promise<CodexWorker> | null = null;
 
 const server = createServer(async (request, response) => {
   try {
-    if (request.method === 'GET' && request.url === '/runner/health') {
+    const url = new URL(request.url ?? '/', `http://${request.headers.host ?? '127.0.0.1'}`);
+    const pathname = url.pathname;
+
+    if (request.method === 'GET' && pathname === '/runner/health') {
       sendJson(response, 200, { status: 'ok', backend: runnerBackend, activeTurnCount: activeTurns.size });
       return;
     }
@@ -162,9 +185,62 @@ const server = createServer(async (request, response) => {
       }
     }
 
-    if (request.method === 'GET' && request.url === '/runner/models') {
+    if (request.method === 'GET' && pathname === '/runner/models') {
       sendJson(response, 200, {
         data: await listModels(),
+      });
+      return;
+    }
+
+    const turnStatusMatch = request.method === 'GET' ? pathname.match(/^\/runner\/turns\/([^/]+)$/) : null;
+    if (turnStatusMatch) {
+      const turnId = decodeURIComponent(turnStatusMatch[1] ?? '');
+      const streamState = turnStreams.get(turnId);
+      if (!streamState) {
+        sendJson(response, 404, { error: { code: 'NOT_FOUND', message: 'Turn not found' } });
+        return;
+      }
+      sendJson(response, 200, {
+        turnId: streamState.turnId,
+        sessionId: streamState.sessionId,
+        status: streamState.status,
+        latestSeq: streamState.nextSeq - 1,
+      });
+      return;
+    }
+
+    const turnStreamMatch = request.method === 'GET' ? pathname.match(/^\/runner\/turns\/([^/]+)\/stream$/) : null;
+    if (turnStreamMatch) {
+      const turnId = decodeURIComponent(turnStreamMatch[1] ?? '');
+      const streamState = turnStreams.get(turnId);
+      if (!streamState) {
+        sendJson(response, 404, { error: { code: 'NOT_FOUND', message: 'Turn not found' } });
+        return;
+      }
+
+      const since = Math.max(Number.parseInt(url.searchParams.get('since') ?? '0', 10) || 0, 0);
+      response.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      });
+
+      streamState.events.filter((event) => event.seq > since).forEach((event) => {
+        writeSseEvent(response, event);
+      });
+
+      if (isTerminalStatus(streamState.status)) {
+        response.end();
+        return;
+      }
+
+      streamState.listeners.add(response);
+      const heartbeat = setInterval(() => {
+        response.write(`: keepalive ${Date.now()}\n\n`);
+      }, 15000);
+      request.on('close', () => {
+        clearInterval(heartbeat);
+        streamState.listeners.delete(response);
       });
       return;
     }
@@ -176,7 +252,7 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    if (request.url === '/runner/turns/start') {
+    if (pathname === '/runner/turns/start') {
       const payload = parseStartTurnBody(await readJsonBody(request));
       payload.cwd = await resolveWorkspaceCwd(payload.cwd);
       const existing = activeTurns.get(payload.turnId);
@@ -200,10 +276,12 @@ const server = createServer(async (request, response) => {
           timers: [],
         };
         activeTurns.set(payload.turnId, turn);
+        ensureTurnStreamState(payload.turnId, payload.sessionId, 'queued');
         void startMockExecution(turn);
         return;
       }
 
+      ensureTurnStreamState(payload.turnId, payload.sessionId, 'queued');
       void startCodexExecution({
         turnId: payload.turnId,
         sessionId: payload.sessionId,
@@ -217,7 +295,7 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    if (request.url === '/runner/threads/fork') {
+    if (pathname === '/runner/threads/fork') {
       const payload = parseForkThreadBody(await readJsonBody(request));
       const cwd = await resolveWorkspaceCwd(payload.cwd);
 
@@ -247,7 +325,7 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    if (request.url === '/runner/turns/steer') {
+    if (pathname === '/runner/turns/steer') {
       const payload = parseSteerTurnBody(await readJsonBody(request));
       const turn = activeTurns.get(payload.turnId);
       if (!turn || turn.finalized) {
@@ -257,7 +335,7 @@ const server = createServer(async (request, response) => {
         return;
       }
       if (turn.backend !== 'codex') {
-        await notifyApi(turn.turnId, 'assistant.delta', { text: `\n[steer] ${payload.content}` });
+        await appendTurnEvent(turn.turnId, 'assistant.delta', { text: `\n[steer] ${payload.content}` });
         sendJson(response, 202, { accepted: true, runnerRequestId: randomUUID() });
         return;
       }
@@ -276,7 +354,7 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    if (request.url === '/runner/turns/cancel') {
+    if (pathname === '/runner/turns/cancel') {
       const payload = parseCancelTurnBody(await readJsonBody(request));
       const turn = activeTurns.get(payload.turnId);
       const cancelled = !!turn;
@@ -291,7 +369,7 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    if (request.url === '/runner/turns/approval') {
+    if (pathname === '/runner/turns/approval') {
       const payload = parseResolveApprovalBody(await readJsonBody(request));
       await resolvePendingApproval(payload);
       sendJson(response, 202, {
@@ -324,6 +402,12 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
     'content-length': Buffer.byteLength(body),
   });
   response.end(body);
+}
+
+function writeSseEvent(response: ServerResponse, event: BufferedRunnerEvent): void {
+  response.write(`id: ${event.seq}\n`);
+  response.write(`event: ${event.type}\n`);
+  response.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
@@ -427,7 +511,7 @@ function readOptionalString(value: unknown): string | null {
 }
 
 async function startMockExecution(turn: ActiveMockTurn): Promise<void> {
-  await notifyApi(turn.turnId, 'turn.started', {});
+  await appendTurnEvent(turn.turnId, 'turn.started', {});
 
   const responseContent = `Echo: ${turn.content}`;
   const chunks = chunkText(responseContent, 12);
@@ -436,7 +520,7 @@ async function startMockExecution(turn: ActiveMockTurn): Promise<void> {
       if (!activeTurns.has(turn.turnId)) {
         return;
       }
-      void notifyApi(turn.turnId, 'assistant.delta', { text: chunk });
+      void appendTurnEvent(turn.turnId, 'assistant.delta', { text: chunk });
     }, 120 + index * 120);
     turn.timers.push(timer);
   });
@@ -496,7 +580,7 @@ async function startCodexExecution(input: StartTurnBody): Promise<void> {
     const turnStartResult = (await sendWorkerRequest(worker, 'turn/start', turnStartParams)) as Record<string, unknown>;
     turn.codexTurnId = readNestedString(turnStartResult, ['turn', 'id']);
 
-    await notifyApi(turn.turnId, 'turn.started', {
+    await appendTurnEvent(turn.turnId, 'turn.started', {
       threadId,
       cwd: workspaceCwd,
       ...(model ? { model } : {}),
@@ -856,7 +940,7 @@ async function handleCodexNotification(method: string, params: Record<string, un
       turn.codexTurnId = codexTurnId;
     }
     turn.assistantText += delta;
-    await notifyApi(turn.turnId, 'assistant.delta', { text: delta });
+    await appendTurnEvent(turn.turnId, 'assistant.delta', { text: delta });
     return;
   }
 
@@ -874,7 +958,7 @@ async function handleCodexNotification(method: string, params: Record<string, un
     if (!payload.text) {
       return;
     }
-    await notifyApi(turn.turnId, 'tool.output', payload);
+    await appendTurnEvent(turn.turnId, 'tool.output', payload);
     return;
   }
 
@@ -898,7 +982,7 @@ async function handleCodexNotification(method: string, params: Record<string, un
       return;
     }
 
-    await notifyApi(turn.turnId, 'tool.completed', buildToolLifecyclePayload('completed', params));
+    await appendTurnEvent(turn.turnId, 'tool.completed', buildToolLifecyclePayload('completed', params));
     return;
   }
 
@@ -912,7 +996,7 @@ async function handleCodexNotification(method: string, params: Record<string, un
     if (!turn || turn.finalized) {
       return;
     }
-    await notifyApi(turn.turnId, 'tool.started', buildToolLifecyclePayload('started', params));
+    await appendTurnEvent(turn.turnId, 'tool.started', buildToolLifecyclePayload('started', params));
     return;
   }
 
@@ -926,7 +1010,7 @@ async function handleCodexNotification(method: string, params: Record<string, un
     if (!turn || turn.finalized) {
       return;
     }
-    await notifyApi(turn.turnId, 'plan.updated', {
+    await appendTurnEvent(turn.turnId, 'plan.updated', {
       explanation: typeof params.explanation === 'string' ? params.explanation : null,
       plan: Array.isArray(params.plan) ? params.plan : [],
     });
@@ -948,7 +1032,7 @@ async function handleCodexNotification(method: string, params: Record<string, un
     if (!turn || turn.finalized) {
       return;
     }
-    await notifyApi(turn.turnId, 'reasoning.delta', {
+    await appendTurnEvent(turn.turnId, 'reasoning.delta', {
       kind: method === 'item/plan/delta' ? 'plan' : method === 'item/reasoning/summaryTextDelta' ? 'summary' : 'reasoning',
       itemId: readNestedString(params, ['itemId']),
       delta,
@@ -966,7 +1050,7 @@ async function handleCodexNotification(method: string, params: Record<string, un
     if (!turn || turn.finalized) {
       return;
     }
-    await notifyApi(turn.turnId, 'diff.updated', {
+    await appendTurnEvent(turn.turnId, 'diff.updated', {
       diffStat: readOptionalObject(params.diffStat),
       diffAvailable: params.diff !== undefined || params.unifiedDiff !== undefined,
       unifiedDiff: readOptionalPayloadString(params.unifiedDiff),
@@ -1064,7 +1148,7 @@ async function handleServerRequest(worker: CodexWorker, message: Record<string, 
     params: paramsRecord,
   });
 
-  await notifyApi(turn.turnId, 'turn.approval.requested', buildApprovalRequestedPayload(requestId, method, paramsRecord));
+  await appendTurnEvent(turn.turnId, 'turn.approval.requested', buildApprovalRequestedPayload(requestId, method, paramsRecord));
 }
 
 function findTurnByThread(threadId: string, codexTurnId: string | null): ActiveCodexTurn | null {
@@ -1081,6 +1165,100 @@ function findTurnByThread(threadId: string, codexTurnId: string | null): ActiveC
     }
   }
   return fallback;
+}
+
+function ensureTurnStreamState(
+  turnId: string,
+  sessionId: string,
+  status: RunnerTurnStreamState['status'],
+): RunnerTurnStreamState {
+  const existing = turnStreams.get(turnId);
+  if (existing) {
+    existing.sessionId = sessionId;
+    existing.status = status;
+    return existing;
+  }
+
+  const state: RunnerTurnStreamState = {
+    turnId,
+    sessionId,
+    status,
+    nextSeq: 1,
+    events: [],
+    listeners: new Set<ServerResponse>(),
+    cleanupTimer: null,
+  };
+  turnStreams.set(turnId, state);
+  return state;
+}
+
+function isTerminalStatus(status: RunnerTurnStreamState['status']): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
+async function appendTurnEvent(turnId: string, type: RunnerEventType, payload: Record<string, unknown>): Promise<void> {
+  const activeTurn = activeTurns.get(turnId);
+  const sessionId = activeTurn?.sessionId ?? turnStreams.get(turnId)?.sessionId ?? '';
+  const streamState = ensureTurnStreamState(turnId, sessionId, mapEventTypeToStatus(type));
+  streamState.status = mapEventTypeToStatus(type, streamState.status);
+
+  const event: BufferedRunnerEvent = {
+    turnId,
+    seq: streamState.nextSeq,
+    type,
+    payload,
+    createdAt: new Date().toISOString(),
+  };
+  streamState.nextSeq += 1;
+  streamState.events.push(event);
+  if (streamState.events.length > runnerEventBufferLimit) {
+    streamState.events.splice(0, streamState.events.length - runnerEventBufferLimit);
+  }
+
+  streamState.listeners.forEach((listener) => {
+    writeSseEvent(listener, event);
+    if (isTerminalStatus(streamState.status)) {
+      listener.end();
+    }
+  });
+  if (isTerminalStatus(streamState.status)) {
+    streamState.listeners.clear();
+    scheduleTurnStreamCleanup(streamState);
+  }
+}
+
+function scheduleTurnStreamCleanup(streamState: RunnerTurnStreamState): void {
+  if (streamState.cleanupTimer) {
+    clearTimeout(streamState.cleanupTimer);
+  }
+  streamState.cleanupTimer = setTimeout(() => {
+    turnStreams.delete(streamState.turnId);
+  }, runnerEventRetentionMs);
+}
+
+function mapEventTypeToStatus(
+  type: RunnerEventType,
+  currentStatus: RunnerTurnStreamState['status'] = 'queued',
+): RunnerTurnStreamState['status'] {
+  if (type === 'turn.started') {
+    return 'running';
+  }
+  if (type === 'turn.approval.requested') {
+    return 'waiting_approval';
+  }
+  if (type === 'turn.approval.resolved') {
+    return 'running';
+  }
+  if (type === 'turn.completed') {
+    return 'completed';
+  }
+  if (type === 'turn.failed') {
+    return 'failed';
+  }
+  if (type === 'turn.cancelled') {
+    return 'cancelled';
+  }
+  return currentStatus;
 }
 
 async function failTurn(turnId: string, message: string): Promise<void> {
@@ -1102,7 +1280,7 @@ async function finalizeTurn(turnId: string, type: RunnerEventType, payload: Reco
     turn.completionResolve?.();
   }
 
-  await notifyApi(turnId, type, payload);
+  await appendTurnEvent(turnId, type, payload);
 }
 
 async function cancelActiveTurn(turn: ActiveTurn, options: { emitCancelEvent: boolean }): Promise<void> {
@@ -1178,29 +1356,6 @@ function readNestedString(record: Record<string, unknown>, path: string[]): stri
   return typeof value === 'string' ? value : null;
 }
 
-async function notifyApi(turnId: string, type: RunnerEventType, payload: Record<string, unknown>): Promise<void> {
-  try {
-    const response = await fetch(`${apiBaseUrl}/internal/runner/turns/${turnId}/events`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
-      },
-      body: JSON.stringify({ type, payload }),
-    });
-
-    if (!response.ok) {
-      const body = await response.text();
-      // eslint-disable-next-line no-console
-      console.error(`[agentwaypoint-runner] callback failed: ${type} -> ${response.status} ${body}`);
-    }
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : 'unknown callback error';
-    // eslint-disable-next-line no-console
-    console.error(`[agentwaypoint-runner] callback error: ${type} -> ${message}`);
-  }
-}
-
 function chunkText(text: string, size: number): string[] {
   const chunks: string[] = [];
   for (let i = 0; i < text.length; i += size) {
@@ -1223,7 +1378,7 @@ async function resolvePendingApproval(input: ResolveApprovalBody): Promise<void>
   const result = buildApprovalResponse(pending.method, pending.params, input.decision);
   respondToServerRequest(pending.worker, pending.rawRequestId, { result });
   pendingApprovalRequests.delete(input.requestId);
-  await notifyApi(input.turnId, 'turn.approval.resolved', {
+  await appendTurnEvent(input.turnId, 'turn.approval.resolved', {
     requestId: input.requestId,
     decision: describeApprovalDecision(input.decision),
   });
@@ -1242,7 +1397,7 @@ async function disposePendingApprovalsForTurn(turnId: string, decision: 'decline
     const result = buildApprovalResponse(pending.method, pending.params, decision);
     respondToServerRequest(pending.worker, pending.rawRequestId, { result });
     pendingApprovalRequests.delete(requestId);
-    await notifyApi(turnId, 'turn.approval.resolved', {
+    await appendTurnEvent(turnId, 'turn.approval.resolved', {
       requestId,
       decision: describeApprovalDecision(decision),
     });

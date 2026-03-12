@@ -5,6 +5,7 @@ import {
   ForkThreadInput,
   ForkThreadResult,
   ResolveTurnApprovalInput,
+  RunnerStreamEvent,
   RunnerAdapter,
   SteerTurnInput,
   StartTurnInput,
@@ -44,6 +45,99 @@ export class HttpRunnerAdapter implements RunnerAdapter {
         approvalPolicy: input.approvalPolicy ?? null,
       },
     });
+  }
+
+  async consumeTurnEvents(
+    input: { turnId: string; sinceSeq?: number },
+    onEvent: (event: RunnerStreamEvent) => Promise<void>,
+  ): Promise<void> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const streamPath = `/runner/turns/${encodeURIComponent(input.turnId)}/stream?since=${Math.max(
+      input.sinceSeq ?? 0,
+      0,
+    )}`;
+
+    try {
+      const response = await fetch(`${this.baseUrl}${streamPath}`, {
+        method: 'GET',
+        headers: {
+          accept: 'text/event-stream',
+          ...(this.authToken ? { authorization: `Bearer ${this.authToken}` } : {}),
+        },
+        signal: controller.signal,
+      });
+
+      if (!response.ok || !response.body) {
+        const responseText = await response.text();
+        this.logger.error(
+          `Runner stream failed: ${streamPath} -> ${response.status} ${response.statusText} ${responseText}`,
+        );
+        throw new Error(`Runner stream failed: ${response.status}`);
+      }
+
+      clearTimeout(timeout);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentEvent = 'message';
+      let dataLines: string[] = [];
+
+      const flushEvent = async (): Promise<void> => {
+        if (dataLines.length === 0) {
+          currentEvent = 'message';
+          return;
+        }
+        const payload = dataLines.join('\n').trim();
+        dataLines = [];
+        if (!payload || currentEvent === 'keepalive') {
+          currentEvent = 'message';
+          return;
+        }
+        const parsed = JSON.parse(payload) as RunnerStreamEvent;
+        await onEvent(parsed);
+        currentEvent = 'message';
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        let newlineIndex = buffer.indexOf('\n');
+        while (newlineIndex >= 0) {
+          const rawLine = buffer.slice(0, newlineIndex);
+          buffer = buffer.slice(newlineIndex + 1);
+          const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+
+          if (line.length === 0) {
+            await flushEvent();
+          } else if (line.startsWith('event:')) {
+            currentEvent = line.slice(6).trim() || 'message';
+          } else if (line.startsWith('data:')) {
+            dataLines.push(line.slice(5).trimStart());
+          }
+
+          newlineIndex = buffer.indexOf('\n');
+        }
+      }
+
+      if (dataLines.length > 0) {
+        await flushEvent();
+      }
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        this.logger.error(`Runner stream error for ${streamPath}: ${error.message}`, error.stack);
+      } else {
+        this.logger.error(`Runner stream error for ${streamPath}`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   async steerTurn(input: SteerTurnInput): Promise<void> {

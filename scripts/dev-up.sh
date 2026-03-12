@@ -68,7 +68,23 @@ wait_health() {
   exit 1
 }
 
-wait_health api "http://127.0.0.1:4000/api/health"
+wait_compose_http() {
+  local service="$1"
+  local url="$2"
+  local i
+  for i in $(seq 1 60); do
+    if docker compose -f "$COMPOSE_FILE" exec -T "$service" sh -lc \
+      "node -e \"fetch('$url').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"" >/dev/null 2>&1; then
+      echo "[dev-up] ${service} ready: ${url}"
+      return
+    fi
+    sleep 1
+  done
+  echo "[dev-up] ${service} failed health check: ${url}"
+  exit 1
+}
+
+wait_compose_http api "http://127.0.0.1:4000/api/health"
 wait_health runner "http://127.0.0.1:4700/runner/health"
 wait_health web "https://127.0.0.1:${NGINX_HTTPS_PORT:-443}" insecure
 

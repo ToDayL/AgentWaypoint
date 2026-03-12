@@ -251,6 +251,8 @@ describe('API e2e', () => {
     expect(turnStatusResponse.json()).toMatchObject({
       id: turnId,
       status: 'completed',
+      requestedCwd: TEST_REPO_PATH,
+      effectiveCwd: TEST_REPO_PATH,
       failureCode: null,
       failureMessage: null,
     });
@@ -263,11 +265,21 @@ describe('API e2e', () => {
     expect(historyResponse.statusCode).toBe(200);
     const history = historyResponse.json() as {
       messages: Array<{ role: string; content: string }>;
+      turns: Array<{ id: string; requestedCwd: string | null; effectiveCwd: string | null }>;
       activeTurnId: string | null;
     };
     expect(history.messages.length).toBeGreaterThanOrEqual(2);
     expect(history.messages[0]).toMatchObject({ role: 'user', content: 'hello from e2e' });
     expect(history.messages.at(-1)).toMatchObject({ role: 'assistant' });
+    expect(history.turns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: turnId,
+          requestedCwd: TEST_REPO_PATH,
+          effectiveCwd: TEST_REPO_PATH,
+        }),
+      ]),
+    );
     expect(history.activeTurnId).toBeNull();
   });
 

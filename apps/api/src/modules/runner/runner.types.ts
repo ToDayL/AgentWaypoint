@@ -64,8 +64,33 @@ export type ResolveTurnApprovalInput = {
   decision: ApprovalDecisionInput;
 };
 
+export type RunnerStreamEvent = {
+  turnId: string;
+  seq: number;
+  type:
+    | 'turn.started'
+    | 'assistant.delta'
+    | 'turn.approval.requested'
+    | 'turn.approval.resolved'
+    | 'plan.updated'
+    | 'reasoning.delta'
+    | 'diff.updated'
+    | 'tool.started'
+    | 'tool.output'
+    | 'tool.completed'
+    | 'turn.completed'
+    | 'turn.failed'
+    | 'turn.cancelled';
+  payload: Record<string, unknown>;
+  createdAt: string;
+};
+
 export interface RunnerAdapter {
   startTurn(input: StartTurnInput): Promise<void>;
+  consumeTurnEvents(
+    input: { turnId: string; sinceSeq?: number },
+    onEvent: (event: RunnerStreamEvent) => Promise<void>,
+  ): Promise<void>;
   steerTurn(input: SteerTurnInput): Promise<void>;
   cancelTurn(input: CancelTurnInput): Promise<void>;
   resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void>;

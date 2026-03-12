@@ -8,6 +8,7 @@ import {
   ForkThreadInput,
   ForkThreadResult,
   ResolveTurnApprovalInput,
+  RunnerStreamEvent,
   RunnerAdapter,
   SteerTurnInput,
   StartTurnInput,
@@ -33,7 +34,14 @@ export class MockRunnerAdapter implements RunnerAdapter {
 
     await this.prisma.turn.update({
       where: { id: input.turnId },
-      data: { status: 'running', startedAt: new Date() },
+      data: {
+        status: 'running',
+        startedAt: new Date(),
+        effectiveCwd: input.cwd ?? null,
+        effectiveModel: input.model ?? null,
+        effectiveSandbox: input.sandbox ?? null,
+        effectiveApprovalPolicy: input.approvalPolicy ?? null,
+      },
     });
     const threadId = `mock-thread-${input.sessionId}`;
     await this.appendEvent(input.turnId, 'turn.started', {
@@ -67,6 +75,13 @@ export class MockRunnerAdapter implements RunnerAdapter {
 
     // Keep track so cancel can interrupt in-flight mock execution.
     this.timers.set(input.turnId, scheduled);
+  }
+
+  async consumeTurnEvents(
+    _input: { turnId: string; sinceSeq?: number },
+    _onEvent: (event: RunnerStreamEvent) => Promise<void>,
+  ): Promise<void> {
+    return;
   }
 
   async cancelTurn(input: CancelTurnInput): Promise<void> {

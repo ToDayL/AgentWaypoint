@@ -33,6 +33,21 @@ type ActiveTurnState = {
   completionTimer?: ReturnType<typeof setTimeout>;
 };
 
+type BufferedRunnerEvent = {
+  turnId: string;
+  seq: number;
+  type: RunnerEventType;
+  payload: Record<string, unknown>;
+  createdAt: string;
+};
+
+type BufferedTurnState = {
+  status: 'queued' | 'running' | 'waiting_approval' | 'completed' | 'cancelled';
+  nextSeq: number;
+  events: BufferedRunnerEvent[];
+  listeners: Set<ServerResponse>;
+};
+
 function randomEmail(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 100000)}@example.com`;
 }
@@ -74,22 +89,63 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
   response.end(body);
 }
 
-async function createTestRunnerServer(apiBaseUrl: string): Promise<TestRunnerServer> {
+async function createTestRunnerServer(): Promise<TestRunnerServer> {
   const activeTurns = new Map<string, ActiveTurnState>();
   const forkedThreadIds = new Map<string, string>();
+  const bufferedTurns = new Map<string, BufferedTurnState>();
+
+  const ensureBufferedTurn = (turnId: string): BufferedTurnState => {
+    const existing = bufferedTurns.get(turnId);
+    if (existing) {
+      return existing;
+    }
+    const created: BufferedTurnState = {
+      status: 'queued',
+      nextSeq: 1,
+      events: [],
+      listeners: new Set<ServerResponse>(),
+    };
+    bufferedTurns.set(turnId, created);
+    return created;
+  };
+
+  const writeSseEvent = (response: ServerResponse, event: BufferedRunnerEvent): void => {
+    response.write(`id: ${event.seq}\n`);
+    response.write(`event: ${event.type}\n`);
+    response.write(`data: ${JSON.stringify(event)}\n\n`);
+  };
 
   const emitEvent = async (turnId: string, type: RunnerEventType, payload: Record<string, unknown>) => {
-    try {
-      const response = await fetch(`${apiBaseUrl}/internal/runner/turns/${turnId}/events`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ type, payload }),
-      });
-      if (!response.ok) {
-        await response.text();
+    const turn = ensureBufferedTurn(turnId);
+    if (type === 'turn.started') {
+      turn.status = 'running';
+    } else if (type === 'turn.approval.requested') {
+      turn.status = 'waiting_approval';
+    } else if (type === 'turn.approval.resolved') {
+      turn.status = 'running';
+    } else if (type === 'turn.completed') {
+      turn.status = 'completed';
+    } else if (type === 'turn.cancelled') {
+      turn.status = 'cancelled';
+    }
+
+    const event: BufferedRunnerEvent = {
+      turnId,
+      seq: turn.nextSeq,
+      type,
+      payload,
+      createdAt: new Date().toISOString(),
+    };
+    turn.nextSeq += 1;
+    turn.events.push(event);
+    turn.listeners.forEach((listener) => {
+      writeSseEvent(listener, event);
+      if (turn.status === 'completed' || turn.status === 'cancelled') {
+        listener.end();
       }
-    } catch {
-      // Intentionally ignored in test runner stub.
+    });
+    if (turn.status === 'completed' || turn.status === 'cancelled') {
+      turn.listeners.clear();
     }
   };
 
@@ -124,6 +180,33 @@ async function createTestRunnerServer(apiBaseUrl: string): Promise<TestRunnerSer
         return;
       }
 
+      const streamMatch = request.method === 'GET' ? request.url?.match(/^\/runner\/turns\/([^/]+)\/stream(?:\?(.+))?$/) : null;
+      if (streamMatch) {
+        const turnId = decodeURIComponent(streamMatch[1] ?? '');
+        const turn = bufferedTurns.get(turnId);
+        if (!turn) {
+          sendJson(response, 404, { error: 'turn not found' });
+          return;
+        }
+        const params = new URLSearchParams(streamMatch[2] ?? '');
+        const since = Math.max(Number.parseInt(params.get('since') ?? '0', 10) || 0, 0);
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        });
+        turn.events.filter((event) => event.seq > since).forEach((event) => writeSseEvent(response, event));
+        if (turn.status === 'completed' || turn.status === 'cancelled') {
+          response.end();
+          return;
+        }
+        turn.listeners.add(response);
+        request.on('close', () => {
+          turn.listeners.delete(response);
+        });
+        return;
+      }
+
       if (request.method !== 'POST') {
         sendJson(response, 404, { error: 'not found' });
         return;
@@ -143,6 +226,7 @@ async function createTestRunnerServer(apiBaseUrl: string): Promise<TestRunnerSer
             ? payload.approvalPolicy.trim()
             : null;
         const threadId = `thread-${sessionId}`;
+        ensureBufferedTurn(turnId);
 
         const existing = activeTurns.get(turnId);
         if (existing?.completionTimer) {
@@ -293,6 +377,7 @@ async function createTestRunnerServer(apiBaseUrl: string): Promise<TestRunnerSer
         }
       });
       activeTurns.clear();
+      bufferedTurns.clear();
       return new Promise<void>((resolve, reject) => {
         server.close((error) => {
           if (error) {
@@ -318,7 +403,7 @@ describe.sequential('API e2e (http runner)', () => {
   beforeAll(async () => {
     const apiPort = 4100 + Math.floor(Math.random() * 800);
     apiBaseUrl = `http://127.0.0.1:${apiPort}`;
-    runner = await createTestRunnerServer(apiBaseUrl);
+    runner = await createTestRunnerServer();
 
     process.env.RUNNER_MODE = 'http';
     process.env.RUNNER_BASE_URL = runner.baseUrl;
@@ -431,6 +516,16 @@ describe.sequential('API e2e (http runner)', () => {
 
     await sleep(1300);
 
+    const turnStatusResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}`, {
+      headers: { 'x-user-email': email },
+    });
+    expect(turnStatusResponse.status).toBe(200);
+    expect(await turnStatusResponse.json()).toMatchObject({
+      id: turn.turnId,
+      requestedModel: 'gpt-5-mini',
+      effectiveModel: 'gpt-5-mini',
+    });
+
     const streamResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/stream?since=0`, {
       headers: { 'x-user-email': email },
     });
@@ -467,6 +562,16 @@ describe.sequential('API e2e (http runner)', () => {
     const turn = (await turnResponse.json()) as { turnId: string };
 
     await sleep(1300);
+
+    const turnStatusResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}`, {
+      headers: { 'x-user-email': email },
+    });
+    expect(turnStatusResponse.status).toBe(200);
+    expect(await turnStatusResponse.json()).toMatchObject({
+      id: turn.turnId,
+      requestedCwd: '/tmp',
+      effectiveCwd: '/tmp',
+    });
 
     const streamResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/stream?since=0`, {
       headers: { 'x-user-email': email },
@@ -513,6 +618,18 @@ describe.sequential('API e2e (http runner)', () => {
     const turn = (await turnResponse.json()) as { turnId: string };
 
     await sleep(1300);
+
+    const turnStatusResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}`, {
+      headers: { 'x-user-email': email },
+    });
+    expect(turnStatusResponse.status).toBe(200);
+    expect(await turnStatusResponse.json()).toMatchObject({
+      id: turn.turnId,
+      requestedSandbox: 'read-only',
+      requestedApprovalPolicy: 'never',
+      effectiveSandbox: 'read-only',
+      effectiveApprovalPolicy: 'never',
+    });
 
     const streamResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/stream?since=0`, {
       headers: { 'x-user-email': email },

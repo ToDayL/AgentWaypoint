@@ -92,8 +92,6 @@ services:
       RUNNER_AUTH_TOKEN: ${RUNNER_AUTH_TOKEN:-}
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
-    ports:
-      - '127.0.0.1:${API_PORT:-4000}:4000'
     expose:
       - '4000'
     extra_hosts:

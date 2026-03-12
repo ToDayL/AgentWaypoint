@@ -41,12 +41,10 @@ scripts/
 
 Expected local ports:
 - `web`: `https://localhost:3000`
-- `api`: `http://localhost:4000`
 - `runner`: `http://127.0.0.1:4700`
-- health check: `http://localhost:4000/api/health`
 
 TLS termination is handled by the `nginx` container in front of `web`.
-Only the HTTPS listener is published by default.
+Only the HTTPS listener and host runner are published by default.
 Place your certificate and key in `infra/docker/nginx/certs/` and set:
 - `NGINX_SSL_CERT_FILE`
 - `NGINX_SSL_KEY_FILE`
@@ -81,18 +79,16 @@ This project currently runs in split mode:
 ### 3. Start Host Runner
 1. Start runner daemon:
    - `./scripts/dev-runner-host.sh`
-2. Runner calls back into containerized API through loopback on host:
-   - default `RUNNER_API_BASE_URL=http://127.0.0.1:4000`
-3. Configure containerized API to call the host runner:
+2. Configure containerized API to call the host runner:
    - default `API_RUNNER_MODE=http`
    - default `API_RUNNER_BASE_URL=http://host.docker.internal:4700`
    - set `RUNNER_HOST=0.0.0.0` so the host runner is reachable from Docker
-4. If DB schema is not initialized yet, run once:
+3. If DB schema is not initialized yet, run once:
    - `docker compose -f infra/docker/docker-compose.yml exec -T api sh -lc "pnpm --filter @agentwaypoint/api prisma:migrate:dev"`
 
 ### 4. Verify End-to-End
-1. API health:
-   - `curl http://localhost:4000/api/health`
+1. API health (inside container):
+   - `docker compose -f infra/docker/docker-compose.yml exec -T api sh -lc "node -e \"fetch('http://127.0.0.1:4000/api/health').then(async r=>console.log(await r.text()))\""`
    - expected: `{"status":"ok"}`
 2. Web app:
    - open `https://localhost:3000`
@@ -112,9 +108,6 @@ Optional auth header:
 - `Authorization: Bearer ${RUNNER_AUTH_TOKEN}` (if token is set)
 - Runner health endpoint:
   - `GET ${RUNNER_BASE_URL}/runner/health`
-- Runner callback target:
-  - `RUNNER_API_BASE_URL` (default `http://127.0.0.1:4000`)
-
 ### Runner Backend
 `apps/runner` supports two execution backends:
 - `RUNNER_BACKEND=codex` (default): starts `codex app-server` over stdio and forwards real streamed deltas.

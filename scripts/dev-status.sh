@@ -37,6 +37,8 @@ status_bg runner
 
 echo
 echo "[dev-status] Health checks:"
-curl -fsS http://127.0.0.1:4000/api/health || echo "api health unavailable"
+docker compose -f "$COMPOSE_FILE" exec -T api sh -lc \
+  "node -e \"fetch('http://127.0.0.1:4000/api/health').then(async r=>{if(!r.ok) process.exit(1); console.log(await r.text());}).catch(()=>process.exit(1))\"" \
+  || echo "api health unavailable"
 curl -fsS http://127.0.0.1:4700/runner/health || echo "runner health unavailable"
 curl -kfsS "https://127.0.0.1:${NGINX_HTTPS_PORT:-443}" >/dev/null || echo "web https unavailable"

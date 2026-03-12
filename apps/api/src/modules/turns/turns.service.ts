@@ -1,7 +1,7 @@
 import { ConflictException, Inject, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
+import { RUNNER_ADAPTER, RunnerAdapter, RunnerStreamEvent } from '../runner/runner.types';
 import { SettingsService } from '../settings/settings.service';
 import { CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from './turns.schemas';
 
@@ -37,6 +37,7 @@ type PendingApprovalSummary = {
 @Injectable()
 export class TurnsService implements OnModuleInit {
   private readonly logger = new Logger(TurnsService.name);
+  private readonly runnerConsumers = new Map<string, Promise<void>>();
 
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
@@ -103,6 +104,10 @@ export class TurnsService implements OnModuleInit {
           sessionId,
           userMessageId: userMessage.id,
           status: 'queued',
+          requestedCwd: cwd,
+          requestedModel: model,
+          requestedSandbox: sandbox,
+          requestedApprovalPolicy: approvalPolicy,
         },
       });
     });
@@ -117,6 +122,9 @@ export class TurnsService implements OnModuleInit {
         model,
         sandbox,
         approvalPolicy,
+      })
+      .then(() => {
+        this.ensureRunnerEventConsumer(turn.id);
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : 'Runner start failed';
@@ -247,6 +255,14 @@ export class TurnsService implements OnModuleInit {
       createdAt: turn.createdAt,
       startedAt: turn.startedAt,
       endedAt: turn.endedAt,
+      requestedCwd: turn.requestedCwd,
+      requestedModel: turn.requestedModel,
+      requestedSandbox: turn.requestedSandbox,
+      requestedApprovalPolicy: turn.requestedApprovalPolicy,
+      effectiveCwd: turn.effectiveCwd,
+      effectiveModel: turn.effectiveModel,
+      effectiveSandbox: turn.effectiveSandbox,
+      effectiveApprovalPolicy: turn.effectiveApprovalPolicy,
       pendingApproval,
     };
   }
@@ -272,7 +288,26 @@ export class TurnsService implements OnModuleInit {
         if (turn.status === 'queued') {
           await this.prisma.turn.update({
             where: { id: turnId },
-            data: { status: 'running', startedAt: new Date() },
+            data: {
+              status: 'running',
+              startedAt: new Date(),
+              effectiveCwd: typeof payload.cwd === 'string' ? payload.cwd : null,
+              effectiveModel: typeof payload.model === 'string' ? payload.model : null,
+              effectiveSandbox: typeof payload.sandbox === 'string' ? payload.sandbox : null,
+              effectiveApprovalPolicy:
+                typeof payload.approvalPolicy === 'string' ? payload.approvalPolicy : null,
+            },
+          });
+        } else {
+          await this.prisma.turn.update({
+            where: { id: turnId },
+            data: {
+              effectiveCwd: typeof payload.cwd === 'string' ? payload.cwd : null,
+              effectiveModel: typeof payload.model === 'string' ? payload.model : null,
+              effectiveSandbox: typeof payload.sandbox === 'string' ? payload.sandbox : null,
+              effectiveApprovalPolicy:
+                typeof payload.approvalPolicy === 'string' ? payload.approvalPolicy : null,
+            },
           });
         }
         await this.appendEvent(turnId, 'turn.started', this.normalizePayload(payload));
@@ -477,14 +512,70 @@ export class TurnsService implements OnModuleInit {
 
     this.logger.warn(`Reconciling ${inFlightTurns.length} in-flight turn(s) after API startup`);
     for (const turn of inFlightTurns) {
+      this.ensureRunnerEventConsumer(turn.id);
+    }
+  }
+
+  private ensureRunnerEventConsumer(turnId: string): void {
+    if (this.runnerConsumers.has(turnId)) {
+      return;
+    }
+
+    const task = this.consumeRunnerEvents(turnId)
+      .catch((error: unknown) => {
+        if (error instanceof Error) {
+          this.logger.error(`Runner stream failed for turn ${turnId}: ${error.message}`, error.stack);
+          return;
+        }
+        this.logger.error(`Runner stream failed for turn ${turnId}`);
+      })
+      .finally(() => {
+        this.runnerConsumers.delete(turnId);
+      });
+
+    this.runnerConsumers.set(turnId, task);
+  }
+
+  private async consumeRunnerEvents(turnId: string): Promise<void> {
+    const turn = await this.prisma.turn.findUnique({
+      where: { id: turnId },
+      select: { id: true, status: true },
+    });
+    if (!turn || TERMINAL_STATUSES.includes(turn.status)) {
+      return;
+    }
+
+    const latestEvent = await this.prisma.event.findFirst({
+      where: { turnId },
+      orderBy: { seq: 'desc' },
+      select: { seq: true },
+    });
+
+    try {
+      await this.runnerAdapter.consumeTurnEvents(
+        { turnId, sinceSeq: latestEvent?.seq ?? 0 },
+        async (event: RunnerStreamEvent) => {
+          await this.ingestRunnerEvent(event.turnId, event.type, event.payload ?? {});
+        },
+      );
+    } catch (error: unknown) {
+      const currentTurn = await this.prisma.turn.findUnique({
+        where: { id: turnId },
+        select: { status: true },
+      });
+      if (!currentTurn || TERMINAL_STATUSES.includes(currentTurn.status)) {
+        return;
+      }
+
+      const message = error instanceof Error ? error.message : 'Runner stream failed';
       await this.failTurn(
-        turn.id,
-        turn.status,
-        'RECOVERED_ON_STARTUP',
-        'Turn marked failed during API startup reconciliation',
+        turnId,
+        currentTurn.status,
+        'RUNNER_STREAM_FAILED',
+        message,
         this.normalizePayload({
-          code: 'RECOVERED_ON_STARTUP',
-          message: 'Turn marked failed during API startup reconciliation',
+          code: 'RUNNER_STREAM_FAILED',
+          message,
         }),
       );
     }

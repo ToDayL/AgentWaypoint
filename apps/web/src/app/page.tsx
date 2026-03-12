@@ -42,6 +42,14 @@ type ChatMessage = {
 type TurnSummary = {
   id: string;
   status: string;
+  requestedCwd: string | null;
+  requestedModel: string | null;
+  requestedSandbox: string | null;
+  requestedApprovalPolicy: string | null;
+  effectiveCwd: string | null;
+  effectiveModel: string | null;
+  effectiveSandbox: string | null;
+  effectiveApprovalPolicy: string | null;
   failureCode: string | null;
   failureMessage: string | null;
   createdAt: string;
@@ -71,6 +79,14 @@ type TurnStatusResponse = {
   id: string;
   sessionId: string;
   status: string;
+  requestedCwd: string | null;
+  requestedModel: string | null;
+  requestedSandbox: string | null;
+  requestedApprovalPolicy: string | null;
+  effectiveCwd: string | null;
+  effectiveModel: string | null;
+  effectiveSandbox: string | null;
+  effectiveApprovalPolicy: string | null;
   failureCode: string | null;
   failureMessage: string | null;
   createdAt: string;
@@ -173,6 +189,7 @@ export default function HomePage() {
   const [prompt, setPrompt] = useState('');
   const [eventLog, setEventLog] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [turns, setTurns] = useState<TurnSummary[]>([]);
   const [assistantText, setAssistantText] = useState('');
   const [reasoningText, setReasoningText] = useState('');
   const [latestPlan, setLatestPlan] = useState('');
@@ -529,6 +546,7 @@ export default function HomePage() {
       eventSourceRef.current = null;
       stopTurnStatusPolling();
       setMessages([]);
+      setTurns([]);
       setAssistantText('');
       setReasoningText('');
       setLatestPlan('');
@@ -554,6 +572,7 @@ export default function HomePage() {
         email,
       });
       setMessages(history.messages);
+      setTurns(history.turns);
       setTurnStatus(history.activeTurnStatus ?? 'idle');
       setActiveTurnId(history.activeTurnId ?? '');
       setPendingApproval(null);
@@ -665,9 +684,9 @@ export default function HomePage() {
           setPendingApproval(null);
           setReasoningText('');
           stopTurnStatusPolling();
-          if (sessionId) {
-            void loadSessionHistory(sessionId, { resumeStream: false, resetEventLog: false });
-          }
+            if (sessionId) {
+              void loadSessionHistory(sessionId, { resumeStream: false, resetEventLog: false });
+            }
           source.close();
           eventSourceRef.current = null;
         }
@@ -1069,6 +1088,30 @@ export default function HomePage() {
               <pre>{diffSummary || 'No diff updates yet.'}</pre>
             </article>
           </div>
+
+          <article className="sim-events">
+            <h3>Turn History</h3>
+            <ul>
+              {turns.length === 0 ? <li>No turns yet.</li> : null}
+              {turns.map((turn) => (
+                <li key={turn.id}>
+                  <strong>{turn.status}</strong> {turn.id}
+                  <br />
+                  Requested: model={turn.requestedModel ?? '-'} cwd={turn.requestedCwd ?? '-'} sandbox=
+                  {turn.requestedSandbox ?? '-'} approval={turn.requestedApprovalPolicy ?? '-'}
+                  <br />
+                  Effective: model={turn.effectiveModel ?? '-'} cwd={turn.effectiveCwd ?? '-'} sandbox=
+                  {turn.effectiveSandbox ?? '-'} approval={turn.effectiveApprovalPolicy ?? '-'}
+                  {turn.failureMessage ? (
+                    <>
+                      <br />
+                      Failure: {turn.failureMessage}
+                    </>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </article>
 
           <article className="sim-events">
             <h3>Chat History</h3>

@@ -73,6 +73,14 @@ model Turn {
   userMessageId      String?
   assistantMessageId String?
   status             String
+  requestedCwd       String?
+  requestedModel     String?
+  requestedSandbox   String?
+  requestedApprovalPolicy String?
+  effectiveCwd       String?
+  effectiveModel     String?
+  effectiveSandbox   String?
+  effectiveApprovalPolicy String?
   failureCode        String?
   failureMessage     String?
   startedAt          DateTime?

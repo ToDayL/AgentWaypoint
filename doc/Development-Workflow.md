@@ -31,17 +31,15 @@ Use this when debugging startup/runtime drift or verifying from scratch.
 2. Containerized API reaches the host runner through `host.docker.internal`:
    - default `API_RUNNER_MODE=http`
    - default `API_RUNNER_BASE_URL=http://host.docker.internal:4700`
-3. Runner reaches containerized API through loopback on host:
-   - default `RUNNER_API_BASE_URL=http://127.0.0.1:4000`
-4. Initialize DB schema from the API container (after clean DB reset):
+3. Initialize DB schema from the API container (after clean DB reset):
    - `docker compose -f infra/docker/docker-compose.yml exec -T api sh -lc "pnpm --filter @agentwaypoint/api prisma:migrate:dev"`
-5. Choose runner backend:
+4. Choose runner backend:
    - `RUNNER_BACKEND=codex` for real Codex app-server integration (default)
    - `RUNNER_BACKEND=mock` for local echo fallback
 
 ## 4. Verify
 1. API health:
-   - `curl http://localhost:4000/api/health`
+   - `docker compose -f infra/docker/docker-compose.yml exec -T api sh -lc "node -e \"fetch('http://127.0.0.1:4000/api/health').then(async r=>console.log(await r.text()))\""`
    - Expected: `{"status":"ok"}`
 2. Runner health:
    - `curl http://127.0.0.1:4700/runner/health`
@@ -59,5 +57,5 @@ Use this when debugging startup/runtime drift or verifying from scratch.
    - terminate `./scripts/dev-runner-host.sh`
 
 ## Notes
-- If web shows `API upstream unavailable`, check the `api` container logs and `http://localhost:4000/api/health`.
+- If web shows `API upstream unavailable`, check the `api` container logs and the in-container health check in step 4.1.
 - If API returns Prisma `table does not exist`, run migration command in step 3.4.
