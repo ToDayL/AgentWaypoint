@@ -1,4 +1,7 @@
 import 'reflect-metadata';
+import { mkdtemp, stat } from 'node:fs/promises';
+import * as path from 'node:path';
+import { tmpdir } from 'node:os';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
@@ -122,6 +125,41 @@ describe('API e2e', () => {
     const sessions = listSessionsResponse.json();
     expect(Array.isArray(sessions)).toBe(true);
     expect(sessions.some((item: { id: string }) => item.id === session.id)).toBe(true);
+  });
+
+  it('creates missing workspace directories for project and session paths', async () => {
+    const email = randomEmail('workspace-create');
+    const tempRoot = await mkdtemp(path.join(tmpdir(), 'aw-workspace-'));
+    const projectPath = path.join(tempRoot, 'project-root');
+    const sessionPath = path.join(projectPath, 'session-root');
+
+    const createProjectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Workspace Project',
+        repoPath: projectPath,
+      },
+    });
+    expect(createProjectResponse.statusCode).toBe(201);
+    const project = createProjectResponse.json();
+    expect(project.repoPath).toBe(projectPath);
+    expect((await stat(projectPath)).isDirectory()).toBe(true);
+
+    const createSessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: {
+        title: 'Workspace Session',
+        cwdOverride: sessionPath,
+      },
+    });
+    expect(createSessionResponse.statusCode).toBe(201);
+    const session = createSessionResponse.json();
+    expect(session.cwdOverride).toBe(sessionPath);
+    expect((await stat(sessionPath)).isDirectory()).toBe(true);
   });
 
   it('returns validation errors for invalid payloads', async () => {

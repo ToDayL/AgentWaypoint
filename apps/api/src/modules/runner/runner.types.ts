@@ -39,6 +39,15 @@ export type ForkThreadResult = {
   threadId: string;
 };
 
+export type EnsureDirectoryInput = {
+  path: string;
+};
+
+export type EnsureDirectoryResult = {
+  path: string;
+  created: boolean;
+};
+
 export type ApprovalDecisionInput =
   | 'accept'
   | 'acceptForSession'
@@ -96,6 +105,7 @@ export interface RunnerAdapter {
   resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void>;
   listModels(): Promise<AvailableModel[]>;
   forkThread(input: ForkThreadInput): Promise<ForkThreadResult>;
+  ensureDirectory(input: EnsureDirectoryInput): Promise<EnsureDirectoryResult>;
 }
 
 export const RUNNER_ADAPTER = Symbol('RUNNER_ADAPTER');

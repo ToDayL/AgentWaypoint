@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import * as path from 'node:path';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from '../app.module';
@@ -176,6 +177,15 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
               isDefault: false,
             },
           ],
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && request.url === '/runner/fs/ensure-directory') {
+        const payload = await readJsonBody(request);
+        sendJson(response, 200, {
+          path: path.resolve(readRequiredString(payload, 'path')),
+          created: true,
         });
         return;
       }
@@ -576,6 +586,28 @@ describe.sequential('API e2e (http runner)', () => {
     expect(streamResponse.status).toBe(200);
     const streamText = await streamResponse.text();
     expect(streamText).toContain('"cwd":"/tmp"');
+  });
+
+  it('normalizes project and session workspace paths through the runner filesystem endpoint', async () => {
+    const email = randomEmail('http-runner-workspace');
+
+    const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ name: 'HTTP Workspace Project', repoPath: './tmp/http-project' }),
+    });
+    expect(projectResponse.status).toBe(201);
+    const project = (await projectResponse.json()) as { id: string; repoPath: string };
+    expect(project.repoPath).toBe(path.resolve('./tmp/http-project'));
+
+    const sessionResponse = await fetch(`${apiBaseUrl}/api/projects/${project.id}/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ title: 'HTTP Workspace Session', cwdOverride: './tmp/http-project/session' }),
+    });
+    expect(sessionResponse.status).toBe(201);
+    const session = (await sessionResponse.json()) as { cwdOverride: string };
+    expect(session.cwdOverride).toBe(path.resolve('./tmp/http-project/session'));
   });
 
   it('prefers session sandbox and approval policy overrides over project defaults when dispatching a turn', async () => {

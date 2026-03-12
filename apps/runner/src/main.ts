@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import { stat } from 'node:fs/promises';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
-import * as path from 'node:path';
 import { CodexBackend } from './codex-backend.js';
+import { FilesystemBackend } from './filesystem-backend.js';
 import type {
   ActiveMockTurn,
   ActiveTurn,
   BufferedRunnerEvent,
   CancelTurnBody,
+  EnsureDirectoryBody,
   ForkThreadBody,
   ModelListItem,
   ResolveApprovalBody,
@@ -32,6 +32,9 @@ const runnerEventBufferLimit = Number(process.env.RUNNER_EVENT_BUFFER_LIMIT ?? 1
 
 const activeTurns = new Map<string, ActiveTurn>();
 const turnStreams = new Map<string, RunnerTurnStreamState>();
+const filesystemBackend = new FilesystemBackend({
+  allowedRepoRoots: process.env.RUNNER_ALLOWED_REPO_ROOTS?.trim() || null,
+});
 const codexBackend = new CodexBackend(
   {
     codexBin,
@@ -137,7 +140,7 @@ const server = createServer(async (request, response) => {
 
     if (pathname === '/runner/turns/start') {
       const payload = parseStartTurnBody(await readJsonBody(request));
-      payload.cwd = await resolveWorkspaceCwd(payload.cwd);
+      payload.cwd = await filesystemBackend.resolveWorkspaceCwd(payload.cwd);
       const existing = activeTurns.get(payload.turnId);
       if (existing) {
         await cancelActiveTurn(existing, { emitCancelEvent: false });
@@ -178,9 +181,16 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (pathname === '/runner/fs/ensure-directory') {
+      const payload = parseEnsureDirectoryBody(await readJsonBody(request));
+      const result = await filesystemBackend.ensureWorkspaceDirectory(payload.path);
+      sendJson(response, 200, result);
+      return;
+    }
+
     if (pathname === '/runner/threads/fork') {
       const payload = parseForkThreadBody(await readJsonBody(request));
-      const cwd = await resolveWorkspaceCwd(payload.cwd);
+      const cwd = await filesystemBackend.resolveWorkspaceCwd(payload.cwd);
 
       if (runnerBackend === 'mock') {
         sendJson(response, 200, {
@@ -327,6 +337,16 @@ function parseForkThreadBody(input: unknown): ForkThreadBody {
   };
 }
 
+function parseEnsureDirectoryBody(input: unknown): EnsureDirectoryBody {
+  if (!input || typeof input !== 'object') {
+    throw new Error('Invalid ensure-directory payload');
+  }
+  const record = input as Record<string, unknown>;
+  return {
+    path: readNonEmptyString(record.path, 'path'),
+  };
+}
+
 function parseSteerTurnBody(input: unknown): SteerTurnBody {
   if (!input || typeof input !== 'object') {
     throw new Error('Invalid steer payload');
@@ -391,46 +411,6 @@ async function startMockExecution(turn: ActiveMockTurn): Promise<void> {
     void finalizeTurn(turn.turnId, 'turn.completed', { content: responseContent });
   }, 200 + chunks.length * 120);
   turn.timers.push(finalizeTimer);
-}
-
-async function resolveWorkspaceCwd(inputCwd: string | null | undefined): Promise<string> {
-  const normalizedCwd = inputCwd?.trim() ?? '';
-  if (!normalizedCwd) {
-    throw new Error('Project workspace is not configured (repoPath is required)');
-  }
-
-  const absolutePath = path.resolve(normalizedCwd);
-  assertWorkspaceAllowed(absolutePath);
-
-  let info;
-  try {
-    info = await stat(absolutePath);
-  } catch {
-    throw new Error(`Project workspace does not exist: ${absolutePath}`);
-  }
-
-  if (!info.isDirectory()) {
-    throw new Error(`Project workspace is not a directory: ${absolutePath}`);
-  }
-
-  return absolutePath;
-}
-
-function assertWorkspaceAllowed(absolutePath: string): void {
-  const rootsConfig = process.env.RUNNER_ALLOWED_REPO_ROOTS?.trim();
-  if (!rootsConfig) {
-    return;
-  }
-
-  const allowedRoots = rootsConfig
-    .split(',')
-    .map((entry) => path.resolve(entry.trim()))
-    .filter((entry) => entry.length > 0);
-
-  const isAllowed = allowedRoots.some((root) => absolutePath === root || absolutePath.startsWith(`${root}${path.sep}`));
-  if (!isAllowed) {
-    throw new Error(`Project workspace is outside allowed roots: ${absolutePath}`);
-  }
 }
 
 async function listModels(): Promise<ModelListItem[]> {

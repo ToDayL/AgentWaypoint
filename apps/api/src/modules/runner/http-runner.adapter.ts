@@ -2,6 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import {
   AvailableModel,
   CancelTurnInput,
+  EnsureDirectoryInput,
+  EnsureDirectoryResult,
   ForkThreadInput,
   ForkThreadResult,
   ResolveTurnApprovalInput,
@@ -217,6 +219,28 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       throw new Error('Runner fork thread response did not include threadId');
     }
     return { threadId };
+  }
+
+  async ensureDirectory(input: EnsureDirectoryInput): Promise<EnsureDirectoryResult> {
+    const response = await this.request({
+      method: 'POST',
+      path: '/runner/fs/ensure-directory',
+      body: {
+        path: input.path,
+      },
+    });
+    if (!response || typeof response !== 'object') {
+      throw new Error('Runner ensure-directory response is invalid');
+    }
+    const ensuredPath =
+      typeof (response as { path?: unknown }).path === 'string' ? (response as { path: string }).path : '';
+    if (!ensuredPath) {
+      throw new Error('Runner ensure-directory response did not include path');
+    }
+    return {
+      path: ensuredPath,
+      created: (response as { created?: unknown }).created === true,
+    };
   }
 
   private async request(options: RunnerHttpRequestOptions): Promise<unknown> {

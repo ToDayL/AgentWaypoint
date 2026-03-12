@@ -38,6 +38,10 @@ export type ForkThreadBody = {
   approvalPolicy?: string | null;
 };
 
+export type EnsureDirectoryBody = {
+  path: string;
+};
+
 export type ResolveApprovalBody = {
   turnId: string;
   requestId: string;

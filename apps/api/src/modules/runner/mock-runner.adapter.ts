@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto';
+import { mkdir } from 'node:fs/promises';
+import * as path from 'node:path';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   AvailableModel,
   CancelTurnInput,
+  EnsureDirectoryInput,
+  EnsureDirectoryResult,
   ForkThreadInput,
   ForkThreadResult,
   ResolveTurnApprovalInput,
@@ -137,6 +141,15 @@ export class MockRunnerAdapter implements RunnerAdapter {
       throw new Error('Source thread is required');
     }
     return { threadId: `mock-fork-${randomUUID()}` };
+  }
+
+  async ensureDirectory(input: EnsureDirectoryInput): Promise<EnsureDirectoryResult> {
+    const absolutePath = path.resolve(input.path);
+    await mkdir(absolutePath, { recursive: true });
+    return {
+      path: absolutePath,
+      created: true,
+    };
   }
 
   private async handleDelta(turnId: string, chunk: string): Promise<void> {

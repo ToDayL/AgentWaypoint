@@ -36,12 +36,16 @@ export class SessionsService {
       throw new NotFoundException({ message: 'Project not found' });
     }
 
+    const cwdOverride = input.cwdOverride?.trim()
+      ? (await this.runnerAdapter.ensureDirectory({ path: input.cwdOverride.trim() })).path
+      : undefined;
+
     return this.prisma.session.create({
       data: {
         projectId,
         title: input.title,
         status: 'active',
-        cwdOverride: input.cwdOverride,
+        cwdOverride,
         modelOverride: input.modelOverride,
         sandboxOverride: input.sandboxOverride,
         approvalPolicyOverride: input.approvalPolicyOverride,
