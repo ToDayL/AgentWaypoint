@@ -10,15 +10,15 @@ Last updated: 2026-03-12
 
 ## Architecture Decision Update on 2026-03-06
 1. Keep Option 2 integration model.
-2. Revise runtime topology for MVP integration:
-   - `web` remains containerized.
-   - `api` moves to host runtime.
-   - `codex-runner` remains host-side.
-3. Reason for change:
-   - Reduce container-host IPC/path/permission friction while integrating runner process management and streaming.
+2. Keep both `web` and `api` containerized.
+3. Keep `codex-runner` host-side as the only host-resident service.
 4. Local dev target topology:
-   - Docker: `web + postgres (+redis optional)`
+   - Docker: `nginx + web + api + postgres + redis`
    - Host: `codex-runner`
+5. Communication model:
+   - `api -> runner` for commands over HTTP
+   - `api -> runner` for per-turn event streaming over SSE
+   - no runner callback dependency on a host-exposed API port
 
 ## Completed on 2026-03-05
 1. Monorepo root foundation created:
@@ -69,17 +69,18 @@ Last updated: 2026-03-12
    - `apps/api/src/modules/api.e2e.spec.ts`
    - Covers auth missing header (`401`), create/list flows, validation errors (`400`), and cross-user access control.
 5. Containerized verification completed:
-   - `pnpm --filter @agentwaypoint/api typecheck` passes in `agentwaypoint-app`.
-   - `pnpm --filter @agentwaypoint/api test` passes in `agentwaypoint-app`.
-   - Host-level smoke tests against `localhost:4000` confirm project/session CRUD works.
+   - `pnpm --filter @agentwaypoint/api typecheck` passes in the containerized API environment.
+   - `pnpm --filter @agentwaypoint/api test` passes in the containerized API environment.
+   - CRUD flows were verified through the web/API stack rather than a host-exposed API port.
 
 ## Runtime Topology Update on 2026-03-06
 1. Local runtime switched to hybrid mode:
-   - Docker: `agentwaypoint-web`, `agentwaypoint-postgres`, `agentwaypoint-redis`
-   - Host: `apps/api` process
+   - Docker: `agentwaypoint-nginx`, `agentwaypoint-web`, `agentwaypoint-api`, `agentwaypoint-postgres`, `agentwaypoint-redis`
+   - Host: `apps/runner` process
 2. Dev tooling updates:
-   - `infra/docker/docker-compose.yml` now runs `web` only (plus DB services).
-   - `scripts/dev-api-host.sh` retained for fallback host API startup.
+   - `infra/docker/docker-compose.yml` keeps `api` and `web` in separate containers.
+   - `scripts/dev-up.sh` manages Docker services plus the host runner.
+   - `scripts/dev-api-host.sh` remains only as fallback/manual tooling.
 
 ## Completed on 2026-03-10
 1. Session history read path implemented:
@@ -113,8 +114,8 @@ Last updated: 2026-03-12
    - TLS cert, key, and optional CA bundle can be mounted from `infra/docker/nginx/certs/`.
    - Default public entrypoint is `https://localhost:3000`.
 8. Dev stack verification completed for HTTPS entrypoint:
-   - `docker compose` stack starts with `nginx`, `web`, `postgres`, and `redis`.
-   - Host `api` and `runner` health checks pass via `scripts/dev-up.sh`.
+   - `docker compose` stack starts with `nginx`, `web`, `api`, `postgres`, and `redis`.
+   - Host `runner` health check passes via `scripts/dev-up.sh`.
    - `curl -kI https://127.0.0.1:3000` returns `HTTP/2 200` after web startup completes.
 
 ## Backfilled Progress (already implemented in repo)
@@ -122,13 +123,12 @@ Last updated: 2026-03-12
    - `POST /api/sessions/:id/turns`
    - `POST /api/turns/:id/cancel`
    - `GET /api/turns/:id/stream` (SSE)
-   - Internal runner callback: `POST /internal/runner/turns/:turnId/events`
 2. HTTP runner adapter mode is implemented and tested:
    - API supports `RUNNER_MODE=http` with runner base URL and optional auth token.
    - HTTP-runner e2e tests exist in `apps/api/src/modules/api.http-runner.e2e.spec.ts`.
 3. Dev orchestration scripts are implemented:
    - `scripts/dev-up.sh`, `scripts/dev-down.sh`, `scripts/dev-status.sh`
-   - Host service scripts: `scripts/dev-runner-host.sh` (`scripts/dev-api-host.sh` retained as fallback)
+   - Host service script: `scripts/dev-runner-host.sh` (`scripts/dev-api-host.sh` retained as fallback/manual tooling)
 4. Runner Codex backend integration is implemented:
    - `RUNNER_BACKEND=codex` starts/uses Codex app-server behavior.
    - `RUNNER_BACKEND=mock` remains available as fallback.
@@ -142,7 +142,7 @@ Last updated: 2026-03-12
    - Fallback to new thread if resume fails.
 7. Workspace and cwd management are implemented:
    - Project workspace (`repoPath`) is forwarded by API and validated by the host runner before execution.
-   - `cwd` is forwarded to runner/Codex turn operations.
+   - Session `cwdOverride` is resolved by API and applied as thread configuration through the runner.
    - Optional root allowlist via `RUNNER_ALLOWED_REPO_ROOTS`.
 8. Web simulation UX was expanded before current turn:
    - Project form includes workspace path (`repoPath`).
@@ -151,7 +151,7 @@ Last updated: 2026-03-12
 
 ## Completed on 2026-03-11
 1. Approval pause/resume flow implemented end-to-end:
-   - API accepts runner callbacks for `turn.approval.requested` and `turn.approval.resolved`.
+   - API ingests streamed runner events for `turn.approval.requested` and `turn.approval.resolved`.
    - Turn status now exposes `pendingApproval` details while a turn is blocked on approval.
    - User action endpoint added: `POST /api/turns/:id/approval`.
    - Web proxy route added at `/api/sim/turns/:turnId/approval`.
@@ -162,7 +162,7 @@ Last updated: 2026-03-12
 3. Runner approval bridge implemented:
    - Host runner now captures Codex approval requests from the app-server stream.
    - Approval decisions are forwarded back to Codex through `/runner/turns/approval`.
-   - Runner emits normalized approval request/resolution events back to the API.
+   - Runner exposes normalized approval request and resolution events through the per-turn event stream.
 4. Web simulation UI supports human approval:
    - Active turn panel renders approval-required state and payload details.
    - Approve/reject controls resume the paused turn.
@@ -178,7 +178,7 @@ Last updated: 2026-03-12
 ## Completed on 2026-03-12
 1. Rich runner event mapping implemented:
    - Runner now forwards `plan.updated`, `reasoning.delta`, `diff.updated`, `tool.started`, `tool.output`, and `tool.completed`.
-   - API runner callback validation and turn event ingestion now accept and persist the same event types.
+   - API runner stream ingestion accepts and persists the same event types.
    - Shared stream event typings were expanded so clients can consume the richer stream consistently.
 2. Web simulation UI exposes richer live execution state:
    - Active turn view now renders separate panes for tool output, reasoning deltas, latest plan, and diff summary.
@@ -192,4 +192,32 @@ Last updated: 2026-03-12
    - `@agentwaypoint/api` typecheck passes.
    - `@agentwaypoint/web` typecheck passes.
    - `corepack pnpm --filter @agentwaypoint/api test` passes locally (`10/10` tests).
-   - Live host API and runner were restarted successfully and exercised against the updated event and approval surfaces.
+   - Live containerized API and host runner were restarted successfully and exercised against the updated event and approval surfaces.
+
+## Completed on 2026-03-12 (later)
+1. Runtime topology was finalized around one host service:
+   - `web` and `api` run as separate Docker services.
+   - `postgres` and `redis` remain internal Docker services with no host-published ports.
+   - `codex-runner` remains the only host-resident application service.
+2. Runner-to-API callback dependency was removed:
+   - Runner now buffers per-turn events and exposes `GET /runner/turns/:id` plus `GET /runner/turns/:id/stream?since=N`.
+   - API opens and maintains runner SSE subscriptions for in-flight turns.
+   - Host-exposed API port `4000` is no longer required for the production dev flow.
+3. Session-level execution controls were added:
+   - Project defaults: `defaultModel`, `defaultSandbox`, `defaultApprovalPolicy`.
+   - Session overrides: `modelOverride`, `cwdOverride`, `sandboxOverride`, `approvalPolicyOverride`.
+   - Session execution config is applied at thread start or resume rather than per turn.
+4. Runner-backed model discovery was added:
+   - Runner exposes `GET /runner/models`.
+   - API exposes `GET /api/models`.
+   - Web uses that live list for project and session model pickers.
+5. Conversation control features were added:
+   - Session fork support through API, runner, and web UI.
+   - `turn/steer` support through API, runner, and web UI.
+   - Steer enablement is now managed through persisted app settings instead of env flags.
+6. Turn execution metadata was added for auditability:
+   - Requested and effective `model`, `cwd`, `sandbox`, and `approvalPolicy` are persisted on `Turn`.
+   - Web turn history shows requested versus effective execution config.
+7. Current verification state:
+   - `@agentwaypoint/api`, `@agentwaypoint/runner`, and `@agentwaypoint/web` typechecks pass.
+   - `./scripts/test-api-e2e.sh` passes (`18/18` tests).

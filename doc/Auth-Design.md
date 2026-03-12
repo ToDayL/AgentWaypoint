@@ -1,6 +1,6 @@
 # AgentWaypoint Authentication and Authorization Design
 
-Last updated: 2026-03-10
+Last updated: 2026-03-12
 
 ## 1. Goals
 
@@ -12,7 +12,7 @@ This design defines a first-party authentication model for AgentWaypoint that:
 - Supports future bot and automation integrations such as a Discord bot.
 - Fits the current hybrid runtime:
   - `web` in Docker
-  - `api` on host
+  - `api` in Docker
   - `runner` on host
 
 ## 2. Non-Goals
@@ -87,7 +87,7 @@ Recommended high-level rules:
 - Human users can access only their own projects and sessions unless they are admins.
 - Service accounts can access only routes allowed by their scopes.
 - Admin routes require `admin` explicitly.
-- Runner callback auth remains separate from end-user auth.
+- Runner control and stream auth remain separate from end-user auth.
 
 ## 6. Authentication Flows
 

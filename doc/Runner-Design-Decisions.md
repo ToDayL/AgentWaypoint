@@ -1,6 +1,6 @@
 # Runner Design Decisions
 
-Last updated: 2026-03-10
+Last updated: 2026-03-12
 
 This document records the current and target design decisions for `apps/runner` and Codex app-server usage.
 
@@ -25,18 +25,25 @@ For each new turn:
 
 ## 3. Event Contract
 
-- Runner emits internal callbacks to API:
+- API opens a runner-owned SSE stream for each in-flight turn:
+  - `GET /runner/turns/:id/stream?since=N`
+- Runner buffers normalized turn events per `turnId` and replays them from the requested sequence:
   - `turn.started` (payload includes `threadId`)
   - `assistant.delta`
   - `turn.completed`
   - `turn.failed`
   - `turn.cancelled`
-- API uses `turn.started.payload.threadId` to persist/refresh session mapping.
+  - approval, tool, reasoning, diff, and plan events
+- API persists streamed events and uses `turn.started.payload.threadId` to persist or refresh the session-thread mapping.
 
 ## 4. Current Runtime Model
 
 - Current implementation uses a long-lived `codex app-server` worker process in `apps/runner`.
 - API turn requests reuse this worker; turns are isolated by `threadId`.
+- Runner is the host capability boundary:
+  - validates repo paths and allowed roots
+  - owns Codex process management
+  - exposes control routes plus per-turn status and stream routes
 - This removes per-turn process startup overhead while preserving session-thread continuity.
 
 ## 5. Target Runtime Model

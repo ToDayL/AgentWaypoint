@@ -8,11 +8,11 @@
 
 ### 1.6 Deployment
 - Recommended: hybrid runtime for MVP runner integration.
-- Local: `docker-compose` for `web + postgres (+redis optional)`.
-- Runtime split (Option 2, revised): `web` in container, `api` on host, `codex-runner` on host.
+- Local: `docker-compose` for `nginx + web + api + postgres + redis`.
+- Runtime split (current): `web` and `api` in containers, `codex-runner` on host.
 - Production options:
-  - Preferred for early versions: `api` + `codex-runner` as host/system services, `web` containerized.
-  - Optional later: containerize `api` after runner API/proxy boundary is stabilized.
+  - Preferred for early versions: keep `codex-runner` as the host/system service and run `web/api` behind the reverse proxy.
+  - Optional later: scale from one host runner to a small runner pool behind the same API boundary.
 
 ### 1.2 Frontend
 - Framework: Next.js (App Router) + React.
@@ -133,10 +133,11 @@ packages/shared/
 - Package manager: pnpm.
 - Node version: 22 LTS.
 - Local development:
-  - `web`: `http://localhost:3000`
-  - `api`: `http://localhost:4000`
-  - `codex-runner`: host daemon (for example `http://127.0.0.1:4700`)
+  - `web`: `https://localhost:3000`
+  - `api`: internal Docker service only (`api:4000` on the Compose network)
+  - `codex-runner`: host daemon (`http://127.0.0.1:4700`)
   - `postgres`: internal Docker service (`postgres:5432`)
+  - `redis`: internal Docker service (`redis:6379`)
 
 ## 6. Why This Setup for You
 - One language across frontend/backend reduces learning burden.
