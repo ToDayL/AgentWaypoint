@@ -99,6 +99,30 @@ async function createTestRunnerServer(apiBaseUrl: string): Promise<TestRunnerSer
         return;
       }
 
+      if (request.method === 'GET' && request.url === '/runner/models') {
+        sendJson(response, 200, {
+          data: [
+            {
+              id: 'model-gpt-5-codex',
+              model: 'gpt-5-codex',
+              displayName: 'GPT-5 Codex',
+              description: 'Primary coding model',
+              hidden: false,
+              isDefault: true,
+            },
+            {
+              id: 'model-gpt-5-mini',
+              model: 'gpt-5-mini',
+              displayName: 'GPT-5 Mini',
+              description: 'Smaller faster model',
+              hidden: false,
+              isDefault: false,
+            },
+          ],
+        });
+        return;
+      }
+
       if (request.method !== 'POST') {
         sendJson(response, 404, { error: 'not found' });
         return;
@@ -108,12 +132,17 @@ async function createTestRunnerServer(apiBaseUrl: string): Promise<TestRunnerSer
         const payload = await readJsonBody(request);
         const turnId = readRequiredString(payload, 'turnId');
         const content = readRequiredString(payload, 'content');
+        const model = typeof payload.model === 'string' && payload.model.trim().length > 0 ? payload.model.trim() : null;
+        const cwd = typeof payload.cwd === 'string' && payload.cwd.trim().length > 0 ? payload.cwd.trim() : null;
 
         const existing = activeTurns.get(turnId);
         if (existing?.completionTimer) {
           clearTimeout(existing.completionTimer);
         }
-        void emitEvent(turnId, 'turn.started', {});
+        void emitEvent(turnId, 'turn.started', {
+          ...(model ? { model } : {}),
+          ...(cwd ? { cwd } : {}),
+        });
 
         if (content.includes('[approval]')) {
           activeTurns.set(turnId, {
@@ -309,6 +338,101 @@ describe.sequential('API e2e (http runner)', () => {
     expect(streamText).toContain('event: turn.started');
     expect(streamText).toContain('event: assistant.delta');
     expect(streamText).toContain('event: turn.completed');
+  });
+
+  it('lists models through the http runner adapter', async () => {
+    const email = randomEmail('http-model-list');
+
+    const response = await fetch(`${apiBaseUrl}/api/models`, {
+      headers: { 'x-user-email': email },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      data: expect.arrayContaining([
+        expect.objectContaining({
+          model: 'gpt-5-codex',
+          displayName: 'GPT-5 Codex',
+        }),
+        expect.objectContaining({
+          model: 'gpt-5-mini',
+          displayName: 'GPT-5 Mini',
+        }),
+      ]),
+    });
+  });
+
+  it('prefers session model override over project default when dispatching a turn', async () => {
+    const email = randomEmail('http-runner-model');
+
+    const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ name: 'HTTP Model Project', repoPath: TEST_REPO_PATH, defaultModel: 'gpt-5-codex' }),
+    });
+    expect(projectResponse.status).toBe(201);
+    const project = (await projectResponse.json()) as { id: string };
+
+    const sessionResponse = await fetch(`${apiBaseUrl}/api/projects/${project.id}/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ title: 'HTTP Model Session', modelOverride: 'gpt-5-mini' }),
+    });
+    expect(sessionResponse.status).toBe(201);
+    const session = (await sessionResponse.json()) as { id: string };
+
+    const turnResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}/turns`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'use selected model' }),
+    });
+    expect(turnResponse.status).toBe(201);
+    const turn = (await turnResponse.json()) as { turnId: string };
+
+    await sleep(1300);
+
+    const streamResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/stream?since=0`, {
+      headers: { 'x-user-email': email },
+    });
+    expect(streamResponse.status).toBe(200);
+    const streamText = await streamResponse.text();
+    expect(streamText).toContain('"model":"gpt-5-mini"');
+  });
+
+  it('prefers session cwd override over project repoPath when dispatching a turn', async () => {
+    const email = randomEmail('http-runner-cwd');
+
+    const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ name: 'HTTP Cwd Project', repoPath: TEST_REPO_PATH }),
+    });
+    expect(projectResponse.status).toBe(201);
+    const project = (await projectResponse.json()) as { id: string };
+
+    const sessionResponse = await fetch(`${apiBaseUrl}/api/projects/${project.id}/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ title: 'HTTP Cwd Session', cwdOverride: '/tmp' }),
+    });
+    expect(sessionResponse.status).toBe(201);
+    const session = (await sessionResponse.json()) as { id: string };
+
+    const turnResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}/turns`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'use overridden cwd' }),
+    });
+    expect(turnResponse.status).toBe(201);
+    const turn = (await turnResponse.json()) as { turnId: string };
+
+    await sleep(1300);
+
+    const streamResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/stream?since=0`, {
+      headers: { 'x-user-email': email },
+    });
+    expect(streamResponse.status).toBe(200);
+    const streamText = await streamResponse.text();
+    expect(streamText).toContain('"cwd":"/tmp"');
   });
 
   it('cancels active turn through http runner adapter', async () => {

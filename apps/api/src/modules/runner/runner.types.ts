@@ -4,6 +4,16 @@ export type StartTurnInput = {
   content: string;
   threadId?: string | null;
   cwd?: string | null;
+  model?: string | null;
+};
+
+export type AvailableModel = {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  hidden: boolean;
+  isDefault: boolean;
 };
 
 export type CancelTurnInput = {
@@ -39,6 +49,7 @@ export interface RunnerAdapter {
   startTurn(input: StartTurnInput): Promise<void>;
   cancelTurn(input: CancelTurnInput): Promise<void>;
   resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void>;
+  listModels(): Promise<AvailableModel[]>;
 }
 
 export const RUNNER_ADAPTER = Symbol('RUNNER_ADAPTER');

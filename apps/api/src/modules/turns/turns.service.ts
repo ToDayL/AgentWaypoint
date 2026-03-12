@@ -55,9 +55,11 @@ export class TurnsService implements OnModuleInit {
       },
       select: {
         id: true,
+        cwdOverride: true,
         codexThreadId: true,
+        modelOverride: true,
         project: {
-          select: { repoPath: true },
+          select: { repoPath: true, defaultModel: true },
         },
       },
     });
@@ -65,7 +67,8 @@ export class TurnsService implements OnModuleInit {
       throw new NotFoundException({ message: 'Session not found' });
     }
 
-    const cwd = session.project.repoPath?.trim() ?? null;
+    const cwd = session.cwdOverride?.trim() || session.project.repoPath?.trim() || null;
+    const model = session.modelOverride?.trim() || session.project.defaultModel?.trim() || null;
 
     const activeTurn = await this.prisma.turn.findFirst({
       where: {
@@ -103,6 +106,7 @@ export class TurnsService implements OnModuleInit {
         content: input.content,
         threadId: session.codexThreadId,
         cwd,
+        model,
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : 'Runner start failed';

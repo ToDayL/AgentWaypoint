@@ -19,6 +19,7 @@ export class ProjectsService {
         ownerUserId: userId,
         name: input.name,
         repoPath: input.repoPath,
+        defaultModel: input.defaultModel,
       },
     });
   }

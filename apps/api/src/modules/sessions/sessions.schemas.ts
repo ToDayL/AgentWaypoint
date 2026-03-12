@@ -10,6 +10,8 @@ export const SessionIdParamsSchema = z.object({
 
 export const CreateSessionBodySchema = z.object({
   title: z.string().trim().min(1).max(200),
+  cwdOverride: z.string().trim().min(1).max(512).optional(),
+  modelOverride: z.string().trim().min(1).max(120).optional(),
 });
 
 export type ProjectIdOnlyParams = z.infer<typeof ProjectIdOnlyParamsSchema>;

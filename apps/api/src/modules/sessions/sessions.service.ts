@@ -39,6 +39,8 @@ export class SessionsService {
         projectId,
         title: input.title,
         status: 'active',
+        cwdOverride: input.cwdOverride,
+        modelOverride: input.modelOverride,
       },
     });
   }
@@ -56,6 +58,8 @@ export class SessionsService {
         projectId: true,
         title: true,
         status: true,
+        cwdOverride: true,
+        modelOverride: true,
         updatedAt: true,
         messages: {
           orderBy: { createdAt: 'asc' },
@@ -95,6 +99,8 @@ export class SessionsService {
         projectId: session.projectId,
         title: session.title,
         status: session.status,
+        cwdOverride: session.cwdOverride,
+        modelOverride: session.modelOverride,
         updatedAt: session.updatedAt,
       },
       messages: session.messages,

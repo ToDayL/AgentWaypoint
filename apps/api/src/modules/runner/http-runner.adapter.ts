@@ -1,10 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { CancelTurnInput, ResolveTurnApprovalInput, RunnerAdapter, StartTurnInput } from './runner.types';
+import { AvailableModel, CancelTurnInput, ResolveTurnApprovalInput, RunnerAdapter, StartTurnInput } from './runner.types';
 
 type RunnerHttpRequestOptions = {
-  method: 'POST';
+  method: 'GET' | 'POST';
   path: string;
-  body: Record<string, unknown>;
+  body?: Record<string, unknown>;
 };
 
 @Injectable()
@@ -30,6 +30,7 @@ export class HttpRunnerAdapter implements RunnerAdapter {
         content: input.content,
         threadId: input.threadId ?? null,
         cwd: input.cwd ?? null,
+        model: input.model ?? null,
       },
     });
   }
@@ -56,7 +57,29 @@ export class HttpRunnerAdapter implements RunnerAdapter {
     });
   }
 
-  private async request(options: RunnerHttpRequestOptions): Promise<void> {
+  async listModels(): Promise<AvailableModel[]> {
+    const response = await this.request({
+      method: 'GET',
+      path: '/runner/models',
+    });
+    if (!response || typeof response !== 'object' || !Array.isArray((response as { data?: unknown }).data)) {
+      throw new Error('Runner model list response is invalid');
+    }
+
+    return ((response as { data: unknown[] }).data ?? [])
+      .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+      .map((item) => ({
+        id: typeof item.id === 'string' ? item.id : '',
+        model: typeof item.model === 'string' ? item.model : '',
+        displayName: typeof item.displayName === 'string' ? item.displayName : (typeof item.model === 'string' ? item.model : ''),
+        description: typeof item.description === 'string' ? item.description : '',
+        hidden: item.hidden === true,
+        isDefault: item.isDefault === true,
+      }))
+      .filter((item) => item.id.length > 0 && item.model.length > 0);
+  }
+
+  private async request(options: RunnerHttpRequestOptions): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
 
@@ -67,7 +90,7 @@ export class HttpRunnerAdapter implements RunnerAdapter {
           'content-type': 'application/json',
           ...(this.authToken ? { authorization: `Bearer ${this.authToken}` } : {}),
         },
-        body: JSON.stringify(options.body),
+        ...(options.body ? { body: JSON.stringify(options.body) } : {}),
         signal: controller.signal,
       });
 
@@ -77,6 +100,21 @@ export class HttpRunnerAdapter implements RunnerAdapter {
           `Runner request failed: ${options.path} -> ${response.status} ${response.statusText} ${responseText}`,
         );
         throw new Error(`Runner request failed: ${response.status}`);
+      }
+
+      if (response.status === 204) {
+        return null;
+      }
+
+      const responseText = await response.text();
+      if (!responseText.trim()) {
+        return null;
+      }
+
+      try {
+        return JSON.parse(responseText) as unknown;
+      } catch {
+        return responseText;
       }
     } catch (error: unknown) {
       if (error instanceof Error) {

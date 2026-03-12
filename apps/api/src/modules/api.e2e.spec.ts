@@ -64,11 +64,12 @@ describe('API e2e', () => {
       method: 'POST',
       url: '/api/projects',
       headers: { 'x-user-email': email },
-      payload: { name: 'E2E Project', repoPath: '/workspace/e2e' },
+      payload: { name: 'E2E Project', repoPath: '/workspace/e2e', defaultModel: 'gpt-5-codex' },
     });
     expect(createProjectResponse.statusCode).toBe(201);
     const project = createProjectResponse.json();
     expect(project.name).toBe('E2E Project');
+    expect(project.defaultModel).toBe('gpt-5-codex');
     expect(project.ownerUserId).toBeTypeOf('string');
     expect(project.id).toBeTypeOf('string');
 
@@ -86,13 +87,15 @@ describe('API e2e', () => {
       method: 'POST',
       url: `/api/projects/${project.id}/sessions`,
       headers: { 'x-user-email': email },
-      payload: { title: 'E2E Session' },
+      payload: { title: 'E2E Session', cwdOverride: '/workspace/e2e/session', modelOverride: 'gpt-5-mini' },
     });
     expect(createSessionResponse.statusCode).toBe(201);
     const session = createSessionResponse.json();
     expect(session.projectId).toBe(project.id);
     expect(session.title).toBe('E2E Session');
     expect(session.status).toBe('active');
+    expect(session.cwdOverride).toBe('/workspace/e2e/session');
+    expect(session.modelOverride).toBe('gpt-5-mini');
 
     const listSessionsResponse = await app.inject({
       method: 'GET',
@@ -120,6 +123,26 @@ describe('API e2e', () => {
         code: 'BAD_REQUEST',
         message: 'Validation failed',
       },
+    });
+  });
+
+  it('lists available models', async () => {
+    const email = randomEmail('models');
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/models',
+      headers: { 'x-user-email': email },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      data: expect.arrayContaining([
+        expect.objectContaining({
+          model: expect.any(String),
+          displayName: expect.any(String),
+        }),
+      ]),
     });
   });
 

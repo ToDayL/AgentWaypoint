@@ -1,6 +1,8 @@
 import { Inject, Injectable, Logger, Module, OnModuleInit } from '@nestjs/common';
+import { AuthModule } from '../auth/auth.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { HttpRunnerAdapter } from './http-runner.adapter';
+import { ModelsController } from './models.controller';
 import { MockRunnerAdapter } from './mock-runner.adapter';
 import { RUNNER_ADAPTER } from './runner.types';
 
@@ -22,7 +24,8 @@ class RunnerModeLogger implements OnModuleInit {
 }
 
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, AuthModule],
+  controllers: [ModelsController],
   providers: [
     MockRunnerAdapter,
     HttpRunnerAdapter,

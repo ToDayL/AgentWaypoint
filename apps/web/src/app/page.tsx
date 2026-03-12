@@ -6,6 +6,7 @@ type Project = {
   id: string;
   name: string;
   repoPath?: string | null;
+  defaultModel?: string | null;
   createdAt: string;
 };
 
@@ -13,7 +14,18 @@ type Session = {
   id: string;
   title: string;
   status: string;
+  cwdOverride?: string | null;
+  modelOverride?: string | null;
   updatedAt: string;
+};
+
+type AvailableModel = {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  hidden: boolean;
+  isDefault: boolean;
 };
 
 type ChatMessage = {
@@ -121,11 +133,15 @@ export default function HomePage() {
   const [email, setEmail] = useState('demo@agentwaypoint.local');
   const [projects, setProjects] = useState<Project[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
   const [newProjectName, setNewProjectName] = useState('Simulation Workspace');
   const [newProjectRepoPath, setNewProjectRepoPath] = useState('');
+  const [newProjectDefaultModel, setNewProjectDefaultModel] = useState('');
   const [newSessionTitle, setNewSessionTitle] = useState('First Simulation Session');
+  const [newSessionCwdOverride, setNewSessionCwdOverride] = useState('');
+  const [newSessionModelOverride, setNewSessionModelOverride] = useState('');
   const [prompt, setPrompt] = useState('');
   const [eventLog, setEventLog] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -167,9 +183,22 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    void loadAvailableModels();
     void loadProjects();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function loadAvailableModels(): Promise<void> {
+    try {
+      const response = await apiRequest<{ data: AvailableModel[] }>('/api/sim/models', {
+        method: 'GET',
+        email,
+      });
+      setAvailableModels(response.data ?? []);
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    }
+  }
 
   if (!mounted) {
     return (
@@ -255,7 +284,11 @@ export default function HomePage() {
       const created = await apiRequest<Project>('/api/sim/projects', {
         method: 'POST',
         email,
-        body: { name: newProjectName.trim(), repoPath: newProjectRepoPath.trim() },
+        body: {
+          name: newProjectName.trim(),
+          repoPath: newProjectRepoPath.trim(),
+          ...(newProjectDefaultModel.trim() ? { defaultModel: newProjectDefaultModel.trim() } : {}),
+        },
       });
       await loadProjects();
       setSelectedProjectId(created.id);
@@ -278,7 +311,11 @@ export default function HomePage() {
       const created = await apiRequest<Session>(`/api/sim/projects/${selectedProjectId}/sessions`, {
         method: 'POST',
         email,
-        body: { title: newSessionTitle.trim() },
+        body: {
+          title: newSessionTitle.trim(),
+          ...(newSessionCwdOverride.trim() ? { cwdOverride: newSessionCwdOverride.trim() } : {}),
+          ...(newSessionModelOverride.trim() ? { modelOverride: newSessionModelOverride.trim() } : {}),
+        },
       });
       await loadSessions(selectedProjectId);
       setSelectedSessionId(created.id);
@@ -613,6 +650,21 @@ export default function HomePage() {
                 placeholder="/absolute/path/to/repo"
               />
             </label>
+            <label>
+              Default Model
+              <select
+                value={newProjectDefaultModel}
+                onChange={(event) => setNewProjectDefaultModel(event.target.value)}
+              >
+                <option value="">Use runner default</option>
+                {availableModels.map((model) => (
+                  <option key={model.id} value={model.model}>
+                    {model.displayName}
+                    {model.isDefault ? ' (Default)' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button
               type="button"
               onClick={() => void handleCreateProject()}
@@ -650,6 +702,29 @@ export default function HomePage() {
                 placeholder="Session title"
               />
             </label>
+            <label>
+              Session CWD Override
+              <input
+                value={newSessionCwdOverride}
+                onChange={(event) => setNewSessionCwdOverride(event.target.value)}
+                placeholder="Leave blank to use project workspace"
+              />
+            </label>
+            <label>
+              Model Override
+              <select
+                value={newSessionModelOverride}
+                onChange={(event) => setNewSessionModelOverride(event.target.value)}
+              >
+                <option value="">Use project default</option>
+                {availableModels.map((model) => (
+                  <option key={model.id} value={model.model}>
+                    {model.displayName}
+                    {model.isDefault ? ' (Default)' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button type="button" onClick={() => void handleCreateSession()} disabled={busy || !selectedProjectId}>
               Create Session
             </button>
@@ -683,6 +758,21 @@ export default function HomePage() {
             </p>
             <p>
               Workspace: <strong>{selectedProject?.repoPath ?? '-'}</strong>
+            </p>
+            <p>
+              Session CWD Override: <strong>{selectedSession?.cwdOverride ?? '-'}</strong>
+            </p>
+            <p>
+              Effective CWD: <strong>{selectedSession?.cwdOverride ?? selectedProject?.repoPath ?? '-'}</strong>
+            </p>
+            <p>
+              Project Model: <strong>{selectedProject?.defaultModel ?? '-'}</strong>
+            </p>
+            <p>
+              Session Model Override: <strong>{selectedSession?.modelOverride ?? '-'}</strong>
+            </p>
+            <p>
+              Effective Model: <strong>{selectedSession?.modelOverride ?? selectedProject?.defaultModel ?? '-'}</strong>
             </p>
             <p>
               Status: <span className="status-pill">{turnStatus}</span>

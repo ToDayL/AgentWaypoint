@@ -11,6 +11,16 @@ type StartTurnBody = {
   content: string;
   threadId?: string | null;
   cwd?: string | null;
+  model?: string | null;
+};
+
+type ModelListItem = {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  hidden: boolean;
+  isDefault: boolean;
 };
 
 type CancelTurnBody = {
@@ -127,13 +137,6 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    if (request.method !== 'POST') {
-      sendJson(response, 404, {
-        error: { code: 'NOT_FOUND', message: 'Route not found' },
-      });
-      return;
-    }
-
     if (authToken) {
       const authHeader = request.headers.authorization;
       if (authHeader !== `Bearer ${authToken}`) {
@@ -142,6 +145,20 @@ const server = createServer(async (request, response) => {
         });
         return;
       }
+    }
+
+    if (request.method === 'GET' && request.url === '/runner/models') {
+      sendJson(response, 200, {
+        data: await listModels(),
+      });
+      return;
+    }
+
+    if (request.method !== 'POST') {
+      sendJson(response, 404, {
+        error: { code: 'NOT_FOUND', message: 'Route not found' },
+      });
+      return;
     }
 
     if (request.url === '/runner/turns/start') {
@@ -260,7 +277,8 @@ function parseStartTurnBody(input: unknown): StartTurnBody {
   const content = readNonEmptyString(record.content, 'content');
   const threadId = readOptionalString(record.threadId);
   const cwd = readOptionalString(record.cwd);
-  return { turnId, sessionId, content, threadId, cwd };
+  const model = readOptionalString(record.model);
+  return { turnId, sessionId, content, threadId, cwd, model };
 }
 
 function parseCancelTurnBody(input: unknown): CancelTurnBody {
@@ -364,8 +382,9 @@ async function startCodexExecution(input: StartTurnBody): Promise<void> {
       input: [{ type: 'text', text: input.content, text_elements: [] }],
       cwd: workspaceCwd,
     };
-    if (codexDefaultModel) {
-      turnStartParams.model = codexDefaultModel;
+    const model = input.model?.trim() || codexDefaultModel;
+    if (model) {
+      turnStartParams.model = model;
     }
 
     const turnStartResult = (await sendWorkerRequest(worker, 'turn/start', turnStartParams)) as Record<string, unknown>;
@@ -484,6 +503,65 @@ async function ensureCodexWorker(): Promise<CodexWorker> {
   })();
 
   return codexWorkerPromise;
+}
+
+async function listModels(): Promise<ModelListItem[]> {
+  if (runnerBackend === 'mock') {
+    const model = codexDefaultModel || 'gpt-5-codex';
+    return [
+      {
+        id: model,
+        model,
+        displayName: model,
+        description: 'Configured mock/default model',
+        hidden: false,
+        isDefault: true,
+      },
+    ];
+  }
+
+  const worker = await ensureCodexWorker();
+  await worker.readyPromise;
+
+  const items: ModelListItem[] = [];
+  let cursor: string | null = null;
+
+  while (true) {
+    const result = (await sendWorkerRequest(worker, 'model/list', {
+      cursor,
+      includeHidden: false,
+      limit: 100,
+    })) as Record<string, unknown>;
+
+    const data = Array.isArray(result.data) ? result.data : [];
+    for (const entry of data) {
+      if (!entry || typeof entry !== 'object') {
+        continue;
+      }
+      const record = entry as Record<string, unknown>;
+      const id = readOptionalString(record.id) ?? '';
+      const model = readOptionalString(record.model) ?? '';
+      if (!id || !model) {
+        continue;
+      }
+      items.push({
+        id,
+        model,
+        displayName: readOptionalString(record.displayName) ?? model,
+        description: readOptionalString(record.description) ?? '',
+        hidden: record.hidden === true,
+        isDefault: record.isDefault === true,
+      });
+    }
+
+    const nextCursor = readOptionalString(result.nextCursor);
+    if (!nextCursor) {
+      break;
+    }
+    cursor = nextCursor;
+  }
+
+  return items;
 }
 
 function handleWorkerExit(worker: CodexWorker, reason: string): void {

@@ -19,6 +19,7 @@ model Project {
   ownerUserId String
   name        String
   repoPath    String?
+  defaultModel String?
   createdAt   DateTime  @default(now())
   sessions    Session[]
   owner       User      @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
@@ -31,6 +32,8 @@ model Session {
   projectId String
   title     String
   status    String
+  cwdOverride String?
+  modelOverride String?
   codexThreadId String?
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt

@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { CancelTurnInput, ResolveTurnApprovalInput, RunnerAdapter, StartTurnInput } from './runner.types';
+import { AvailableModel, CancelTurnInput, ResolveTurnApprovalInput, RunnerAdapter, StartTurnInput } from './runner.types';
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
@@ -72,6 +72,20 @@ export class MockRunnerAdapter implements RunnerAdapter {
 
   async resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void> {
     throw new Error(`Mock runner does not support approvals for turn ${input.turnId}`);
+  }
+
+  async listModels(): Promise<AvailableModel[]> {
+    const configuredModel = process.env.RUNNER_CODEX_MODEL?.trim() || 'gpt-5-codex';
+    return [
+      {
+        id: configuredModel,
+        model: configuredModel,
+        displayName: configuredModel,
+        description: 'Configured mock/default model',
+        hidden: false,
+        isDefault: true,
+      },
+    ];
   }
 
   private async handleDelta(turnId: string, chunk: string): Promise<void> {
