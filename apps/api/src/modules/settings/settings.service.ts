@@ -2,37 +2,28 @@ import { Inject, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { UpdateAppSettingsBody } from './settings.schemas';
 
-const APP_CONFIG_KEY = 'global';
-
 @Injectable()
 export class SettingsService {
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
-  async getAppSettings() {
-    return this.prisma.appConfig.upsert({
-      where: { key: APP_CONFIG_KEY },
-      update: {},
-      create: {
-        key: APP_CONFIG_KEY,
-        turnSteerEnabled: getInitialTurnSteerEnabled(),
+  async getAppSettings(userId: string) {
+    return this.prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: {
+        turnSteerEnabled: true,
       },
     });
   }
 
-  async updateAppSettings(input: UpdateAppSettingsBody) {
-    return this.prisma.appConfig.upsert({
-      where: { key: APP_CONFIG_KEY },
-      update: {
+  async updateAppSettings(userId: string, input: UpdateAppSettingsBody) {
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: {
         turnSteerEnabled: input.turnSteerEnabled,
       },
-      create: {
-        key: APP_CONFIG_KEY,
-        turnSteerEnabled: input.turnSteerEnabled,
+      select: {
+        turnSteerEnabled: true,
       },
     });
   }
-}
-
-function getInitialTurnSteerEnabled(): boolean {
-  return (process.env.TURN_STEER_ENABLED ?? 'false').trim().toLowerCase() === 'true';
 }

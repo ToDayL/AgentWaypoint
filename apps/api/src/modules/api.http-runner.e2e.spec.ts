@@ -398,7 +398,6 @@ describe.sequential('API e2e (http runner)', () => {
 
   const prevRunnerMode = process.env.RUNNER_MODE;
   const prevRunnerBaseUrl = process.env.RUNNER_BASE_URL;
-  const prevTurnSteerEnabled = process.env.TURN_STEER_ENABLED;
 
   beforeAll(async () => {
     const apiPort = 4100 + Math.floor(Math.random() * 800);
@@ -408,7 +407,6 @@ describe.sequential('API e2e (http runner)', () => {
     process.env.RUNNER_MODE = 'http';
     process.env.RUNNER_BASE_URL = runner.baseUrl;
     process.env.RUNNER_AUTH_TOKEN = '';
-    process.env.TURN_STEER_ENABLED = 'false';
 
     app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter());
     app.useGlobalFilters(new HttpExceptionFilter());
@@ -424,7 +422,6 @@ describe.sequential('API e2e (http runner)', () => {
     }
     process.env.RUNNER_MODE = prevRunnerMode;
     process.env.RUNNER_BASE_URL = prevRunnerBaseUrl;
-    process.env.TURN_STEER_ENABLED = prevTurnSteerEnabled;
   });
 
   it('creates turn and streams runner callback events to completion', async () => {
@@ -771,15 +768,16 @@ describe.sequential('API e2e (http runner)', () => {
     );
   });
 
-  it('returns and updates app settings', async () => {
+  it('returns and updates per-user settings', async () => {
     const email = randomEmail('http-settings');
+    const otherEmail = randomEmail('http-settings-other');
 
-    const resetResponse = await fetch(`${apiBaseUrl}/api/settings`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-user-email': email },
-      body: JSON.stringify({ turnSteerEnabled: false }),
+    const initialResponse = await fetch(`${apiBaseUrl}/api/settings`, {
+      headers: { 'x-user-email': email },
     });
-    expect(resetResponse.status).toBe(201);
+    expect(initialResponse.status).toBe(200);
+    const initialSettings = (await initialResponse.json()) as { turnSteerEnabled: boolean };
+    expect(initialSettings.turnSteerEnabled).toBe(false);
 
     const updateResponse = await fetch(`${apiBaseUrl}/api/settings`, {
       method: 'POST',
@@ -789,6 +787,13 @@ describe.sequential('API e2e (http runner)', () => {
     expect(updateResponse.status).toBe(201);
     const updatedSettings = (await updateResponse.json()) as { turnSteerEnabled: boolean };
     expect(updatedSettings.turnSteerEnabled).toBe(true);
+
+    const otherUserResponse = await fetch(`${apiBaseUrl}/api/settings`, {
+      headers: { 'x-user-email': otherEmail },
+    });
+    expect(otherUserResponse.status).toBe(200);
+    const otherUserSettings = (await otherUserResponse.json()) as { turnSteerEnabled: boolean };
+    expect(otherUserSettings.turnSteerEnabled).toBe(false);
   });
 
   it('cancels active turn through http runner adapter', async () => {

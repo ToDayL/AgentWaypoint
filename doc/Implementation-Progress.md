@@ -214,7 +214,7 @@ Last updated: 2026-03-12
 5. Conversation control features were added:
    - Session fork support through API, runner, and web UI.
    - `turn/steer` support through API, runner, and web UI.
-   - Steer enablement is now managed through persisted app settings instead of env flags.
+   - Steer enablement is now managed through persisted per-user settings instead of env flags.
 6. Turn execution metadata was added for auditability:
    - Requested and effective `model`, `cwd`, `sandbox`, and `approvalPolicy` are persisted on `Turn`.
    - Web turn history shows requested versus effective execution config.

@@ -759,7 +759,7 @@ export default function HomePage() {
               <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" />
             </label>
             <label>
-              <span>Turn Steering</span>
+              <span>Turn Steering (This User)</span>
               <input
                 type="checkbox"
                 checked={appSettings.turnSteerEnabled}

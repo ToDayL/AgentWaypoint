@@ -158,7 +158,7 @@ export class TurnsService implements OnModuleInit {
   }
 
   async steerTurnForUser(userId: string, turnId: string, input: SteerTurnBody) {
-    const settings = await this.settingsService.getAppSettings();
+    const settings = await this.settingsService.getAppSettings(userId);
     if (!settings.turnSteerEnabled) {
       throw new ConflictException({ message: 'Turn steering is disabled' });
     }
