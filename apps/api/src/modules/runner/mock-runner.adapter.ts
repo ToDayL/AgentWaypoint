@@ -1,7 +1,17 @@
+import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { AvailableModel, CancelTurnInput, ResolveTurnApprovalInput, RunnerAdapter, StartTurnInput } from './runner.types';
+import {
+  AvailableModel,
+  CancelTurnInput,
+  ForkThreadInput,
+  ForkThreadResult,
+  ResolveTurnApprovalInput,
+  RunnerAdapter,
+  SteerTurnInput,
+  StartTurnInput,
+} from './runner.types';
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
@@ -25,7 +35,9 @@ export class MockRunnerAdapter implements RunnerAdapter {
       where: { id: input.turnId },
       data: { status: 'running', startedAt: new Date() },
     });
+    const threadId = `mock-thread-${input.sessionId}`;
     await this.appendEvent(input.turnId, 'turn.started', {
+      threadId,
       ...(input.model ? { model: input.model } : {}),
       ...(input.cwd ? { cwd: input.cwd } : {}),
       ...(input.sandbox ? { sandbox: input.sandbox } : {}),
@@ -75,6 +87,18 @@ export class MockRunnerAdapter implements RunnerAdapter {
     await this.appendEvent(input.turnId, 'turn.cancelled', {});
   }
 
+  async steerTurn(input: SteerTurnInput): Promise<void> {
+    const turn = await this.prisma.turn.findUnique({
+      where: { id: input.turnId },
+      select: { status: true },
+    });
+    if (!turn || TERMINAL_STATUSES.has(turn.status)) {
+      return;
+    }
+
+    await this.appendEvent(input.turnId, 'assistant.delta', { text: `\n[steer] ${input.content}` });
+  }
+
   async resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void> {
     throw new Error(`Mock runner does not support approvals for turn ${input.turnId}`);
   }
@@ -91,6 +115,13 @@ export class MockRunnerAdapter implements RunnerAdapter {
         isDefault: true,
       },
     ];
+  }
+
+  async forkThread(input: ForkThreadInput): Promise<ForkThreadResult> {
+    if (!input.threadId.trim()) {
+      throw new Error('Source thread is required');
+    }
+    return { threadId: `mock-fork-${randomUUID()}` };
   }
 
   private async handleDelta(turnId: string, chunk: string): Promise<void> {

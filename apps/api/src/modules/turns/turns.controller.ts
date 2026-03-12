@@ -19,6 +19,7 @@ import {
   CreateTurnBodySchema,
   ResolveTurnApprovalBodySchema,
   SessionIdParamsSchema,
+  SteerTurnBodySchema,
   StreamTurnQuerySchema,
   TurnIdParamsSchema,
 } from './turns.schemas';
@@ -61,6 +62,17 @@ export class TurnsController {
   async cancelTurn(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown) {
     const { id } = parseWithZod(TurnIdParamsSchema, params);
     return this.turnsService.cancelTurnForUser(user.id, id);
+  }
+
+  @Post('/turns/:id/steer')
+  async steerTurn(
+    @CurrentUserDecorator() user: CurrentUser,
+    @Param() params: unknown,
+    @Body() body: unknown,
+  ) {
+    const { id } = parseWithZod(TurnIdParamsSchema, params);
+    const input = parseWithZod(SteerTurnBodySchema, body);
+    return this.turnsService.steerTurnForUser(user.id, id, input);
   }
 
   @Post('/turns/:id/approval')

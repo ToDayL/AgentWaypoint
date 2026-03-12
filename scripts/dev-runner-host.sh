@@ -19,11 +19,15 @@ else
   PM=(corepack pnpm)
 fi
 
-CI=true "${PM[@]}" install --no-frozen-lockfile --reporter=append-only
+TSX_BIN="$ROOT_DIR/node_modules/.bin/tsx"
+
+if [[ ! -x "$TSX_BIN" ]]; then
+  CI=true "${PM[@]}" install --no-frozen-lockfile --reporter=append-only
+fi
 
 if [[ "${RUNNER_WATCH_MODE:-1}" == "1" ]]; then
   cd "$RUNNER_DIR"
-  exec "$ROOT_DIR/node_modules/.bin/tsx" watch src/main.ts
+  exec "$TSX_BIN" watch src/main.ts
 fi
 
 cd "$RUNNER_DIR"

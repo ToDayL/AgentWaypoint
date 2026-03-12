@@ -12,6 +12,10 @@ export const CreateTurnBodySchema = z.object({
   content: z.string().trim().min(1).max(10000),
 });
 
+export const SteerTurnBodySchema = z.object({
+  content: z.string().trim().min(1).max(10000),
+});
+
 const ApprovalDecisionSchema = z.union([
   z.enum(['approve', 'reject', 'accept', 'acceptForSession', 'decline', 'cancel']),
   z
@@ -45,5 +49,6 @@ export const StreamTurnQuerySchema = z.object({
 export type SessionIdParams = z.infer<typeof SessionIdParamsSchema>;
 export type TurnIdParams = z.infer<typeof TurnIdParamsSchema>;
 export type CreateTurnBody = z.infer<typeof CreateTurnBodySchema>;
+export type SteerTurnBody = z.infer<typeof SteerTurnBodySchema>;
 export type ResolveTurnApprovalBody = z.infer<typeof ResolveTurnApprovalBodySchema>;
 export type StreamTurnQuery = z.infer<typeof StreamTurnQuerySchema>;

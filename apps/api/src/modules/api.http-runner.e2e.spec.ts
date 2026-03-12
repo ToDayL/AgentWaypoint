@@ -76,6 +76,7 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
 
 async function createTestRunnerServer(apiBaseUrl: string): Promise<TestRunnerServer> {
   const activeTurns = new Map<string, ActiveTurnState>();
+  const forkedThreadIds = new Map<string, string>();
 
   const emitEvent = async (turnId: string, type: RunnerEventType, payload: Record<string, unknown>) => {
     try {
@@ -131,6 +132,7 @@ async function createTestRunnerServer(apiBaseUrl: string): Promise<TestRunnerSer
       if (request.url === '/runner/turns/start') {
         const payload = await readJsonBody(request);
         const turnId = readRequiredString(payload, 'turnId');
+        const sessionId = readRequiredString(payload, 'sessionId');
         const content = readRequiredString(payload, 'content');
         const model = typeof payload.model === 'string' && payload.model.trim().length > 0 ? payload.model.trim() : null;
         const cwd = typeof payload.cwd === 'string' && payload.cwd.trim().length > 0 ? payload.cwd.trim() : null;
@@ -140,12 +142,14 @@ async function createTestRunnerServer(apiBaseUrl: string): Promise<TestRunnerSer
           typeof payload.approvalPolicy === 'string' && payload.approvalPolicy.trim().length > 0
             ? payload.approvalPolicy.trim()
             : null;
+        const threadId = `thread-${sessionId}`;
 
         const existing = activeTurns.get(turnId);
         if (existing?.completionTimer) {
           clearTimeout(existing.completionTimer);
         }
         void emitEvent(turnId, 'turn.started', {
+          threadId,
           ...(model ? { model } : {}),
           ...(cwd ? { cwd } : {}),
           ...(sandbox ? { sandbox } : {}),
@@ -189,6 +193,32 @@ async function createTestRunnerServer(apiBaseUrl: string): Promise<TestRunnerSer
           }, 120);
         }
 
+        sendJson(response, 202, { accepted: true });
+        return;
+      }
+
+      if (request.url === '/runner/threads/fork') {
+        const payload = await readJsonBody(request);
+        const sourceThreadId = readRequiredString(payload, 'threadId');
+        const forkedThreadId = `forked-${sourceThreadId}`;
+        forkedThreadIds.set(sourceThreadId, forkedThreadId);
+        sendJson(response, 200, { threadId: forkedThreadId });
+        return;
+      }
+
+      if (request.url === '/runner/turns/steer') {
+        const payload = await readJsonBody(request);
+        const turnId = readRequiredString(payload, 'turnId');
+        const content = readRequiredString(payload, 'content');
+        const activeTurn = activeTurns.get(turnId);
+        if (!activeTurn) {
+          sendJson(response, 404, { error: 'active turn not found' });
+          return;
+        }
+        setTimeout(() => {
+          if (!activeTurns.has(turnId)) return;
+          void emitEvent(turnId, 'assistant.delta', { text: ` [steer:${content}]` });
+        }, 80);
         sendJson(response, 202, { accepted: true });
         return;
       }
@@ -283,6 +313,7 @@ describe.sequential('API e2e (http runner)', () => {
 
   const prevRunnerMode = process.env.RUNNER_MODE;
   const prevRunnerBaseUrl = process.env.RUNNER_BASE_URL;
+  const prevTurnSteerEnabled = process.env.TURN_STEER_ENABLED;
 
   beforeAll(async () => {
     const apiPort = 4100 + Math.floor(Math.random() * 800);
@@ -292,6 +323,7 @@ describe.sequential('API e2e (http runner)', () => {
     process.env.RUNNER_MODE = 'http';
     process.env.RUNNER_BASE_URL = runner.baseUrl;
     process.env.RUNNER_AUTH_TOKEN = '';
+    process.env.TURN_STEER_ENABLED = 'false';
 
     app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter());
     app.useGlobalFilters(new HttpExceptionFilter());
@@ -307,6 +339,7 @@ describe.sequential('API e2e (http runner)', () => {
     }
     process.env.RUNNER_MODE = prevRunnerMode;
     process.env.RUNNER_BASE_URL = prevRunnerBaseUrl;
+    process.env.TURN_STEER_ENABLED = prevTurnSteerEnabled;
   });
 
   it('creates turn and streams runner callback events to completion', async () => {
@@ -488,6 +521,157 @@ describe.sequential('API e2e (http runner)', () => {
     const streamText = await streamResponse.text();
     expect(streamText).toContain('"sandbox":"read-only"');
     expect(streamText).toContain('"approvalPolicy":"never"');
+  });
+
+  it('forks a session into a new session with copied history and a new codex thread id', async () => {
+    const email = randomEmail('http-fork');
+
+    const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ name: 'HTTP Fork Project', repoPath: TEST_REPO_PATH }),
+    });
+    expect(projectResponse.status).toBe(201);
+    const project = (await projectResponse.json()) as { id: string };
+
+    const sessionResponse = await fetch(`${apiBaseUrl}/api/projects/${project.id}/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ title: 'HTTP Fork Session' }),
+    });
+    expect(sessionResponse.status).toBe(201);
+    const session = (await sessionResponse.json()) as { id: string };
+
+    const turnResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}/turns`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'create forkable history' }),
+    });
+    expect(turnResponse.status).toBe(201);
+
+    let readyToFork = false;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await sleep(250);
+      const historyResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}/history`, {
+        headers: { 'x-user-email': email },
+      });
+      expect(historyResponse.status).toBe(200);
+      const history = (await historyResponse.json()) as { activeTurnId: string | null };
+      if (!history.activeTurnId) {
+        readyToFork = true;
+        break;
+      }
+    }
+    expect(readyToFork).toBe(true);
+
+    const forkResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}/fork`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({}),
+    });
+    expect(forkResponse.status).toBe(201);
+    const forkedSession = (await forkResponse.json()) as { id: string; title: string; codexThreadId: string };
+    expect(forkedSession.id).not.toBe(session.id);
+    expect(forkedSession.title).toBe('HTTP Fork Session (Fork)');
+    expect(forkedSession.codexThreadId).toMatch(/^forked-/);
+
+    const historyResponse = await fetch(`${apiBaseUrl}/api/sessions/${forkedSession.id}/history`, {
+      headers: { 'x-user-email': email },
+    });
+    expect(historyResponse.status).toBe(200);
+    const history = (await historyResponse.json()) as {
+      messages: Array<{ role: string; content: string }>;
+      turns: Array<unknown>;
+    };
+    expect(history.messages).toMatchObject([
+      { role: 'user', content: 'create forkable history' },
+      { role: 'assistant', content: expect.stringContaining('Echo: create forkable history') },
+    ]);
+    expect(history.turns).toHaveLength(0);
+  });
+
+  it('steers an active turn through the http runner adapter when enabled', async () => {
+    const email = randomEmail('http-steer');
+
+    const settingsResponse = await fetch(`${apiBaseUrl}/api/settings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ turnSteerEnabled: true }),
+    });
+    expect(settingsResponse.status).toBe(201);
+
+    const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ name: 'HTTP Steer Project', repoPath: TEST_REPO_PATH }),
+    });
+    expect(projectResponse.status).toBe(201);
+    const project = (await projectResponse.json()) as { id: string };
+
+    const sessionResponse = await fetch(`${apiBaseUrl}/api/projects/${project.id}/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ title: 'HTTP Steer Session' }),
+    });
+    expect(sessionResponse.status).toBe(201);
+    const session = (await sessionResponse.json()) as { id: string };
+
+    const turnResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}/turns`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'long running steer target' }),
+    });
+    expect(turnResponse.status).toBe(201);
+    const turn = (await turnResponse.json()) as { turnId: string };
+
+    await sleep(200);
+
+    const steerResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/steer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'focus on tests only' }),
+    });
+    expect(steerResponse.status).toBe(201);
+
+    await sleep(1300);
+
+    const streamResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/stream?since=0`, {
+      headers: { 'x-user-email': email },
+    });
+    expect(streamResponse.status).toBe(200);
+    const streamText = await streamResponse.text();
+    expect(streamText).toContain('[steer:focus on tests only]');
+
+    const historyResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}/history`, {
+      headers: { 'x-user-email': email },
+    });
+    expect(historyResponse.status).toBe(200);
+    const history = (await historyResponse.json()) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(history.messages).toEqual(
+      expect.arrayContaining([expect.objectContaining({ role: 'user', content: 'focus on tests only' })]),
+    );
+  });
+
+  it('returns and updates app settings', async () => {
+    const email = randomEmail('http-settings');
+
+    const resetResponse = await fetch(`${apiBaseUrl}/api/settings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ turnSteerEnabled: false }),
+    });
+    expect(resetResponse.status).toBe(201);
+
+    const updateResponse = await fetch(`${apiBaseUrl}/api/settings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ turnSteerEnabled: true }),
+    });
+    expect(updateResponse.status).toBe(201);
+    const updatedSettings = (await updateResponse.json()) as { turnSteerEnabled: boolean };
+    expect(updatedSettings.turnSteerEnabled).toBe(true);
   });
 
   it('cancels active turn through http runner adapter', async () => {

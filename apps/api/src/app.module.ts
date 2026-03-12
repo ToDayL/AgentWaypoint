@@ -5,9 +5,19 @@ import { AuthModule } from './modules/auth/auth.module';
 import { ProjectsModule } from './modules/projects/projects.module';
 import { SessionsModule } from './modules/sessions/sessions.module';
 import { RunnerModule } from './modules/runner/runner.module';
+import { SettingsModule } from './modules/settings/settings.module';
 import { TurnsModule } from './modules/turns/turns.module';
 
 @Module({
-  imports: [PrismaModule, AuthModule, HealthModule, ProjectsModule, SessionsModule, RunnerModule, TurnsModule],
+  imports: [
+    PrismaModule,
+    AuthModule,
+    HealthModule,
+    ProjectsModule,
+    SessionsModule,
+    RunnerModule,
+    SettingsModule,
+    TurnsModule,
+  ],
 })
 export class AppModule {}

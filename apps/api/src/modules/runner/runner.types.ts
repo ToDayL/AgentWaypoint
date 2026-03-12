@@ -22,6 +22,23 @@ export type CancelTurnInput = {
   turnId: string;
 };
 
+export type SteerTurnInput = {
+  turnId: string;
+  content: string;
+};
+
+export type ForkThreadInput = {
+  threadId: string;
+  cwd?: string | null;
+  model?: string | null;
+  sandbox?: string | null;
+  approvalPolicy?: string | null;
+};
+
+export type ForkThreadResult = {
+  threadId: string;
+};
+
 export type ApprovalDecisionInput =
   | 'accept'
   | 'acceptForSession'
@@ -49,9 +66,11 @@ export type ResolveTurnApprovalInput = {
 
 export interface RunnerAdapter {
   startTurn(input: StartTurnInput): Promise<void>;
+  steerTurn(input: SteerTurnInput): Promise<void>;
   cancelTurn(input: CancelTurnInput): Promise<void>;
   resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void>;
   listModels(): Promise<AvailableModel[]>;
+  forkThread(input: ForkThreadInput): Promise<ForkThreadResult>;
 }
 
 export const RUNNER_ADAPTER = Symbol('RUNNER_ADAPTER');

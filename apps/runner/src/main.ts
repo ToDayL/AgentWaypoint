@@ -29,6 +29,19 @@ type CancelTurnBody = {
   turnId: string;
 };
 
+type SteerTurnBody = {
+  turnId: string;
+  content: string;
+};
+
+type ForkThreadBody = {
+  threadId: string;
+  cwd?: string | null;
+  model?: string | null;
+  sandbox?: string | null;
+  approvalPolicy?: string | null;
+};
+
 type ResolveApprovalBody = {
   turnId: string;
   requestId: string;
@@ -204,6 +217,65 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (request.url === '/runner/threads/fork') {
+      const payload = parseForkThreadBody(await readJsonBody(request));
+      const cwd = await resolveWorkspaceCwd(payload.cwd);
+
+      if (runnerBackend === 'mock') {
+        sendJson(response, 200, {
+          threadId: `mock-fork-${randomUUID()}`,
+        });
+        return;
+      }
+
+      const worker = await ensureCodexWorker();
+      await worker.readyPromise;
+
+      const result = (await sendWorkerRequest(worker, 'thread/fork', {
+        threadId: payload.threadId,
+        cwd,
+        model: payload.model ?? codexDefaultModel,
+        sandbox: payload.sandbox ?? codexSandboxMode,
+        approvalPolicy: payload.approvalPolicy ?? codexApprovalPolicy,
+      })) as Record<string, unknown>;
+      const threadId = readNestedString(result, ['thread', 'id']);
+      if (!threadId) {
+        throw new Error('thread/fork did not return thread id');
+      }
+
+      sendJson(response, 200, { threadId });
+      return;
+    }
+
+    if (request.url === '/runner/turns/steer') {
+      const payload = parseSteerTurnBody(await readJsonBody(request));
+      const turn = activeTurns.get(payload.turnId);
+      if (!turn || turn.finalized) {
+        sendJson(response, 404, {
+          error: { code: 'NOT_FOUND', message: 'Active turn not found' },
+        });
+        return;
+      }
+      if (turn.backend !== 'codex') {
+        await notifyApi(turn.turnId, 'assistant.delta', { text: `\n[steer] ${payload.content}` });
+        sendJson(response, 202, { accepted: true, runnerRequestId: randomUUID() });
+        return;
+      }
+      if (!turn.threadId || !turn.codexTurnId) {
+        throw new Error('Turn is not ready for steering yet');
+      }
+
+      const worker = await ensureCodexWorker();
+      await worker.readyPromise;
+      await sendWorkerRequest(worker, 'turn/steer', {
+        threadId: turn.threadId,
+        expectedTurnId: turn.codexTurnId,
+        input: [{ type: 'text', text: payload.content, text_elements: [] }],
+      });
+      sendJson(response, 202, { accepted: true, runnerRequestId: randomUUID() });
+      return;
+    }
+
     if (request.url === '/runner/turns/cancel') {
       const payload = parseCancelTurnBody(await readJsonBody(request));
       const turn = activeTurns.get(payload.turnId);
@@ -295,6 +367,31 @@ function parseCancelTurnBody(input: unknown): CancelTurnBody {
   const record = input as Record<string, unknown>;
   return {
     turnId: readNonEmptyString(record.turnId, 'turnId'),
+  };
+}
+
+function parseForkThreadBody(input: unknown): ForkThreadBody {
+  if (!input || typeof input !== 'object') {
+    throw new Error('Invalid fork payload');
+  }
+  const record = input as Record<string, unknown>;
+  return {
+    threadId: readNonEmptyString(record.threadId, 'threadId'),
+    cwd: readOptionalString(record.cwd),
+    model: readOptionalString(record.model),
+    sandbox: readOptionalString(record.sandbox),
+    approvalPolicy: readOptionalString(record.approvalPolicy),
+  };
+}
+
+function parseSteerTurnBody(input: unknown): SteerTurnBody {
+  if (!input || typeof input !== 'object') {
+    throw new Error('Invalid steer payload');
+  }
+  const record = input as Record<string, unknown>;
+  return {
+    turnId: readNonEmptyString(record.turnId, 'turnId'),
+    content: readNonEmptyString(record.content, 'content'),
   };
 }
 

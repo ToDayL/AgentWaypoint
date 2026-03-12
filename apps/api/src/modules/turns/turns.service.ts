@@ -2,10 +2,12 @@ import { ConflictException, Inject, Injectable, Logger, NotFoundException, OnMod
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
-import { CreateTurnBody, ResolveTurnApprovalBody } from './turns.schemas';
+import { SettingsService } from '../settings/settings.service';
+import { CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from './turns.schemas';
 
 const ACTIVE_TURN_STATUSES = ['queued', 'running', 'waiting_approval'];
 const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
+const STEERABLE_TURN_STATUSES = ['queued', 'running'];
 
 export type RunnerEventType =
   | 'turn.started'
@@ -39,6 +41,7 @@ export class TurnsService implements OnModuleInit {
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(RUNNER_ADAPTER) private readonly runnerAdapter: RunnerAdapter,
+    @Inject(SettingsService) private readonly settingsService: SettingsService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -144,6 +147,33 @@ export class TurnsService implements OnModuleInit {
     return this.prisma.turn.findUnique({
       where: { id: turnId },
     });
+  }
+
+  async steerTurnForUser(userId: string, turnId: string, input: SteerTurnBody) {
+    const settings = await this.settingsService.getAppSettings();
+    if (!settings.turnSteerEnabled) {
+      throw new ConflictException({ message: 'Turn steering is disabled' });
+    }
+
+    const turn = await this.getTurnForUser(userId, turnId);
+    if (!STEERABLE_TURN_STATUSES.includes(turn.status)) {
+      throw new ConflictException({ message: 'Only running or queued turns can be steered' });
+    }
+
+    await this.prisma.message.create({
+      data: {
+        sessionId: turn.sessionId,
+        role: 'user',
+        content: input.content,
+      },
+    });
+
+    await this.runnerAdapter.steerTurn({
+      turnId,
+      content: input.content,
+    });
+
+    return this.getTurnStatusForUser(userId, turnId);
   }
 
   async resolveTurnApprovalForUser(userId: string, turnId: string, input: ResolveTurnApprovalBody) {

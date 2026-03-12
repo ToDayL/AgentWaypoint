@@ -1,5 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { AvailableModel, CancelTurnInput, ResolveTurnApprovalInput, RunnerAdapter, StartTurnInput } from './runner.types';
+import {
+  AvailableModel,
+  CancelTurnInput,
+  ForkThreadInput,
+  ForkThreadResult,
+  ResolveTurnApprovalInput,
+  RunnerAdapter,
+  SteerTurnInput,
+  StartTurnInput,
+} from './runner.types';
 
 type RunnerHttpRequestOptions = {
   method: 'GET' | 'POST';
@@ -33,6 +42,17 @@ export class HttpRunnerAdapter implements RunnerAdapter {
         model: input.model ?? null,
         sandbox: input.sandbox ?? null,
         approvalPolicy: input.approvalPolicy ?? null,
+      },
+    });
+  }
+
+  async steerTurn(input: SteerTurnInput): Promise<void> {
+    await this.request({
+      method: 'POST',
+      path: '/runner/turns/steer',
+      body: {
+        turnId: input.turnId,
+        content: input.content,
       },
     });
   }
@@ -79,6 +99,30 @@ export class HttpRunnerAdapter implements RunnerAdapter {
         isDefault: item.isDefault === true,
       }))
       .filter((item) => item.id.length > 0 && item.model.length > 0);
+  }
+
+  async forkThread(input: ForkThreadInput): Promise<ForkThreadResult> {
+    const response = await this.request({
+      method: 'POST',
+      path: '/runner/threads/fork',
+      body: {
+        threadId: input.threadId,
+        cwd: input.cwd ?? null,
+        model: input.model ?? null,
+        sandbox: input.sandbox ?? null,
+        approvalPolicy: input.approvalPolicy ?? null,
+      },
+    });
+    if (!response || typeof response !== 'object') {
+      throw new Error('Runner fork thread response is invalid');
+    }
+    const threadId = typeof (response as { threadId?: unknown }).threadId === 'string'
+      ? (response as { threadId: string }).threadId
+      : '';
+    if (!threadId) {
+      throw new Error('Runner fork thread response did not include threadId');
+    }
+    return { threadId };
   }
 
   private async request(options: RunnerHttpRequestOptions): Promise<unknown> {

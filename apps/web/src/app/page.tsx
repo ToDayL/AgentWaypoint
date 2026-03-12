@@ -89,6 +89,10 @@ type PendingApproval = {
   payload: Record<string, unknown>;
 };
 
+type AppSettings = {
+  turnSteerEnabled: boolean;
+};
+
 type ApprovalDecisionInput =
   | 'accept'
   | 'acceptForSession'
@@ -153,6 +157,7 @@ export default function HomePage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
+  const [appSettings, setAppSettings] = useState<AppSettings>({ turnSteerEnabled: false });
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
   const [newProjectName, setNewProjectName] = useState('Simulation Workspace');
@@ -182,7 +187,9 @@ export default function HomePage() {
   const eventSourceRef = useRef<EventSource | null>(null);
   const turnPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const canSendTurn = !!selectedSessionId && prompt.trim().length > 0 && activeTurnId === '';
+  const canStartTurn = !!selectedSessionId && prompt.trim().length > 0 && activeTurnId === '';
+  const canSteerTurn =
+    appSettings.turnSteerEnabled && !!activeTurnId && prompt.trim().length > 0 && pendingApproval === null;
   const selectedProject = useMemo(
     () => projects.find((item) => item.id === selectedProjectId),
     [projects, selectedProjectId],
@@ -206,10 +213,23 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    void loadAppSettings();
     void loadAvailableModels();
     void loadProjects();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function loadAppSettings(): Promise<void> {
+    try {
+      const response = await apiRequest<AppSettings>('/api/sim/settings', {
+        method: 'GET',
+        email,
+      });
+      setAppSettings({ turnSteerEnabled: !!response.turnSteerEnabled });
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    }
+  }
 
   async function loadAvailableModels(): Promise<void> {
     try {
@@ -250,6 +270,23 @@ export default function HomePage() {
         setSelectedProjectId(items[0].id);
         await loadSessions(items[0].id);
       }
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleTurnSteerToggle(enabled: boolean): Promise<void> {
+    setBusy(true);
+    setError('');
+    try {
+      const response = await apiRequest<AppSettings>('/api/sim/settings', {
+        method: 'POST',
+        email,
+        body: { turnSteerEnabled: enabled },
+      });
+      setAppSettings({ turnSteerEnabled: !!response.turnSteerEnabled });
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
@@ -358,23 +395,67 @@ export default function HomePage() {
     }
   }
 
-  async function handleSendTurn(): Promise<void> {
-    if (!canSendTurn) {
+  async function handleForkSession(): Promise<void> {
+    if (!selectedSessionId || !selectedProjectId || activeTurnId) {
       return;
     }
 
     setBusy(true);
     setError('');
-    setEventLog([]);
-    setAssistantText('');
-    setReasoningText('');
-    setLatestPlan('');
-    setToolOutput('');
-    setDiffSummary('');
-    setResumedTurnHint('');
-    setTurnStatus('queued');
+    try {
+      const forked = await apiRequest<Session>(`/api/sim/sessions/${selectedSessionId}/fork`, {
+        method: 'POST',
+        email,
+        body: {},
+      });
+      await loadSessions(selectedProjectId);
+      setSelectedSessionId(forked.id);
+      await loadSessionHistory(forked.id, { resumeStream: true, resetEventLog: true });
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSendTurn(): Promise<void> {
+    if (!canStartTurn && !canSteerTurn) {
+      return;
+    }
+
+    setBusy(true);
+    setError('');
 
     try {
+      if (canSteerTurn && activeTurnId) {
+        const steerContent = prompt.trim();
+        await apiRequest<TurnStatusResponse>(`/api/sim/turns/${activeTurnId}/steer`, {
+          method: 'POST',
+          email,
+          body: { content: steerContent },
+        });
+        setMessages((current) => [
+          ...current,
+          {
+            id: `steer-${Date.now()}`,
+            role: 'user',
+            content: steerContent,
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+        setPrompt('');
+        return;
+      }
+
+      setEventLog([]);
+      setAssistantText('');
+      setReasoningText('');
+      setLatestPlan('');
+      setToolOutput('');
+      setDiffSummary('');
+      setResumedTurnHint('');
+      setTurnStatus('queued');
+
       const result = await apiRequest<{ turnId: string; status: string }>(`/api/sim/sessions/${selectedSessionId}/turns`, {
         method: 'POST',
         email,
@@ -658,6 +739,15 @@ export default function HomePage() {
               User Email
               <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" />
             </label>
+            <label>
+              <span>Turn Steering</span>
+              <input
+                type="checkbox"
+                checked={appSettings.turnSteerEnabled}
+                onChange={(event) => void handleTurnSteerToggle(event.target.checked)}
+                disabled={busy}
+              />
+            </label>
             <button type="button" onClick={() => void loadProjects()} disabled={busy}>
               Refresh Projects
             </button>
@@ -811,6 +901,9 @@ export default function HomePage() {
             <button type="button" onClick={() => void handleCreateSession()} disabled={busy || !selectedProjectId}>
               Create Session
             </button>
+            <button type="button" onClick={() => void handleForkSession()} disabled={busy || !selectedSessionId || !!activeTurnId}>
+              Fork Session
+            </button>
             <label>
               Current Session
               <select
@@ -895,8 +988,12 @@ export default function HomePage() {
             />
           </label>
           <div className="sim-actions">
-            <button type="button" onClick={() => void handleSendTurn()} disabled={!canSendTurn || busy}>
-              Start Turn
+            <button
+              type="button"
+              onClick={() => void handleSendTurn()}
+              disabled={(!canStartTurn && !canSteerTurn) || busy}
+            >
+              {canSteerTurn ? 'Steer Current Turn' : 'Start Turn'}
             </button>
             <button type="button" onClick={() => void handleCancelTurn()} disabled={!activeTurnId || busy}>
               Cancel Turn
