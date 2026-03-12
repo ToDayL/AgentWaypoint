@@ -64,12 +64,20 @@ describe('API e2e', () => {
       method: 'POST',
       url: '/api/projects',
       headers: { 'x-user-email': email },
-      payload: { name: 'E2E Project', repoPath: '/workspace/e2e', defaultModel: 'gpt-5-codex' },
+      payload: {
+        name: 'E2E Project',
+        repoPath: '/workspace/e2e',
+        defaultModel: 'gpt-5-codex',
+        defaultSandbox: 'workspace-write',
+        defaultApprovalPolicy: 'on-request',
+      },
     });
     expect(createProjectResponse.statusCode).toBe(201);
     const project = createProjectResponse.json();
     expect(project.name).toBe('E2E Project');
     expect(project.defaultModel).toBe('gpt-5-codex');
+    expect(project.defaultSandbox).toBe('workspace-write');
+    expect(project.defaultApprovalPolicy).toBe('on-request');
     expect(project.ownerUserId).toBeTypeOf('string');
     expect(project.id).toBeTypeOf('string');
 
@@ -87,7 +95,13 @@ describe('API e2e', () => {
       method: 'POST',
       url: `/api/projects/${project.id}/sessions`,
       headers: { 'x-user-email': email },
-      payload: { title: 'E2E Session', cwdOverride: '/workspace/e2e/session', modelOverride: 'gpt-5-mini' },
+      payload: {
+        title: 'E2E Session',
+        cwdOverride: '/workspace/e2e/session',
+        modelOverride: 'gpt-5-mini',
+        sandboxOverride: 'read-only',
+        approvalPolicyOverride: 'never',
+      },
     });
     expect(createSessionResponse.statusCode).toBe(201);
     const session = createSessionResponse.json();
@@ -96,6 +110,8 @@ describe('API e2e', () => {
     expect(session.status).toBe('active');
     expect(session.cwdOverride).toBe('/workspace/e2e/session');
     expect(session.modelOverride).toBe('gpt-5-mini');
+    expect(session.sandboxOverride).toBe('read-only');
+    expect(session.approvalPolicyOverride).toBe('never');
 
     const listSessionsResponse = await app.inject({
       method: 'GET',

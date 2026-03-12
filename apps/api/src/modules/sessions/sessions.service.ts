@@ -41,6 +41,8 @@ export class SessionsService {
         status: 'active',
         cwdOverride: input.cwdOverride,
         modelOverride: input.modelOverride,
+        sandboxOverride: input.sandboxOverride,
+        approvalPolicyOverride: input.approvalPolicyOverride,
       },
     });
   }
@@ -60,6 +62,8 @@ export class SessionsService {
         status: true,
         cwdOverride: true,
         modelOverride: true,
+        sandboxOverride: true,
+        approvalPolicyOverride: true,
         updatedAt: true,
         messages: {
           orderBy: { createdAt: 'asc' },
@@ -101,6 +105,8 @@ export class SessionsService {
         status: session.status,
         cwdOverride: session.cwdOverride,
         modelOverride: session.modelOverride,
+        sandboxOverride: session.sandboxOverride,
+        approvalPolicyOverride: session.approvalPolicyOverride,
         updatedAt: session.updatedAt,
       },
       messages: session.messages,

@@ -25,7 +25,12 @@ export class MockRunnerAdapter implements RunnerAdapter {
       where: { id: input.turnId },
       data: { status: 'running', startedAt: new Date() },
     });
-    await this.appendEvent(input.turnId, 'turn.started', {});
+    await this.appendEvent(input.turnId, 'turn.started', {
+      ...(input.model ? { model: input.model } : {}),
+      ...(input.cwd ? { cwd: input.cwd } : {}),
+      ...(input.sandbox ? { sandbox: input.sandbox } : {}),
+      ...(input.approvalPolicy ? { approvalPolicy: input.approvalPolicy } : {}),
+    });
 
     const assistantText = `Echo: ${input.content}`;
     const chunks = chunkText(assistantText, 12);

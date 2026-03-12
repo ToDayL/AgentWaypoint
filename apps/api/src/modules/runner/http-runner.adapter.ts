@@ -31,6 +31,8 @@ export class HttpRunnerAdapter implements RunnerAdapter {
         threadId: input.threadId ?? null,
         cwd: input.cwd ?? null,
         model: input.model ?? null,
+        sandbox: input.sandbox ?? null,
+        approvalPolicy: input.approvalPolicy ?? null,
       },
     });
   }

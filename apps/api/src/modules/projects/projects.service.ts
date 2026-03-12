@@ -20,6 +20,8 @@ export class ProjectsService {
         name: input.name,
         repoPath: input.repoPath,
         defaultModel: input.defaultModel,
+        defaultSandbox: input.defaultSandbox,
+        defaultApprovalPolicy: input.defaultApprovalPolicy,
       },
     });
   }

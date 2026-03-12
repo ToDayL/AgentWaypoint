@@ -5,6 +5,8 @@ export type StartTurnInput = {
   threadId?: string | null;
   cwd?: string | null;
   model?: string | null;
+  sandbox?: string | null;
+  approvalPolicy?: string | null;
 };
 
 export type AvailableModel = {

@@ -12,6 +12,8 @@ type StartTurnBody = {
   threadId?: string | null;
   cwd?: string | null;
   model?: string | null;
+  sandbox?: string | null;
+  approvalPolicy?: string | null;
 };
 
 type ModelListItem = {
@@ -195,6 +197,9 @@ const server = createServer(async (request, response) => {
         content: payload.content,
         threadId: payload.threadId ?? null,
         cwd: payload.cwd ?? null,
+        model: payload.model ?? null,
+        sandbox: payload.sandbox ?? null,
+        approvalPolicy: payload.approvalPolicy ?? null,
       });
       return;
     }
@@ -278,7 +283,9 @@ function parseStartTurnBody(input: unknown): StartTurnBody {
   const threadId = readOptionalString(record.threadId);
   const cwd = readOptionalString(record.cwd);
   const model = readOptionalString(record.model);
-  return { turnId, sessionId, content, threadId, cwd, model };
+  const sandbox = readOptionalString(record.sandbox);
+  const approvalPolicy = readOptionalString(record.approvalPolicy);
+  return { turnId, sessionId, content, threadId, cwd, model, sandbox, approvalPolicy };
 }
 
 function parseCancelTurnBody(input: unknown): CancelTurnBody {
@@ -316,7 +323,7 @@ function readOptionalString(value: unknown): string | null {
     return null;
   }
   if (typeof value !== 'string') {
-    throw new Error('threadId must be a string when provided');
+    throw new Error('Optional string fields must be strings when provided');
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
@@ -374,23 +381,31 @@ async function startCodexExecution(input: StartTurnBody): Promise<void> {
     await worker.readyPromise;
 
     const workspaceCwd = input.cwd?.trim() || codexDefaultCwd;
-    const threadId = await resolveThreadId(worker, input.threadId ?? null, workspaceCwd);
+    const model = input.model?.trim() || codexDefaultModel;
+    const sandbox = input.sandbox?.trim() || codexSandboxMode;
+    const approvalPolicy = input.approvalPolicy?.trim() || codexApprovalPolicy;
+    const threadId = await resolveThreadId(worker, input.threadId ?? null, workspaceCwd, {
+      model,
+      sandbox,
+      approvalPolicy,
+    });
     turn.threadId = threadId;
 
     const turnStartParams: Record<string, unknown> = {
       threadId,
       input: [{ type: 'text', text: input.content, text_elements: [] }],
-      cwd: workspaceCwd,
     };
-    const model = input.model?.trim() || codexDefaultModel;
-    if (model) {
-      turnStartParams.model = model;
-    }
 
     const turnStartResult = (await sendWorkerRequest(worker, 'turn/start', turnStartParams)) as Record<string, unknown>;
     turn.codexTurnId = readNestedString(turnStartResult, ['turn', 'id']);
 
-    await notifyApi(turn.turnId, 'turn.started', { threadId });
+    await notifyApi(turn.turnId, 'turn.started', {
+      threadId,
+      cwd: workspaceCwd,
+      ...(model ? { model } : {}),
+      ...(sandbox ? { sandbox } : {}),
+      ...(approvalPolicy ? { approvalPolicy } : {}),
+    });
     await completionPromise;
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'unknown codex execution error';
@@ -585,12 +600,20 @@ function handleWorkerExit(worker: CodexWorker, reason: string): void {
   });
 }
 
-async function resolveThreadId(worker: CodexWorker, preferredThreadId: string | null, cwd: string): Promise<string> {
+async function resolveThreadId(
+  worker: CodexWorker,
+  preferredThreadId: string | null,
+  cwd: string,
+  options: { model: string | null; sandbox: string | null; approvalPolicy: string | null },
+): Promise<string> {
   if (preferredThreadId) {
     try {
       await sendWorkerRequest(worker, 'thread/resume', {
         threadId: preferredThreadId,
         cwd,
+        model: options.model,
+        sandbox: options.sandbox,
+        approvalPolicy: options.approvalPolicy,
         persistExtendedHistory: false,
       });
       return preferredThreadId;
@@ -603,8 +626,9 @@ async function resolveThreadId(worker: CodexWorker, preferredThreadId: string | 
 
   const threadStartResult = (await sendWorkerRequest(worker, 'thread/start', {
     cwd,
-    approvalPolicy: codexApprovalPolicy,
-    sandbox: codexSandboxMode,
+    approvalPolicy: options.approvalPolicy ?? codexApprovalPolicy,
+    sandbox: options.sandbox ?? codexSandboxMode,
+    model: options.model,
     ephemeral: false,
     experimentalRawEvents: false,
     persistExtendedHistory: false,

@@ -134,6 +134,12 @@ async function createTestRunnerServer(apiBaseUrl: string): Promise<TestRunnerSer
         const content = readRequiredString(payload, 'content');
         const model = typeof payload.model === 'string' && payload.model.trim().length > 0 ? payload.model.trim() : null;
         const cwd = typeof payload.cwd === 'string' && payload.cwd.trim().length > 0 ? payload.cwd.trim() : null;
+        const sandbox =
+          typeof payload.sandbox === 'string' && payload.sandbox.trim().length > 0 ? payload.sandbox.trim() : null;
+        const approvalPolicy =
+          typeof payload.approvalPolicy === 'string' && payload.approvalPolicy.trim().length > 0
+            ? payload.approvalPolicy.trim()
+            : null;
 
         const existing = activeTurns.get(turnId);
         if (existing?.completionTimer) {
@@ -142,6 +148,8 @@ async function createTestRunnerServer(apiBaseUrl: string): Promise<TestRunnerSer
         void emitEvent(turnId, 'turn.started', {
           ...(model ? { model } : {}),
           ...(cwd ? { cwd } : {}),
+          ...(sandbox ? { sandbox } : {}),
+          ...(approvalPolicy ? { approvalPolicy } : {}),
         });
 
         if (content.includes('[approval]')) {
@@ -433,6 +441,53 @@ describe.sequential('API e2e (http runner)', () => {
     expect(streamResponse.status).toBe(200);
     const streamText = await streamResponse.text();
     expect(streamText).toContain('"cwd":"/tmp"');
+  });
+
+  it('prefers session sandbox and approval policy overrides over project defaults when dispatching a turn', async () => {
+    const email = randomEmail('http-runner-exec-defaults');
+
+    const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({
+        name: 'HTTP Exec Project',
+        repoPath: TEST_REPO_PATH,
+        defaultSandbox: 'workspace-write',
+        defaultApprovalPolicy: 'on-request',
+      }),
+    });
+    expect(projectResponse.status).toBe(201);
+    const project = (await projectResponse.json()) as { id: string };
+
+    const sessionResponse = await fetch(`${apiBaseUrl}/api/projects/${project.id}/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({
+        title: 'HTTP Exec Session',
+        sandboxOverride: 'read-only',
+        approvalPolicyOverride: 'never',
+      }),
+    });
+    expect(sessionResponse.status).toBe(201);
+    const session = (await sessionResponse.json()) as { id: string };
+
+    const turnResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}/turns`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'use execution overrides' }),
+    });
+    expect(turnResponse.status).toBe(201);
+    const turn = (await turnResponse.json()) as { turnId: string };
+
+    await sleep(1300);
+
+    const streamResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/stream?since=0`, {
+      headers: { 'x-user-email': email },
+    });
+    expect(streamResponse.status).toBe(200);
+    const streamText = await streamResponse.text();
+    expect(streamText).toContain('"sandbox":"read-only"');
+    expect(streamText).toContain('"approvalPolicy":"never"');
   });
 
   it('cancels active turn through http runner adapter', async () => {

@@ -7,6 +7,8 @@ type Project = {
   name: string;
   repoPath?: string | null;
   defaultModel?: string | null;
+  defaultSandbox?: string | null;
+  defaultApprovalPolicy?: string | null;
   createdAt: string;
 };
 
@@ -16,6 +18,8 @@ type Session = {
   status: string;
   cwdOverride?: string | null;
   modelOverride?: string | null;
+  sandboxOverride?: string | null;
+  approvalPolicyOverride?: string | null;
   updatedAt: string;
 };
 
@@ -111,6 +115,21 @@ type ApprovalActionOption = {
   secondary?: boolean;
 };
 
+const SANDBOX_OPTIONS = [
+  { value: '', label: 'Use runner default' },
+  { value: 'read-only', label: 'read-only' },
+  { value: 'workspace-write', label: 'workspace-write' },
+  { value: 'danger-full-access', label: 'danger-full-access' },
+];
+
+const APPROVAL_POLICY_OPTIONS = [
+  { value: '', label: 'Use runner default' },
+  { value: 'untrusted', label: 'untrusted' },
+  { value: 'on-failure', label: 'on-failure' },
+  { value: 'on-request', label: 'on-request' },
+  { value: 'never', label: 'never' },
+];
+
 const STREAM_EVENTS = [
   'turn.started',
   'assistant.delta',
@@ -139,9 +158,13 @@ export default function HomePage() {
   const [newProjectName, setNewProjectName] = useState('Simulation Workspace');
   const [newProjectRepoPath, setNewProjectRepoPath] = useState('');
   const [newProjectDefaultModel, setNewProjectDefaultModel] = useState('');
+  const [newProjectDefaultSandbox, setNewProjectDefaultSandbox] = useState('');
+  const [newProjectDefaultApprovalPolicy, setNewProjectDefaultApprovalPolicy] = useState('');
   const [newSessionTitle, setNewSessionTitle] = useState('First Simulation Session');
   const [newSessionCwdOverride, setNewSessionCwdOverride] = useState('');
   const [newSessionModelOverride, setNewSessionModelOverride] = useState('');
+  const [newSessionSandboxOverride, setNewSessionSandboxOverride] = useState('');
+  const [newSessionApprovalPolicyOverride, setNewSessionApprovalPolicyOverride] = useState('');
   const [prompt, setPrompt] = useState('');
   const [eventLog, setEventLog] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -288,6 +311,10 @@ export default function HomePage() {
           name: newProjectName.trim(),
           repoPath: newProjectRepoPath.trim(),
           ...(newProjectDefaultModel.trim() ? { defaultModel: newProjectDefaultModel.trim() } : {}),
+          ...(newProjectDefaultSandbox.trim() ? { defaultSandbox: newProjectDefaultSandbox.trim() } : {}),
+          ...(newProjectDefaultApprovalPolicy.trim()
+            ? { defaultApprovalPolicy: newProjectDefaultApprovalPolicy.trim() }
+            : {}),
         },
       });
       await loadProjects();
@@ -315,6 +342,10 @@ export default function HomePage() {
           title: newSessionTitle.trim(),
           ...(newSessionCwdOverride.trim() ? { cwdOverride: newSessionCwdOverride.trim() } : {}),
           ...(newSessionModelOverride.trim() ? { modelOverride: newSessionModelOverride.trim() } : {}),
+          ...(newSessionSandboxOverride.trim() ? { sandboxOverride: newSessionSandboxOverride.trim() } : {}),
+          ...(newSessionApprovalPolicyOverride.trim()
+            ? { approvalPolicyOverride: newSessionApprovalPolicyOverride.trim() }
+            : {}),
         },
       });
       await loadSessions(selectedProjectId);
@@ -665,6 +696,32 @@ export default function HomePage() {
                 ))}
               </select>
             </label>
+            <label>
+              Default Sandbox
+              <select
+                value={newProjectDefaultSandbox}
+                onChange={(event) => setNewProjectDefaultSandbox(event.target.value)}
+              >
+                {SANDBOX_OPTIONS.map((option) => (
+                  <option key={`project-sandbox-${option.label}`} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Default Approval Policy
+              <select
+                value={newProjectDefaultApprovalPolicy}
+                onChange={(event) => setNewProjectDefaultApprovalPolicy(event.target.value)}
+              >
+                {APPROVAL_POLICY_OPTIONS.map((option) => (
+                  <option key={`project-approval-${option.label}`} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button
               type="button"
               onClick={() => void handleCreateProject()}
@@ -725,6 +782,32 @@ export default function HomePage() {
                 ))}
               </select>
             </label>
+            <label>
+              Sandbox Override
+              <select
+                value={newSessionSandboxOverride}
+                onChange={(event) => setNewSessionSandboxOverride(event.target.value)}
+              >
+                {SANDBOX_OPTIONS.map((option) => (
+                  <option key={`session-sandbox-${option.label}`} value={option.value}>
+                    {option.value === '' ? 'Use project default' : option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Approval Policy Override
+              <select
+                value={newSessionApprovalPolicyOverride}
+                onChange={(event) => setNewSessionApprovalPolicyOverride(event.target.value)}
+              >
+                {APPROVAL_POLICY_OPTIONS.map((option) => (
+                  <option key={`session-approval-${option.label}`} value={option.value}>
+                    {option.value === '' ? 'Use project default' : option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button type="button" onClick={() => void handleCreateSession()} disabled={busy || !selectedProjectId}>
               Create Session
             </button>
@@ -773,6 +856,28 @@ export default function HomePage() {
             </p>
             <p>
               Effective Model: <strong>{selectedSession?.modelOverride ?? selectedProject?.defaultModel ?? '-'}</strong>
+            </p>
+            <p>
+              Project Sandbox: <strong>{selectedProject?.defaultSandbox ?? '-'}</strong>
+            </p>
+            <p>
+              Session Sandbox Override: <strong>{selectedSession?.sandboxOverride ?? '-'}</strong>
+            </p>
+            <p>
+              Effective Sandbox:{' '}
+              <strong>{selectedSession?.sandboxOverride ?? selectedProject?.defaultSandbox ?? '-'}</strong>
+            </p>
+            <p>
+              Project Approval Policy: <strong>{selectedProject?.defaultApprovalPolicy ?? '-'}</strong>
+            </p>
+            <p>
+              Session Approval Policy Override: <strong>{selectedSession?.approvalPolicyOverride ?? '-'}</strong>
+            </p>
+            <p>
+              Effective Approval Policy:{' '}
+              <strong>
+                {selectedSession?.approvalPolicyOverride ?? selectedProject?.defaultApprovalPolicy ?? '-'}
+              </strong>
             </p>
             <p>
               Status: <span className="status-pill">{turnStatus}</span>

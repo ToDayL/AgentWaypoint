@@ -15,31 +15,35 @@ model User {
 }
 
 model Project {
-  id          String    @id @default(cuid())
-  ownerUserId String
-  name        String
-  repoPath    String?
-  defaultModel String?
-  createdAt   DateTime  @default(now())
-  sessions    Session[]
-  owner       User      @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  id                    String    @id @default(cuid())
+  ownerUserId           String
+  name                  String
+  repoPath              String?
+  defaultModel          String?
+  defaultSandbox        String?
+  defaultApprovalPolicy String?
+  createdAt             DateTime  @default(now())
+  sessions              Session[]
+  owner                 User      @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
 
   @@index([ownerUserId])
 }
 
 model Session {
-  id        String    @id @default(cuid())
-  projectId String
-  title     String
-  status    String
-  cwdOverride String?
-  modelOverride String?
-  codexThreadId String?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  messages  Message[]
-  turns     Turn[]
-  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  id                     String    @id @default(cuid())
+  projectId              String
+  title                  String
+  status                 String
+  cwdOverride            String?
+  modelOverride          String?
+  sandboxOverride        String?
+  approvalPolicyOverride String?
+  codexThreadId          String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  messages               Message[]
+  turns                  Turn[]
+  project                Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([projectId])
 }

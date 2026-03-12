@@ -8,6 +8,8 @@ export const CreateProjectBodySchema = z.object({
   name: z.string().trim().min(1).max(120),
   repoPath: z.string().trim().min(1).max(512).optional(),
   defaultModel: z.string().trim().min(1).max(120).optional(),
+  defaultSandbox: z.string().trim().min(1).max(120).optional(),
+  defaultApprovalPolicy: z.string().trim().min(1).max(120).optional(),
 });
 
 export type ProjectIdParams = z.infer<typeof ProjectIdParamsSchema>;

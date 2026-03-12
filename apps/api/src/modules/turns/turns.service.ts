@@ -58,8 +58,10 @@ export class TurnsService implements OnModuleInit {
         cwdOverride: true,
         codexThreadId: true,
         modelOverride: true,
+        sandboxOverride: true,
+        approvalPolicyOverride: true,
         project: {
-          select: { repoPath: true, defaultModel: true },
+          select: { repoPath: true, defaultModel: true, defaultSandbox: true, defaultApprovalPolicy: true },
         },
       },
     });
@@ -69,6 +71,9 @@ export class TurnsService implements OnModuleInit {
 
     const cwd = session.cwdOverride?.trim() || session.project.repoPath?.trim() || null;
     const model = session.modelOverride?.trim() || session.project.defaultModel?.trim() || null;
+    const sandbox = session.sandboxOverride?.trim() || session.project.defaultSandbox?.trim() || null;
+    const approvalPolicy =
+      session.approvalPolicyOverride?.trim() || session.project.defaultApprovalPolicy?.trim() || null;
 
     const activeTurn = await this.prisma.turn.findFirst({
       where: {
@@ -107,6 +112,8 @@ export class TurnsService implements OnModuleInit {
         threadId: session.codexThreadId,
         cwd,
         model,
+        sandbox,
+        approvalPolicy,
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : 'Runner start failed';
