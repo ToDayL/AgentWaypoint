@@ -33,7 +33,6 @@ docker compose -f "$COMPOSE_FILE" ps || true
 
 echo
 echo "[dev-status] Host services:"
-status_bg api
 status_bg runner
 
 echo

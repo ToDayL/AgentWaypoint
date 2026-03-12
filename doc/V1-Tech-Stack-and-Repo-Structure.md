@@ -136,7 +136,7 @@ packages/shared/
   - `web`: `http://localhost:3000`
   - `api`: `http://localhost:4000`
   - `codex-runner`: host daemon (for example `http://127.0.0.1:4700`)
-  - `postgres`: `localhost:5432` (container)
+  - `postgres`: internal Docker service (`postgres:5432`)
 
 ## 6. Why This Setup for You
 - One language across frontend/backend reduces learning burden.

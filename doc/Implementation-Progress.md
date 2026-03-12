@@ -18,7 +18,7 @@ Last updated: 2026-03-12
    - Reduce container-host IPC/path/permission friction while integrating runner process management and streaming.
 4. Local dev target topology:
    - Docker: `web + postgres (+redis optional)`
-   - Host: `api + codex-runner`
+   - Host: `codex-runner`
 
 ## Completed on 2026-03-05
 1. Monorepo root foundation created:
@@ -79,7 +79,7 @@ Last updated: 2026-03-12
    - Host: `apps/api` process
 2. Dev tooling updates:
    - `infra/docker/docker-compose.yml` now runs `web` only (plus DB services).
-   - `scripts/dev-api-host.sh` added for host API startup.
+   - `scripts/dev-api-host.sh` retained for fallback host API startup.
 
 ## Completed on 2026-03-10
 1. Session history read path implemented:
@@ -128,7 +128,7 @@ Last updated: 2026-03-12
    - HTTP-runner e2e tests exist in `apps/api/src/modules/api.http-runner.e2e.spec.ts`.
 3. Dev orchestration scripts are implemented:
    - `scripts/dev-up.sh`, `scripts/dev-down.sh`, `scripts/dev-status.sh`
-   - Host service scripts: `scripts/dev-api-host.sh`, `scripts/dev-runner-host.sh`
+   - Host service scripts: `scripts/dev-runner-host.sh` (`scripts/dev-api-host.sh` retained as fallback)
 4. Runner Codex backend integration is implemented:
    - `RUNNER_BACKEND=codex` starts/uses Codex app-server behavior.
    - `RUNNER_BACKEND=mock` remains available as fallback.
@@ -141,7 +141,7 @@ Last updated: 2026-03-12
    - Turn flow supports `thread/start` on first turn and `thread/resume` on follow-up turns.
    - Fallback to new thread if resume fails.
 7. Workspace and cwd management are implemented:
-   - Project workspace (`repoPath`) validation before dispatching turns.
+   - Project workspace (`repoPath`) is forwarded by API and validated by the host runner before execution.
    - `cwd` is forwarded to runner/Codex turn operations.
    - Optional root allowlist via `RUNNER_ALLOWED_REPO_ROOTS`.
 8. Web simulation UX was expanded before current turn:

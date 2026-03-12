@@ -23,8 +23,13 @@ async function sleep(ms: number): Promise<void> {
 describe('API e2e', () => {
   let app: NestFastifyApplication;
   let prisma: PrismaService;
+  const prevRunnerMode = process.env.RUNNER_MODE;
+  const prevRunnerBaseUrl = process.env.RUNNER_BASE_URL;
 
   beforeAll(async () => {
+    process.env.RUNNER_MODE = 'mock';
+    delete process.env.RUNNER_BASE_URL;
+
     app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter());
     app.useGlobalFilters(new HttpExceptionFilter());
     await app.init();
@@ -34,6 +39,8 @@ describe('API e2e', () => {
 
   afterAll(async () => {
     await app.close();
+    process.env.RUNNER_MODE = prevRunnerMode;
+    process.env.RUNNER_BASE_URL = prevRunnerBaseUrl;
   });
 
   it('returns 401 when x-user-email header is missing', async () => {

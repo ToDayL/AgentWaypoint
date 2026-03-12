@@ -3,7 +3,7 @@
 AgentWaypoint is a web interface for chatting and vibe coding with Codex through the Codex app server interface.
 
 ## Status
-Hybrid local dev stack is implemented with project/session management, turn streaming, session resume, host runner integration, and approval pause/resume support.
+Split-container local dev stack is implemented with project/session management, turn streaming, session resume, host runner integration, and approval pause/resume support.
 
 ## Goals (MVP)
 - Browser chat experience for Codex
@@ -17,7 +17,7 @@ Hybrid local dev stack is implemented with project/session management, turn stre
 - Backend: NestJS (Fastify) + TypeScript
 - Database: PostgreSQL + Prisma
 - Streaming: SSE first, WebSocket later if needed
-- Deployment (Option 2, revised): Docker (`web`, DB services) plus host `api` and host `codex-runner` daemon for Codex app-server process management
+- Deployment (Option 2, revised): Docker (`web`, `api`, DB services) plus host `codex-runner` daemon for Codex app-server process management
 
 ## Repository Structure
 ```text
@@ -60,9 +60,9 @@ Stop stack:
   - `pnpm dev:status`
 
 ## Development Workflow (Verified)
-This project currently runs in hybrid mode:
-- Container: `web + postgres + redis`
-- Host: `api + codex-runner`
+This project currently runs in split mode:
+- Container: `nginx + web + api + postgres + redis`
+- Host: `codex-runner`
 
 ### 1. Clean Reset (optional but recommended when debugging)
 1. Stop and remove containers + networks + volumes:
@@ -75,22 +75,20 @@ This project currently runs in hybrid mode:
    - certificate: `infra/docker/nginx/certs/${NGINX_SSL_CERT_FILE:-localhost.crt}`
    - key: `infra/docker/nginx/certs/${NGINX_SSL_KEY_FILE:-localhost.key}`
    - optional CA chain: `infra/docker/nginx/certs/${NGINX_SSL_TRUSTED_CERT_FILE}`
-2. Start nginx/web/postgres/redis:
+2. Start nginx/web/api/postgres/redis:
    - `docker compose -f infra/docker/docker-compose.yml up --build -d`
 
-### 3. Start Host API
-1. In a separate terminal:
-   - `./scripts/dev-api-host.sh`
-2. If your host Node is not v22 (for example v24), use watch mode:
-   - `API_WATCH_MODE=1 ./scripts/dev-api-host.sh`
-3. If DB schema is not initialized yet, run once:
-   - `set -a; source .env; set +a; corepack pnpm --filter @agentwaypoint/api prisma:migrate:dev`
-
-### 3.5 Start Host Runner
+### 3. Start Host Runner
 1. Start runner daemon:
    - `./scripts/dev-runner-host.sh`
-2. Configure API to call runner:
-   - set `RUNNER_MODE=http` in `.env`
+2. Runner calls back into containerized API through loopback on host:
+   - default `RUNNER_API_BASE_URL=http://127.0.0.1:4000`
+3. Configure containerized API to call the host runner:
+   - default `API_RUNNER_MODE=http`
+   - default `API_RUNNER_BASE_URL=http://host.docker.internal:4700`
+   - set `RUNNER_HOST=0.0.0.0` so the host runner is reachable from Docker
+4. If DB schema is not initialized yet, run once:
+   - `docker compose -f infra/docker/docker-compose.yml exec -T api sh -lc "pnpm --filter @agentwaypoint/api prisma:migrate:dev"`
 
 ### 4. Verify End-to-End
 1. API health:
@@ -132,20 +130,22 @@ Codex backend env options:
 When approvals are enabled, AgentWaypoint pauses the active turn and exposes approve/reject controls in the web UI before side-effecting actions continue.
 
 Workspace validation:
-- Turn execution now requires project `repoPath` to be configured and exist on host.
+- Turn execution now requires project `repoPath` to be configured.
+- Host-side runner validates that the workspace exists on host and is allowed before execution starts.
 - Optional `RUNNER_ALLOWED_REPO_ROOTS` (comma-separated absolute roots) restricts allowed workspaces.
 
 ### 5. Stop All Services
 1. Stop containers:
    - `docker compose -f infra/docker/docker-compose.yml down`
-2. Stop host API process:
-   - terminate `./scripts/dev-api-host.sh`
+2. Stop host runner process:
+   - terminate `./scripts/dev-runner-host.sh`
 
 ### Optional Orchestration Scripts
-- `pnpm dev:up`: starts Docker services, runs migration, starts host runner + host api in background, and checks health.
-- Background host services started by `pnpm dev:up` run in non-watch mode by default for stability. Set `API_WATCH_MODE=1` and/or `RUNNER_WATCH_MODE=1` explicitly if you want watch mode.
+- `pnpm dev:up`: starts Docker services, runs migration in the `api` container, starts host runner in background, and checks health.
+- Background host services started by `pnpm dev:up` run in non-watch mode by default for stability. Set `RUNNER_WATCH_MODE=1` explicitly if you want watch mode.
 - `pnpm dev:status`: prints Docker service status, host pid status, and health checks.
 - `pnpm dev:down`: stops host processes and Docker services.
+- `pnpm test:api:e2e`: runs API e2e tests in a one-off `api` container against internal Docker Postgres/Redis.
 
 ## Documentation
 - [PRD](./doc/PRD.md)

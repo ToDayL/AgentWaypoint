@@ -15,17 +15,20 @@ fi
 
 cd "$ROOT_DIR"
 
-echo "[dev-up] Starting Docker services (nginx/web/postgres/redis)..."
-docker compose -f "$COMPOSE_FILE" up --build -d
+echo "[dev-up] Starting Docker database services (postgres/redis)..."
+docker compose -f "$COMPOSE_FILE" up --build -d postgres redis
 
 if [[ "${SKIP_MIGRATE:-0}" != "1" ]]; then
   echo "[dev-up] Running API migration..."
-  set -a
-  # shellcheck disable=SC1091
-  source "$ROOT_DIR/.env"
-  set +a
-  corepack pnpm --filter @agentwaypoint/api prisma:migrate:dev
+  docker compose -f "$COMPOSE_FILE" run --rm api sh -lc "
+    pnpm install --no-frozen-lockfile --reporter=append-only &&
+    pnpm --filter @agentwaypoint/api prisma:generate &&
+    pnpm --filter @agentwaypoint/api prisma:migrate:dev
+  "
 fi
+
+echo "[dev-up] Starting Docker app services (api/web/nginx)..."
+docker compose -f "$COMPOSE_FILE" up --build -d api web nginx
 
 start_bg() {
   local name="$1"
@@ -45,9 +48,6 @@ start_bg() {
 
 echo "[dev-up] Starting host runner..."
 start_bg runner bash -lc "cd '$ROOT_DIR'; set -a; source .env; set +a; RUNNER_WATCH_MODE=${RUNNER_WATCH_MODE:-0} exec bash scripts/dev-runner-host.sh"
-
-echo "[dev-up] Starting host api..."
-start_bg api bash -lc "cd '$ROOT_DIR'; set -a; source .env; set +a; RUNNER_MODE=http API_WATCH_MODE=${API_WATCH_MODE:-0} exec bash scripts/dev-api-host.sh"
 
 wait_health() {
   local name="$1"

@@ -28,7 +28,6 @@ stop_bg() {
   rm -f "$pid_file"
 }
 
-stop_bg api
 stop_bg runner
 
 if [[ "${CLEAN_VOLUMES:-0}" == "1" ]]; then

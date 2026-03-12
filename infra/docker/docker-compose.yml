@@ -39,13 +39,13 @@ services:
       CI: "true"
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},api,postgres,redis,host.docker.internal
       http_proxy: ${HTTP_PROXY:-}
       https_proxy: ${HTTPS_PROXY:-}
-      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1},api,postgres,redis,host.docker.internal
       WEB_PORT: 3000
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:4000}
-      API_BASE_URL: ${API_BASE_URL:-http://host.docker.internal:4000}
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://api:4000}
+      API_BASE_URL: ${WEB_API_BASE_URL:-http://api:4000}
     expose:
       - '3000'
     extra_hosts:
@@ -53,7 +53,55 @@ services:
     volumes:
       - ../..:/workspace
       - pnpm_store:/pnpm
-      - node_modules:/workspace/node_modules
+      - web_node_modules:/workspace/node_modules
+    depends_on:
+      api:
+        condition: service_started
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.dev
+    container_name: agentwaypoint-api
+    working_dir: /workspace
+    command: >
+      sh -lc "
+      pnpm install --no-frozen-lockfile --reporter=append-only &&
+      pnpm --filter @agentwaypoint/api prisma:generate &&
+      pnpm --filter @agentwaypoint/api dev
+      "
+    environment:
+      NODE_ENV: development
+      CI: "true"
+      PORT: 4000
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},api,postgres,redis,host.docker.internal
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1},api,postgres,redis,host.docker.internal
+      DATABASE_URL: ${API_DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/agentwaypoint}
+      REDIS_URL: ${API_REDIS_URL:-redis://redis:6379}
+      RUNNER_MODE: ${API_RUNNER_MODE:-http}
+      RUNNER_BASE_URL: ${API_RUNNER_BASE_URL:-http://host.docker.internal:4700}
+      RUNNER_HTTP_TIMEOUT_MS: ${RUNNER_HTTP_TIMEOUT_MS:-5000}
+      RUNNER_AUTH_TOKEN: ${RUNNER_AUTH_TOKEN:-}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+    ports:
+      - '127.0.0.1:${API_PORT:-4000}:4000'
+    expose:
+      - '4000'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    volumes:
+      - ../..:/workspace
+      - pnpm_store:/pnpm
+      - api_node_modules:/workspace/node_modules
     depends_on:
       postgres:
         condition: service_started
@@ -68,8 +116,6 @@ services:
       POSTGRES_DB: agentwaypoint
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-    ports:
-      - '5432:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
@@ -77,13 +123,12 @@ services:
     image: redis:7-alpine
     container_name: agentwaypoint-redis
     restart: unless-stopped
-    ports:
-      - '6379:6379'
     volumes:
       - redis_data:/data
 
 volumes:
-  node_modules:
+  web_node_modules:
+  api_node_modules:
   pnpm_store:
   postgres_data:
   redis_data:

@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { stat } from 'node:fs/promises';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
+import * as path from 'node:path';
 import { createInterface } from 'node:readline';
 
 type StartTurnBody = {
@@ -144,6 +146,7 @@ const server = createServer(async (request, response) => {
 
     if (request.url === '/runner/turns/start') {
       const payload = parseStartTurnBody(await readJsonBody(request));
+      payload.cwd = await resolveWorkspaceCwd(payload.cwd);
       const existing = activeTurns.get(payload.turnId);
       if (existing) {
         await cancelActiveTurn(existing, { emitCancelEvent: false });
@@ -373,6 +376,46 @@ async function startCodexExecution(input: StartTurnBody): Promise<void> {
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'unknown codex execution error';
     await failTurn(turn.turnId, message);
+  }
+}
+
+async function resolveWorkspaceCwd(inputCwd: string | null | undefined): Promise<string> {
+  const normalizedCwd = inputCwd?.trim() ?? '';
+  if (!normalizedCwd) {
+    throw new Error('Project workspace is not configured (repoPath is required)');
+  }
+
+  const absolutePath = path.resolve(normalizedCwd);
+  assertWorkspaceAllowed(absolutePath);
+
+  let info;
+  try {
+    info = await stat(absolutePath);
+  } catch {
+    throw new Error(`Project workspace does not exist: ${absolutePath}`);
+  }
+
+  if (!info.isDirectory()) {
+    throw new Error(`Project workspace is not a directory: ${absolutePath}`);
+  }
+
+  return absolutePath;
+}
+
+function assertWorkspaceAllowed(absolutePath: string): void {
+  const rootsConfig = process.env.RUNNER_ALLOWED_REPO_ROOTS?.trim();
+  if (!rootsConfig) {
+    return;
+  }
+
+  const allowedRoots = rootsConfig
+    .split(',')
+    .map((entry) => path.resolve(entry.trim()))
+    .filter((entry) => entry.length > 0);
+
+  const isAllowed = allowedRoots.some((root) => absolutePath === root || absolutePath.startsWith(`${root}${path.sep}`));
+  if (!isAllowed) {
+    throw new Error(`Project workspace is outside allowed roots: ${absolutePath}`);
   }
 }
 
