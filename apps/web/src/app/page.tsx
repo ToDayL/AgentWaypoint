@@ -184,7 +184,7 @@ const STREAM_EVENTS = [
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const WORKSPACE_SUGGESTIONS_LIST_ID = 'workspace-path-suggestions';
 const SESSION_CWD_SUGGESTIONS_LIST_ID = 'session-cwd-path-suggestions';
-type LeftSidebarTab = 'explorer' | 'user' | 'admin';
+type LeftSidebarTab = 'explorer' | 'config';
 type InsightsTab = 'diff' | 'tools' | 'reasoning' | 'events';
 type ActionPanelMode =
   | 'closed'
@@ -193,6 +193,46 @@ type ActionPanelMode =
   | 'projectConfig'
   | 'confirmDeleteProject'
   | 'confirmDeleteSession';
+
+function IconPlus() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M7 2h2v5h5v2H9v5H7V9H2V7h5z" />
+    </svg>
+  );
+}
+
+function IconSend() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M2 2l12 6-12 6 3-5-3-5zm4.2 5.2l-.8 1.3 5.3-.5-5.3-.8z" />
+    </svg>
+  );
+}
+
+function IconFolderPlus() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M1 3h5l1 1h8v9H1V3zm11 2h-2v2H8v2h2v2h2V9h2V7h-2V5z" />
+    </svg>
+  );
+}
+
+function IconMenu() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M2 3h12v2H2V3zm0 4h12v2H2V7zm0 4h12v2H2v-2z" />
+    </svg>
+  );
+}
+
+function IconInspect() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M2 2h12v12H2V2zm2 2v8h3V4H4zm5 0v8h3V4H9z" />
+    </svg>
+  );
+}
 
 export default function HomePage() {
   const [mounted, setMounted] = useState(false);
@@ -234,6 +274,8 @@ export default function HomePage() {
   const [resumedTurnHint, setResumedTurnHint] = useState('');
   const [turnStatus, setTurnStatus] = useState('idle');
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  const [streamBubbleTurnId, setStreamBubbleTurnId] = useState('');
+  const [streamActive, setStreamActive] = useState(false);
   const [leftSidebarTab, setLeftSidebarTab] = useState<LeftSidebarTab>('explorer');
   const [insightsOpen, setInsightsOpen] = useState(true);
   const [insightsTab, setInsightsTab] = useState<InsightsTab>('diff');
@@ -261,21 +303,21 @@ export default function HomePage() {
   );
   const displayedMessages = useMemo(() => {
     const base = messages.map((message) => ({ ...message, streaming: false }));
-    if (assistantText.length === 0 || !activeTurnId) {
+    if (assistantText.length === 0 || !streamBubbleTurnId) {
       return base;
     }
 
     return [
       ...base,
       {
-        id: `stream-${activeTurnId}`,
+        id: `stream-${streamBubbleTurnId}`,
         role: 'assistant' as const,
         content: assistantText,
         createdAt: new Date().toISOString(),
-        streaming: true,
+        streaming: streamActive,
       },
     ];
-  }, [messages, assistantText, activeTurnId]);
+  }, [messages, assistantText, streamBubbleTurnId, streamActive]);
   const isAdmin = currentUserRole === 'admin';
   const renderedDiffs = useMemo(() => {
     return diffSummaries.map((rawDiff, index) => ({
@@ -475,6 +517,8 @@ export default function HomePage() {
       setResumedTurnHint('');
       setTurnStatus('idle');
       setPendingApproval(null);
+      setStreamBubbleTurnId('');
+      setStreamActive(false);
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
@@ -594,6 +638,8 @@ export default function HomePage() {
         setTurnStatus('idle');
         setPendingApproval(null);
         setEventLog([]);
+        setStreamBubbleTurnId('');
+        setStreamActive(false);
       }
     } catch (requestError) {
       setError(extractMessage(requestError));
@@ -742,6 +788,7 @@ export default function HomePage() {
       setDiffSummaries([]);
       setResumedTurnHint('');
       setTurnStatus('queued');
+      setStreamActive(true);
 
       const result = await apiRequest<{ turnId: string; status: string }>(`/api/sim/sessions/${selectedSessionId}/turns`, {
         method: 'POST',
@@ -749,6 +796,7 @@ export default function HomePage() {
       });
 
       setActiveTurnId(result.turnId);
+      setStreamBubbleTurnId(result.turnId);
       setTurnStatus(result.status);
       await loadSessionHistory(selectedSessionId, {
         resumeStream: false,
@@ -831,6 +879,8 @@ export default function HomePage() {
       setResumedTurnHint('');
       setTurnStatus('idle');
       setPendingApproval(null);
+      setStreamBubbleTurnId('');
+      setStreamActive(false);
       if (options.resetEventLog) {
         setEventLog([]);
       }
@@ -850,6 +900,13 @@ export default function HomePage() {
       setTurnStatus(history.activeTurnStatus ?? 'idle');
       setActiveTurnId(history.activeTurnId ?? '');
       setPendingApproval(null);
+      if (history.activeTurnId) {
+        setStreamBubbleTurnId(history.activeTurnId);
+        setStreamActive(true);
+      } else {
+        setStreamBubbleTurnId('');
+        setStreamActive(false);
+      }
       if (options.resetInspectPanel) {
         setAssistantText('');
         setReasoningText('');
@@ -957,7 +1014,7 @@ export default function HomePage() {
 
         if (envelope.type === 'turn.completed' || envelope.type === 'turn.failed' || envelope.type === 'turn.cancelled') {
           setTurnStatus(envelope.type.replace('turn.', ''));
-          setActiveTurnId('');
+          setStreamActive(false);
           setResumedTurnHint('');
           setPendingApproval(null);
           stopTurnStatusPolling();
@@ -1008,6 +1065,7 @@ export default function HomePage() {
           if (TERMINAL_TURN_STATUSES.has(status.status)) {
             stopTurnStatusPolling();
             setActiveTurnId('');
+            setStreamActive(false);
             setResumedTurnHint('');
             setPendingApproval(null);
             if (sessionId) {
@@ -1028,27 +1086,31 @@ export default function HomePage() {
   async function handleCreateProjectFromPanel(): Promise<void> {
     const created = await handleCreateProject();
     if (created) {
-      setActionPanelMode('closed');
+      closeActionPanel();
     }
   }
 
   async function handleCreateSessionFromPanel(): Promise<void> {
     const created = await handleCreateSession();
     if (created) {
-      setActionPanelMode('closed');
+      closeActionPanel();
     }
+  }
+
+  function openActionPanel(mode: ActionPanelMode): void {
+    setActionPanelMode(mode);
   }
 
   function requestProjectDelete(project: Project): void {
     setProjectDeleteTarget(project);
     setSessionDeleteTarget(null);
-    setActionPanelMode('confirmDeleteProject');
+    openActionPanel('confirmDeleteProject');
   }
 
   function requestSessionDelete(session: Session): void {
     setSessionDeleteTarget(session);
     setProjectDeleteTarget(null);
-    setActionPanelMode('confirmDeleteSession');
+    openActionPanel('confirmDeleteSession');
   }
 
   function closeActionPanel(): void {
@@ -1108,8 +1170,20 @@ export default function HomePage() {
     <main className="sim-shell">
       <section className="sim-panel">
         <header className="sim-header shell-header">
-          <div>
-            <h1>AgentWaypoint</h1>
+          {authenticated ? (
+            <div className="header-mobile-side header-mobile-left">
+              <button type="button" className="icon-button" onClick={() => setMobileLeftSidebarOpen(true)} aria-label="Open sidebar">
+                <IconMenu />
+              </button>
+            </div>
+          ) : null}
+          <div className="header-title">
+            <h1>
+              {authenticated
+                ? `${(selectedProject?.name ?? 'No Project').trim()} - ${(selectedSession?.title ?? 'No Session').trim()}`
+                : 'AgentWaypoint'}
+              {authenticated ? <span className="status-pill">{turnStatus}</span> : null}
+            </h1>
           </div>
           {authenticated ? (
             <div className="header-actions">
@@ -1119,12 +1193,9 @@ export default function HomePage() {
             </div>
           ) : null}
           {authenticated ? (
-            <div className="header-mobile-actions">
-              <button type="button" className="button-secondary" onClick={() => setMobileLeftSidebarOpen(true)}>
-                Projects
-              </button>
-              <button type="button" className="button-secondary" onClick={() => setMobileInsightsOpen(true)}>
-                Insights
+            <div className="header-mobile-side header-mobile-right">
+              <button type="button" className="icon-button" onClick={() => setMobileInsightsOpen(true)} aria-label="Open insights">
+                <IconInspect />
               </button>
             </div>
           ) : null}
@@ -1280,10 +1351,9 @@ export default function HomePage() {
         {authenticated ? (
           <div className="shell-grid">
             <aside className={`left-sidebar ${mobileLeftSidebarOpen ? 'mobile-open' : ''}`}>
-              <div className="mobile-sidebar-head">
-                <h3>Projects</h3>
-                <button type="button" className="button-secondary" onClick={() => setMobileLeftSidebarOpen(false)}>
-                  Close
+              <div className="mobile-sidebar-head mobile-sidebar-head-left">
+                <button type="button" className="icon-button" onClick={() => setMobileLeftSidebarOpen(false)} aria-label="Close sidebar">
+                  <IconMenu />
                 </button>
               </div>
               <div className="sidebar-tabs">
@@ -1296,27 +1366,24 @@ export default function HomePage() {
                 </button>
                 <button
                   type="button"
-                  className={leftSidebarTab === 'user' ? 'tab-active' : ''}
-                  onClick={() => setLeftSidebarTab('user')}
+                  className={leftSidebarTab === 'config' ? 'tab-active' : ''}
+                  onClick={() => setLeftSidebarTab('config')}
                 >
-                  User Config
+                  Config
                 </button>
-                {isAdmin ? (
-                  <button
-                    type="button"
-                    className={leftSidebarTab === 'admin' ? 'tab-active' : ''}
-                    onClick={() => setLeftSidebarTab('admin')}
-                  >
-                    Admin Config
-                  </button>
-                ) : null}
               </div>
 
               {leftSidebarTab === 'explorer' ? (
                 <div className="explorer-tree">
                   <div className="tree-actions-top">
-                    <button type="button" onClick={() => setActionPanelMode('createProject')}>
-                      + Project
+                    <button
+                      type="button"
+                      className="icon-button"
+                      title="Create Project"
+                      aria-label="Create Project"
+                      onClick={() => openActionPanel('createProject')}
+                    >
+                      <IconFolderPlus />
                     </button>
                     <button type="button" className="button-secondary" onClick={() => void loadProjects()}>
                       Refresh
@@ -1337,14 +1404,16 @@ export default function HomePage() {
                           <div className="row-actions">
                             <button
                               type="button"
+                              className="icon-button"
                               title="Create Session"
+                              aria-label="Create Session"
                               onClick={(event) => {
                                 event.stopPropagation();
                                 setSelectedProjectId(project.id);
-                                setActionPanelMode('createSession');
+                                openActionPanel('createSession');
                               }}
                             >
-                              +S
+                              <IconPlus />
                             </button>
                             <button
                               type="button"
@@ -1352,7 +1421,7 @@ export default function HomePage() {
                               onClick={(event) => {
                                 event.stopPropagation();
                                 setSelectedProjectId(project.id);
-                                setActionPanelMode('projectConfig');
+                                openActionPanel('projectConfig');
                               }}
                             >
                               Cfg
@@ -1421,9 +1490,9 @@ export default function HomePage() {
                 </div>
               ) : null}
 
-              {leftSidebarTab === 'user' ? (
+              {leftSidebarTab === 'config' ? (
                 <div className="sim-card">
-                  <h2>User Config</h2>
+                  <h2>Config</h2>
                   <p>Signed in as: <strong>{currentUserEmail}</strong></p>
                   <label>
                     <span>Turn Steering</span>
@@ -1437,28 +1506,17 @@ export default function HomePage() {
                   <button type="button" className="button-secondary" onClick={() => void handleLogout()} disabled={busy}>
                     Sign Out
                   </button>
-                </div>
-              ) : null}
-
-              {leftSidebarTab === 'admin' && isAdmin ? (
-                <div className="sim-card">
-                  <h2>Admin Config</h2>
-                  <p className="sim-subtitle">Admin controls UI shell is ready for next backend wiring step.</p>
+                  {isAdmin ? (
+                    <>
+                      <h3>Admin</h3>
+                      <p className="sim-subtitle">Admin controls UI shell is ready for next backend wiring step.</p>
+                    </>
+                  ) : null}
                 </div>
               ) : null}
             </aside>
 
             <section className="chat-pane">
-              <div className="chat-pane-head">
-                <p>
-                  <strong>
-                    {(selectedProject?.name ?? '-').trim()} - {(selectedSession?.title ?? 'No Session').trim()}
-                  </strong>{' '}
-                  |{' '}
-                  <span className="status-pill">{turnStatus}</span>
-                </p>
-              </div>
-
               <div className="chat-thread" ref={chatThreadRef}>
                 {displayedMessages.length === 0 ? <p className="chat-empty">No messages yet.</p> : null}
                 {displayedMessages.map((message) => (
@@ -1523,10 +1581,13 @@ export default function HomePage() {
                   />
                   <button
                     type="button"
+                    className="icon-button"
+                    title={canSteerTurn ? 'Steer Current Turn' : 'Send'}
+                    aria-label={canSteerTurn ? 'Steer Current Turn' : 'Send'}
                     onClick={() => void handleSendTurn()}
                     disabled={(!canStartTurn && !canSteerTurn) || busy}
                   >
-                    {canSteerTurn ? 'Steer Current Turn' : 'Send'}
+                    <IconSend />
                   </button>
                 </div>
               </div>
@@ -1534,10 +1595,9 @@ export default function HomePage() {
 
             {insightsOpen ? (
               <aside className={`insights-pane ${mobileInsightsOpen ? 'mobile-open' : ''}`}>
-                <div className="mobile-sidebar-head">
-                  <h3>Insights</h3>
-                  <button type="button" className="button-secondary" onClick={() => setMobileInsightsOpen(false)}>
-                    Close
+                <div className="mobile-sidebar-head mobile-sidebar-head-right">
+                  <button type="button" className="icon-button" onClick={() => setMobileInsightsOpen(false)} aria-label="Close insights">
+                    <IconInspect />
                   </button>
                 </div>
                 <div className="insights-tabs">
