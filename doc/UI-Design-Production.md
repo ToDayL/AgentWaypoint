@@ -18,13 +18,15 @@ This replaces the current MVP simulation-style stacked cards.
 Three-column application shell:
 
 1. Left Sidebar (fixed width, always visible)
-- Project list and session list.
-- New project/session actions.
-- Search/filter support for larger lists.
+- Tabbed navigation surface for multiple app functions.
+- Default tab: workspace tree (projects/sessions).
+- Additional tabs: user config, admin config (role-gated).
+- Search/filter support where relevant.
 - User account menu and sign-out.
 
 2. Main Chat Pane (fluid center, always visible)
 - Session header (project/session title, status, effective model/sandbox/cwd).
+- Top-center global action trigger for create/confirm flows.
 - Scrollable message timeline.
 - Composer at bottom (prompt input + actions).
 - Turn status + approval prompts inline in conversation context.
@@ -47,25 +49,72 @@ Three-column application shell:
 
 ## 3.1 Left Sidebar
 
+The left sidebar is a tab container, not a single-purpose tree.
+
+Default tabs:
+1. `Explorer`
+2. `User Config`
+3. `Admin Config` (visible only for admin principal)
+
+### 3.1.1 Explorer Tab
+
 Sections:
 - `Projects`
   - list item: name, optional workspace path hint, active indicator
+  - per-project action icons:
+    - create session
+    - project config
+    - remove project
 - `Sessions` (for selected project)
   - list item: title, status, updated timestamp
+  - per-session action icon:
+    - remove session
 - Quick actions:
-  - `New Project`
-  - `New Session`
   - `Refresh`
 
 Interactions:
 - Selecting project refreshes session list and current context.
 - Selecting session hydrates chat history and turn state.
 - Inline workspace and session override forms should remain, but not dominate layout.
+- Create and confirm flows are not inline in tree rows; they use the top-center action panel.
+
+### 3.1.2 User Config Tab
+
+Purpose:
+- Self-service settings and preferences for the signed-in user.
+
+Initial scope:
+- turn steering preference
+- UI preferences (insights sidebar open/closed default, last selected tab)
+- optional profile metadata (display name)
+
+Behavior:
+- Settings are saved per user.
+- Tab is always visible for authenticated users.
+
+### 3.1.3 Admin Config Tab
+
+Purpose:
+- Operational/admin controls for system and user/service management.
+
+Visibility:
+- Only shown when `principal.role === admin`.
+
+Initial scope:
+- user activation/deactivation
+- session revocation controls
+- service account and API key management (future auth phases)
+- system/runtime switches suitable for admin UI
+
+Behavior:
+- Non-admin users never see this tab.
+- Direct deep links to admin tab should still enforce server-side authorization.
 
 ## 3.2 Center Pane (Primary Workflow)
 
 Sections:
 - Header:
+  - top-center action button (`+`) that opens action panel dropdown
   - session title
   - active turn status pill
   - effective execution context summary
@@ -81,6 +130,41 @@ Sections:
 Design rules:
 - Center pane is optimized for reading/writing, not settings.
 - Technical metadata should move out of center whenever possible.
+
+## 3.4 Top-Center Action Panel (Dropdown)
+
+Purpose:
+- Single place for create flows and destructive confirmations.
+
+Trigger:
+- `+` button centered in header area.
+
+Modes:
+1. Action Menu
+- `Create Project`
+- `Create Session` (enabled only when a project is selected)
+
+2. Create Project Form
+- project name
+- workspace path (with suggestions)
+- defaults (model/sandbox/approval policy)
+- actions: `Cancel`, `Create`
+
+3. Create Session Form
+- title
+- optional cwd/model/sandbox/approval overrides
+- actions: `Cancel`, `Create`
+
+4. Confirm Delete
+- resource title (`project` or `session`)
+- impact summary text
+- actions: `Cancel`, `Delete`
+
+Behavior:
+- Anchored to top-center; closes on outside click or `Esc`.
+- Keeps previous input while panel stays open.
+- On success, panel closes and tree refreshes/selects new resource.
+- For delete, require explicit confirmation button (danger style).
 
 ## 3.3 Right Sidebar (Insights)
 
@@ -113,6 +197,22 @@ Controls:
   - status updates in header,
   - history remains visible.
 
+## 4.4 Create Project/Session
+
+1. User clicks top-center `+`.
+2. User selects `Create Project` or `Create Session`.
+3. User submits form in dropdown panel.
+4. Tree updates:
+- new project appears and can become selected.
+- new session appears under selected project and can become active.
+
+## 4.5 Delete Project/Session
+
+1. User clicks delete icon on project or session row.
+2. Top-center panel opens in `Confirm Delete` mode.
+3. User confirms deletion.
+4. Tree and center pane reconcile selection state (fallback to nearest valid item).
+
 ## 4.3 Approval Handling
 
 1. Approval request appears inline in center pane.
@@ -135,6 +235,9 @@ Controls:
 Target React components:
 - `AppShell`
 - `LeftWorkspaceSidebar`
+- `LeftSidebarTabs`
+- `UserConfigPanel`
+- `AdminConfigPanel`
 - `ChatWorkspacePane`
 - `InsightsSidebar`
 - `AuthGate` (sign-in + session bootstrap)
@@ -153,14 +256,17 @@ State ownership:
 
 ### Phase A: Structural Refactor
 - Introduce 3-pane shell layout and responsive breakpoints.
+- Introduce left-sidebar tab framework (`Explorer`, `User Config`, role-gated `Admin Config`).
 - Move existing controls into correct pane without changing API behavior.
+- Introduce top-center action trigger and dropdown shell.
 
 ### Phase B: Insights Consolidation
 - Move tool/reasoning/plan/diff/event sections into right sidebar tabs.
 - Add toggle + default visibility behavior.
 
 ### Phase C: Navigation Hardening
-- Improve project/session list ergonomics (search, empty states, loading states).
+- Improve project/session tree ergonomics (search, empty states, loading states).
+- Add per-row action icons and top-center create/confirm panel integrations.
 - Add better selection persistence and skeleton loading.
 
 ### Phase D: UX Polish
@@ -171,6 +277,9 @@ State ownership:
 ## 8. Acceptance Criteria
 
 - Desktop renders as left nav + center chat + toggleable right insights.
+- Left sidebar supports tab navigation and preserves selected tab state.
+- `Admin Config` tab is visible only to admin users.
+- Top-center dropdown panel supports create project/session and delete confirmations.
 - User can complete full workflow (select session, send turn, inspect diff/tool output) without leaving shell.
 - Right sidebar can be opened/closed without losing content state.
 - Mobile/tablet remain functional with drawer-based side panels.
