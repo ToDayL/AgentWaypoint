@@ -44,6 +44,42 @@ Expected healthy signals:
 ./scripts/dev-down.sh
 ```
 
+## Production Deployment Workflow
+
+### 1. Prepare production env file
+Create `.env.production` (or reuse `.env`) and set at least:
+- `PROD_NGINX_HTTPS_PORT` (default `3443`)
+- `PROD_RUNNER_PORT` (default `5700`)
+- `PROD_API_DATABASE_URL`
+- `PROD_API_REDIS_URL`
+- `JWT_SECRET`
+
+### 2. Start production stack
+```bash
+./scripts/prod-up.sh
+```
+
+What this does:
+- Starts `postgres` + `redis` using `infra/docker/docker-compose.prod.yml`.
+- Runs Prisma migrate deploy for API.
+- Starts Docker app services: `api`, `web`, `nginx`.
+- Starts host runner process (non-watch) on `PROD_RUNNER_PORT`.
+
+### 3. Check production status and health
+```bash
+./scripts/prod-status.sh
+```
+
+### 4. Stop production stack
+```bash
+./scripts/prod-down.sh
+```
+
+### 5. Run dev and prod on one machine
+- Dev defaults: `NGINX_HTTPS_PORT=3000`, `RUNNER_PORT=4700`
+- Prod defaults: `PROD_NGINX_HTTPS_PORT=3443`, `PROD_RUNNER_PORT=5700`
+- Keep these port ranges distinct to avoid collisions.
+
 ## Test Procedure
 
 ### Fast checks (typecheck)

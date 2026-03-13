@@ -1,0 +1,139 @@
+name: agentwaypoint-prod
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: agentwaypoint-prod-nginx
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_started
+    environment:
+      WEB_UPSTREAM: web:3000
+      SERVER_NAME: ${NGINX_SERVER_NAME:-localhost}
+      SSL_CERT_PATH: /etc/nginx/certs/${NGINX_SSL_CERT_FILE:-localhost.crt}
+      SSL_KEY_PATH: /etc/nginx/certs/${NGINX_SSL_KEY_FILE:-localhost.key}
+      SSL_TRUSTED_CERT_FILE: ${NGINX_SSL_TRUSTED_CERT_FILE:-}
+    command: >
+      /bin/sh -c "sh /opt/nginx/generate-config.sh && exec nginx -g 'daemon off;'"
+    ports:
+      - '${PROD_NGINX_HTTPS_PORT:-3443}:443'
+    volumes:
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/default.conf.template:/opt/nginx/default.conf.template:ro
+      - ./nginx/generate-config.sh:/opt/nginx/generate-config.sh:ro
+
+  web:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.dev
+    container_name: agentwaypoint-prod-web
+    working_dir: /workspace
+    command: >
+      sh -lc "
+      pnpm install --frozen-lockfile --reporter=append-only &&
+      pnpm --filter @agentwaypoint/web build &&
+      pnpm --filter @agentwaypoint/web start
+      "
+    environment:
+      NODE_ENV: production
+      CI: "true"
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},api,postgres,redis,host.docker.internal
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1},api,postgres,redis,host.docker.internal
+      WEB_PORT: 3000
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://api:4000}
+      API_BASE_URL: ${WEB_API_BASE_URL:-http://api:4000}
+    expose:
+      - '3000'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    volumes:
+      - ../..:/workspace
+      - prod_pnpm_store:/pnpm
+      - prod_web_node_modules:/workspace/node_modules
+    depends_on:
+      api:
+        condition: service_started
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.dev
+    container_name: agentwaypoint-prod-api
+    working_dir: /workspace
+    command: >
+      sh -lc "
+      pnpm install --frozen-lockfile --reporter=append-only &&
+      pnpm --filter @agentwaypoint/api prisma:generate &&
+      pnpm --filter @agentwaypoint/api build &&
+      pnpm --filter @agentwaypoint/api start
+      "
+    environment:
+      NODE_ENV: production
+      CI: "true"
+      PORT: 4000
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},api,postgres,redis,host.docker.internal
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1},api,postgres,redis,host.docker.internal
+      DATABASE_URL: ${PROD_API_DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/agentwaypoint_prod}
+      REDIS_URL: ${PROD_API_REDIS_URL:-redis://redis:6379}
+      RUNNER_MODE: ${PROD_API_RUNNER_MODE:-http}
+      RUNNER_BASE_URL: ${PROD_API_RUNNER_BASE_URL:-http://host.docker.internal:5700}
+      RUNNER_HTTP_TIMEOUT_MS: ${RUNNER_HTTP_TIMEOUT_MS:-5000}
+      RUNNER_AUTH_TOKEN: ${RUNNER_AUTH_TOKEN:-}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      AUTH_SESSION_COOKIE_NAME: ${AUTH_SESSION_COOKIE_NAME:-aw_session}
+      AUTH_SESSION_TTL_HOURS: ${AUTH_SESSION_TTL_HOURS:-168}
+      AUTH_DEV_EMAIL_HEADER: '0'
+    expose:
+      - '4000'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    volumes:
+      - ../..:/workspace
+      - prod_pnpm_store:/pnpm
+      - prod_api_node_modules:/workspace/node_modules
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: agentwaypoint-prod-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PROD_POSTGRES_DB:-agentwaypoint_prod}
+      POSTGRES_USER: ${PROD_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${PROD_POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - prod_postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: agentwaypoint-prod-redis
+    restart: unless-stopped
+    command: >
+      sh -lc "exec redis-server --appendonly yes"
+    volumes:
+      - prod_redis_data:/data
+
+volumes:
+  prod_web_node_modules:
+  prod_api_node_modules:
+  prod_pnpm_store:
+  prod_postgres_data:
+  prod_redis_data:

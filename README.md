@@ -140,6 +140,15 @@ Workspace validation:
 - `pnpm dev:down`: stops host processes and Docker services.
 - `pnpm test:api:e2e`: runs API e2e tests in a one-off `api` container against internal Docker Postgres/Redis.
 
+### Production-Oriented Orchestration
+- `pnpm prod:up`: starts `infra/docker/docker-compose.prod.yml`, runs Prisma migrate deploy, and starts host runner in background.
+- `pnpm prod:status`: prints production Docker service status, runner status, and health checks.
+- `pnpm prod:down`: stops production host services and Docker services.
+
+Default port separation for same-machine dev+prod:
+- Dev web/runner: `3000` / `4700`
+- Prod web/runner: `3443` / `5700`
+
 ## Documentation
 - [PRD](./doc/PRD.md)
 - [Initial Architecture](./doc/Architecture-Initial.md)

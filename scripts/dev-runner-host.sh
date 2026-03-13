@@ -4,11 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 RUNNER_DIR="$ROOT_DIR/apps/runner"
+ENV_FILE="${ENV_FILE:-.env}"
 
-if [[ -f ".env" ]]; then
+if [[ -f "$ENV_FILE" ]]; then
   set -a
-  # shellcheck disable=SC1091
-  source ".env"
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
   set +a
 fi
 
