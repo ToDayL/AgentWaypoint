@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { Diff, Hunk, parseDiff } from 'react-diff-view';
 
 type Project = {
   id: string;
@@ -187,7 +188,6 @@ type LeftSidebarTab = 'explorer' | 'user' | 'admin';
 type InsightsTab = 'diff' | 'tools' | 'reasoning' | 'events';
 type ActionPanelMode =
   | 'closed'
-  | 'menu'
   | 'createProject'
   | 'createSession'
   | 'projectConfig'
@@ -229,7 +229,7 @@ export default function HomePage() {
   const [reasoningText, setReasoningText] = useState('');
   const [latestPlan, setLatestPlan] = useState('');
   const [toolOutput, setToolOutput] = useState('');
-  const [diffSummary, setDiffSummary] = useState('');
+  const [diffSummaries, setDiffSummaries] = useState<string[]>([]);
   const [activeTurnId, setActiveTurnId] = useState('');
   const [resumedTurnHint, setResumedTurnHint] = useState('');
   const [turnStatus, setTurnStatus] = useState('idle');
@@ -237,6 +237,8 @@ export default function HomePage() {
   const [leftSidebarTab, setLeftSidebarTab] = useState<LeftSidebarTab>('explorer');
   const [insightsOpen, setInsightsOpen] = useState(true);
   const [insightsTab, setInsightsTab] = useState<InsightsTab>('diff');
+  const [mobileLeftSidebarOpen, setMobileLeftSidebarOpen] = useState(false);
+  const [mobileInsightsOpen, setMobileInsightsOpen] = useState(false);
   const [actionPanelMode, setActionPanelMode] = useState<ActionPanelMode>('closed');
   const [projectDeleteTarget, setProjectDeleteTarget] = useState<Project | null>(null);
   const [sessionDeleteTarget, setSessionDeleteTarget] = useState<Session | null>(null);
@@ -244,6 +246,7 @@ export default function HomePage() {
   const [error, setError] = useState('');
   const eventSourceRef = useRef<EventSource | null>(null);
   const turnPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const chatThreadRef = useRef<HTMLDivElement | null>(null);
 
   const canStartTurn = !!selectedSessionId && prompt.trim().length > 0 && activeTurnId === '';
   const canSteerTurn =
@@ -256,7 +259,31 @@ export default function HomePage() {
     () => sessions.find((item) => item.id === selectedSessionId),
     [sessions, selectedSessionId],
   );
+  const displayedMessages = useMemo(() => {
+    const base = messages.map((message) => ({ ...message, streaming: false }));
+    if (assistantText.length === 0 || !activeTurnId) {
+      return base;
+    }
+
+    return [
+      ...base,
+      {
+        id: `stream-${activeTurnId}`,
+        role: 'assistant' as const,
+        content: assistantText,
+        createdAt: new Date().toISOString(),
+        streaming: true,
+      },
+    ];
+  }, [messages, assistantText, activeTurnId]);
   const isAdmin = currentUserRole === 'admin';
+  const renderedDiffs = useMemo(() => {
+    return diffSummaries.map((rawDiff, index) => ({
+      id: `${index}-${rawDiff.length}`,
+      files: parseDiff(rawDiff),
+      rawDiff,
+    }));
+  }, [diffSummaries]);
 
   useEffect(() => {
     return () => {
@@ -364,6 +391,14 @@ export default function HomePage() {
     };
   }, [mounted, newSessionCwdOverride, authenticated]);
 
+  useEffect(() => {
+    const container = chatThreadRef.current;
+    if (!container) {
+      return;
+    }
+    container.scrollTop = container.scrollHeight;
+  }, [displayedMessages]);
+
   async function loadAuthSession(): Promise<void> {
     try {
       const response = await apiRequest<AuthSessionResponse>('/api/sim/auth/session', {
@@ -435,7 +470,7 @@ export default function HomePage() {
       setReasoningText('');
       setLatestPlan('');
       setToolOutput('');
-      setDiffSummary('');
+      setDiffSummaries([]);
       setActiveTurnId('');
       setResumedTurnHint('');
       setTurnStatus('idle');
@@ -541,7 +576,11 @@ export default function HomePage() {
       setSessions(items);
       if (items[0]) {
         setSelectedSessionId(items[0].id);
-        await loadSessionHistory(items[0].id, { resumeStream: true, resetEventLog: true });
+        await loadSessionHistory(items[0].id, {
+          resumeStream: true,
+          resetEventLog: true,
+          resetInspectPanel: true,
+        });
       } else {
         setSelectedSessionId('');
         setMessages([]);
@@ -549,7 +588,7 @@ export default function HomePage() {
         setReasoningText('');
         setLatestPlan('');
         setToolOutput('');
-        setDiffSummary('');
+        setDiffSummaries([]);
         setActiveTurnId('');
         setResumedTurnHint('');
         setTurnStatus('idle');
@@ -617,7 +656,11 @@ export default function HomePage() {
       });
       await loadSessions(selectedProjectId);
       setSelectedSessionId(created.id);
-      await loadSessionHistory(created.id, { resumeStream: true, resetEventLog: true });
+      await loadSessionHistory(created.id, {
+        resumeStream: true,
+        resetEventLog: true,
+        resetInspectPanel: true,
+      });
       return true;
     } catch (requestError) {
       setError(extractMessage(requestError));
@@ -627,21 +670,28 @@ export default function HomePage() {
     }
   }
 
-  async function handleForkSession(): Promise<void> {
-    if (!selectedSessionId || !selectedProjectId || activeTurnId) {
+  async function handleForkSession(input: { sessionId: string; projectId: string }): Promise<void> {
+    const sourceSessionId = input.sessionId.trim();
+    const sourceProjectId = input.projectId.trim();
+    if (!sourceSessionId || !sourceProjectId) {
       return;
     }
 
     setBusy(true);
     setError('');
     try {
-      const forked = await apiRequest<Session>(`/api/sim/sessions/${selectedSessionId}/fork`, {
+      const forked = await apiRequest<Session>(`/api/sim/sessions/${sourceSessionId}/fork`, {
         method: 'POST',
         body: {},
       });
-      await loadSessions(selectedProjectId);
+      setSelectedProjectId(sourceProjectId);
+      await loadSessions(sourceProjectId);
       setSelectedSessionId(forked.id);
-      await loadSessionHistory(forked.id, { resumeStream: true, resetEventLog: true });
+      await loadSessionHistory(forked.id, {
+        resumeStream: true,
+        resetEventLog: true,
+        resetInspectPanel: true,
+      });
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
@@ -660,20 +710,27 @@ export default function HomePage() {
     try {
       if (canSteerTurn && activeTurnId) {
         const steerContent = prompt.trim();
-        await apiRequest<TurnStatusResponse>(`/api/sim/turns/${activeTurnId}/steer`, {
-          method: 'POST',
-          body: { content: steerContent },
-        });
+        const optimisticMessageId = `steer-${Date.now()}`;
         setMessages((current) => [
           ...current,
           {
-            id: `steer-${Date.now()}`,
+            id: optimisticMessageId,
             role: 'user',
             content: steerContent,
             createdAt: new Date().toISOString(),
           },
         ]);
         setPrompt('');
+        try {
+          await apiRequest<TurnStatusResponse>(`/api/sim/turns/${activeTurnId}/steer`, {
+            method: 'POST',
+            body: { content: steerContent },
+          });
+        } catch {
+          setMessages((current) => current.filter((message) => message.id !== optimisticMessageId));
+          setPrompt(steerContent);
+          throw new Error('Failed to steer the current turn');
+        }
         return;
       }
 
@@ -682,7 +739,7 @@ export default function HomePage() {
       setReasoningText('');
       setLatestPlan('');
       setToolOutput('');
-      setDiffSummary('');
+      setDiffSummaries([]);
       setResumedTurnHint('');
       setTurnStatus('queued');
 
@@ -693,7 +750,11 @@ export default function HomePage() {
 
       setActiveTurnId(result.turnId);
       setTurnStatus(result.status);
-      await loadSessionHistory(selectedSessionId, { resumeStream: false, resetEventLog: false });
+      await loadSessionHistory(selectedSessionId, {
+        resumeStream: false,
+        resetEventLog: false,
+        resetInspectPanel: false,
+      });
       openStream(result.turnId, selectedSessionId);
       setPrompt('');
     } catch (requestError) {
@@ -716,7 +777,11 @@ export default function HomePage() {
         method: 'POST',
       });
       setTurnStatus(cancelled.status);
-      await loadSessionHistory(selectedSessionId, { resumeStream: false, resetEventLog: false });
+      await loadSessionHistory(selectedSessionId, {
+        resumeStream: false,
+        resetEventLog: false,
+        resetInspectPanel: false,
+      });
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
@@ -749,7 +814,7 @@ export default function HomePage() {
 
   async function loadSessionHistory(
     sessionId: string,
-    options: { resumeStream: boolean; resetEventLog: boolean },
+    options: { resumeStream: boolean; resetEventLog: boolean; resetInspectPanel: boolean },
   ): Promise<void> {
     if (!sessionId) {
       eventSourceRef.current?.close();
@@ -761,7 +826,7 @@ export default function HomePage() {
       setReasoningText('');
       setLatestPlan('');
       setToolOutput('');
-      setDiffSummary('');
+      setDiffSummaries([]);
       setActiveTurnId('');
       setResumedTurnHint('');
       setTurnStatus('idle');
@@ -785,11 +850,13 @@ export default function HomePage() {
       setTurnStatus(history.activeTurnStatus ?? 'idle');
       setActiveTurnId(history.activeTurnId ?? '');
       setPendingApproval(null);
-      setAssistantText('');
-      setReasoningText('');
-      setLatestPlan('');
-      setToolOutput('');
-      setDiffSummary('');
+      if (options.resetInspectPanel) {
+        setAssistantText('');
+        setReasoningText('');
+        setLatestPlan('');
+        setToolOutput('');
+        setDiffSummaries([]);
+      }
       if (options.resetEventLog) {
         setEventLog([]);
       }
@@ -860,7 +927,10 @@ export default function HomePage() {
         }
 
         if (envelope.type === 'diff.updated') {
-          setDiffSummary(formatDiffPayload(envelope.payload));
+          const summary = formatDiffPayload(envelope.payload);
+          if (summary) {
+            setDiffSummaries((current) => [...current, summary]);
+          }
         }
 
         if (envelope.type === 'turn.started') {
@@ -890,10 +960,13 @@ export default function HomePage() {
           setActiveTurnId('');
           setResumedTurnHint('');
           setPendingApproval(null);
-          setReasoningText('');
           stopTurnStatusPolling();
             if (sessionId) {
-              void loadSessionHistory(sessionId, { resumeStream: false, resetEventLog: false });
+              void loadSessionHistory(sessionId, {
+                resumeStream: false,
+                resetEventLog: false,
+                resetInspectPanel: false,
+              });
             }
           source.close();
           eventSourceRef.current = null;
@@ -937,9 +1010,12 @@ export default function HomePage() {
             setActiveTurnId('');
             setResumedTurnHint('');
             setPendingApproval(null);
-            setReasoningText('');
             if (sessionId) {
-              await loadSessionHistory(sessionId, { resumeStream: false, resetEventLog: false });
+              await loadSessionHistory(sessionId, {
+                resumeStream: false,
+                resetEventLog: false,
+                resetInspectPanel: false,
+              });
             }
           }
         } catch (requestError) {
@@ -1017,18 +1093,23 @@ export default function HomePage() {
     }
   }
 
+  function handlePromptKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    if (event.key !== 'Enter' || event.shiftKey) {
+      return;
+    }
+    event.preventDefault();
+    if (busy || (!canStartTurn && !canSteerTurn)) {
+      return;
+    }
+    void handleSendTurn();
+  }
+
   return (
     <main className="sim-shell">
       <section className="sim-panel">
         <header className="sim-header shell-header">
           <div>
-            <p className="sim-kicker">AgentWaypoint</p>
-            <h1>Production UI Refactor</h1>
-            <p className="sim-subtitle">
-              {authenticated
-                ? 'Left explorer + center chat + toggleable right insights.'
-                : 'Sign in to access project and session workspace.'}
-            </p>
+            <h1>AgentWaypoint</h1>
           </div>
           {authenticated ? (
             <div className="header-actions">
@@ -1038,32 +1119,17 @@ export default function HomePage() {
             </div>
           ) : null}
           {authenticated ? (
-            <div className="action-anchor">
-              <button type="button" className="action-plus" onClick={() => setActionPanelMode('menu')}>
-                +
+            <div className="header-mobile-actions">
+              <button type="button" className="button-secondary" onClick={() => setMobileLeftSidebarOpen(true)}>
+                Projects
+              </button>
+              <button type="button" className="button-secondary" onClick={() => setMobileInsightsOpen(true)}>
+                Insights
               </button>
             </div>
           ) : null}
           {authenticated && actionPanelMode !== 'closed' ? (
             <div className="action-panel">
-              {actionPanelMode === 'menu' ? (
-                <div className="action-panel-body">
-                  <h3>Actions</h3>
-                  <button type="button" onClick={() => setActionPanelMode('createProject')}>
-                    Create Project
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActionPanelMode('createSession')}
-                    disabled={!selectedProjectId}
-                  >
-                    Create Session
-                  </button>
-                  <button type="button" className="button-secondary" onClick={() => closeActionPanel()}>
-                    Close
-                  </button>
-                </div>
-              ) : null}
               {actionPanelMode === 'createProject' ? (
                 <div className="action-panel-body">
                   <h3>Create Project</h3>
@@ -1213,7 +1279,13 @@ export default function HomePage() {
 
         {authenticated ? (
           <div className="shell-grid">
-            <aside className="left-sidebar">
+            <aside className={`left-sidebar ${mobileLeftSidebarOpen ? 'mobile-open' : ''}`}>
+              <div className="mobile-sidebar-head">
+                <h3>Projects</h3>
+                <button type="button" className="button-secondary" onClick={() => setMobileLeftSidebarOpen(false)}>
+                  Close
+                </button>
+              </div>
               <div className="sidebar-tabs">
                 <button
                   type="button"
@@ -1258,6 +1330,7 @@ export default function HomePage() {
                           onClick={() => {
                             setSelectedProjectId(project.id);
                             void loadSessions(project.id);
+                            setMobileLeftSidebarOpen(false);
                           }}
                         >
                           <span className="tree-label">{project.name}</span>
@@ -1305,11 +1378,27 @@ export default function HomePage() {
                                   className={`tree-row session-row ${selectedSessionId === session.id ? 'active' : ''}`}
                                   onClick={() => {
                                     setSelectedSessionId(session.id);
-                                    void loadSessionHistory(session.id, { resumeStream: true, resetEventLog: true });
+                                    void loadSessionHistory(session.id, {
+                                      resumeStream: true,
+                                      resetEventLog: true,
+                                      resetInspectPanel: true,
+                                    });
+                                    setMobileLeftSidebarOpen(false);
                                   }}
                                 >
                                   <span className="tree-label">{session.title}</span>
                                   <div className="row-actions">
+                                    <button
+                                      type="button"
+                                      title="Fork Session"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        void handleForkSession({ sessionId: session.id, projectId: project.id });
+                                      }}
+                                      disabled={busy}
+                                    >
+                                      Fork
+                                    </button>
                                     <button
                                       type="button"
                                       title="Remove Session"
@@ -1361,31 +1450,42 @@ export default function HomePage() {
 
             <section className="chat-pane">
               <div className="chat-pane-head">
-                <h2>{selectedSession?.title ?? 'Select a session'}</h2>
                 <p>
-                  Project: <strong>{selectedProject?.name ?? '-'}</strong> | CWD:{' '}
-                  <strong>{selectedSession?.cwdOverride ?? selectedProject?.repoPath ?? '-'}</strong> | Status:{' '}
+                  <strong>
+                    {(selectedProject?.name ?? '-').trim()} - {(selectedSession?.title ?? 'No Session').trim()}
+                  </strong>{' '}
+                  |{' '}
                   <span className="status-pill">{turnStatus}</span>
                 </p>
-                {resumedTurnHint ? <p>{resumedTurnHint}</p> : null}
               </div>
 
-              <article className="sim-output chat-stream">
-                <h3>Assistant Stream</h3>
-                <pre>{assistantText || 'No active stream output.'}</pre>
-              </article>
-
-              <article className="sim-events chat-history">
-                <h3>Chat History</h3>
-                <ul>
-                  {messages.length === 0 ? <li>No messages yet.</li> : null}
-                  {messages.map((message) => (
-                    <li key={message.id}>
-                      <strong>{message.role}:</strong> {message.content}
-                    </li>
-                  ))}
-                </ul>
-              </article>
+              <div className="chat-thread" ref={chatThreadRef}>
+                {displayedMessages.length === 0 ? <p className="chat-empty">No messages yet.</p> : null}
+                {displayedMessages.map((message) => (
+                  <article
+                    key={message.id}
+                    className={`chat-message ${message.role === 'user' ? 'chat-message-user' : 'chat-message-assistant'}`}
+                  >
+                    <header className="chat-message-meta">
+                      <span>{message.role === 'user' ? 'You' : 'Assistant'}</span>
+                      {'streaming' in message && message.streaming ? (
+                        <div className="chat-streaming-actions">
+                          <span className="status-pill">streaming</span>
+                          <button
+                            type="button"
+                            className="button-secondary"
+                            onClick={() => void handleCancelTurn()}
+                            disabled={!activeTurnId || busy}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : null}
+                    </header>
+                    <pre>{message.content}</pre>
+                  </article>
+                ))}
+              </div>
 
               {pendingApproval ? (
                 <article className="sim-approval">
@@ -1412,34 +1512,34 @@ export default function HomePage() {
                 </article>
               ) : null}
 
-              <label>
-                Prompt
-                <textarea
-                  value={prompt}
-                  onChange={(event) => setPrompt(event.target.value)}
-                  placeholder="Send a prompt to start a turn..."
-                  rows={4}
-                />
-              </label>
-              <div className="sim-actions">
-                <button
-                  type="button"
-                  onClick={() => void handleSendTurn()}
-                  disabled={(!canStartTurn && !canSteerTurn) || busy}
-                >
-                  {canSteerTurn ? 'Steer Current Turn' : 'Start Turn'}
-                </button>
-                <button type="button" onClick={() => void handleCancelTurn()} disabled={!activeTurnId || busy}>
-                  Cancel Turn
-                </button>
+              <div className="chat-composer">
+                <div className="chat-composer-row">
+                  <textarea
+                    value={prompt}
+                    onChange={(event) => setPrompt(event.target.value)}
+                    onKeyDown={handlePromptKeyDown}
+                    placeholder="Send a message..."
+                    rows={3}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleSendTurn()}
+                    disabled={(!canStartTurn && !canSteerTurn) || busy}
+                  >
+                    {canSteerTurn ? 'Steer Current Turn' : 'Send'}
+                  </button>
+                </div>
               </div>
-              <button type="button" className="button-secondary" onClick={() => void handleForkSession()} disabled={busy || !selectedSessionId || !!activeTurnId}>
-                Fork Session
-              </button>
             </section>
 
             {insightsOpen ? (
-              <aside className="insights-pane">
+              <aside className={`insights-pane ${mobileInsightsOpen ? 'mobile-open' : ''}`}>
+                <div className="mobile-sidebar-head">
+                  <h3>Insights</h3>
+                  <button type="button" className="button-secondary" onClick={() => setMobileInsightsOpen(false)}>
+                    Close
+                  </button>
+                </div>
                 <div className="insights-tabs">
                   <button type="button" className={insightsTab === 'diff' ? 'tab-active' : ''} onClick={() => setInsightsTab('diff')}>
                     Diff
@@ -1457,7 +1557,31 @@ export default function HomePage() {
                 {insightsTab === 'diff' ? (
                   <article className="sim-output">
                     <h3>Diff Summary</h3>
-                    <pre>{diffSummary || 'No diff updates yet.'}</pre>
+                    {diffSummaries.length === 0 ? <pre>No diff updates yet.</pre> : null}
+                    {renderedDiffs.length > 0 ? (
+                      <div className="diff-list">
+                        {renderedDiffs.map((diff, diffIndex) => (
+                          <section key={diff.id} className="diff-block">
+                            <div className="diff-block-head">Diff #{diffIndex + 1}</div>
+                            {diff.files.length === 0 ? <pre>{diff.rawDiff}</pre> : null}
+                            {diff.files.length > 0 ? (
+                              <div className="diff-rdv-shell">
+                                {diff.files.map((file, fileIndex) => (
+                                  <Diff
+                                    key={`diff-${diff.id}-file-${fileIndex}`}
+                                    viewType="unified"
+                                    diffType={file.type}
+                                    hunks={file.hunks}
+                                  >
+                                    {(hunks) => hunks.map((hunk, hunkIndex) => <Hunk key={hunkIndex} hunk={hunk} />)}
+                                  </Diff>
+                                ))}
+                              </div>
+                            ) : null}
+                          </section>
+                        ))}
+                      </div>
+                    ) : null}
                   </article>
                 ) : null}
                 {insightsTab === 'tools' ? (

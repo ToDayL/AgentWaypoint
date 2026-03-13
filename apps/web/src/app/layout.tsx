@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import 'react-diff-view/style/index.css';
 import './globals.css';
 
 export const metadata: Metadata = {

@@ -163,7 +163,7 @@ export class CodexBackend {
   async closeThread(input: CloseThreadBody): Promise<void> {
     const worker = await this.ensureCodexWorker();
     await worker.readyPromise;
-    await this.sendWorkerRequest(worker, 'thread/close', {
+    await this.sendWorkerRequest(worker, 'thread/archive', {
       threadId: input.threadId,
     });
   }
