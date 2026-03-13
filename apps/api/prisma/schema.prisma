@@ -10,9 +10,32 @@ datasource db {
 model User {
   id               String    @id @default(cuid())
   email            String    @unique
+  displayName      String?
+  isActive         Boolean   @default(true)
+  role             String    @default("user")
+  authPolicy       String    @default("password_or_webauthn")
+  passwordHash     String?
+  lastLoginAt      DateTime?
   turnSteerEnabled Boolean   @default(false)
   createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
   projects         Project[]
+  authSessions     AuthSession[]
+}
+
+model AuthSession {
+  id               String    @id @default(cuid())
+  userId           String
+  sessionTokenHash String    @unique
+  expiresAt        DateTime
+  createdAt        DateTime  @default(now())
+  lastSeenAt       DateTime  @default(now())
+  revokedAt        DateTime?
+  ip               String?
+  userAgent        String?
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt, revokedAt])
 }
 
 model Project {

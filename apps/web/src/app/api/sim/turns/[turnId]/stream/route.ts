@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { getApiBaseUrl, readUserEmail, unauthorizedResponse } from '../../../_lib';
+import { getApiBaseUrl } from '../../../_lib';
 
 export const dynamic = 'force-dynamic';
 
@@ -8,14 +8,11 @@ type Params = {
 };
 
 export async function GET(request: NextRequest, context: Params): Promise<Response> {
-  const email = readUserEmail(request);
-  if (!email) {
-    return unauthorizedResponse();
-  }
-
   const { turnId } = await context.params;
   const since = request.nextUrl.searchParams.get('since');
   const query = since ? `?since=${encodeURIComponent(since)}` : '';
+  const cookieHeader = request.headers.get('cookie');
+  const devEmailHeader = request.headers.get('x-user-email');
 
   let upstream: Response;
   try {
@@ -23,7 +20,8 @@ export async function GET(request: NextRequest, context: Params): Promise<Respon
       method: 'GET',
       headers: {
         accept: 'text/event-stream',
-        'x-user-email': email,
+        ...(cookieHeader ? { cookie: cookieHeader } : {}),
+        ...(devEmailHeader ? { 'x-user-email': devEmailHeader } : {}),
         ...(request.headers.get('last-event-id')
           ? { 'last-event-id': request.headers.get('last-event-id') as string }
           : {}),

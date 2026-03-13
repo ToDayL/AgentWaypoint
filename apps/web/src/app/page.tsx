@@ -109,6 +109,21 @@ type AppSettings = {
   turnSteerEnabled: boolean;
 };
 
+type AuthSessionResponse =
+  | {
+      authenticated: true;
+      principal: {
+        type: 'user';
+        userId: string;
+        email: string;
+        role: 'admin' | 'user';
+        authMethod: string;
+      };
+    }
+  | {
+      authenticated: false;
+    };
+
 type ApprovalDecisionInput =
   | 'accept'
   | 'acceptForSession'
@@ -171,7 +186,10 @@ const SESSION_CWD_SUGGESTIONS_LIST_ID = 'session-cwd-path-suggestions';
 
 export default function HomePage() {
   const [mounted, setMounted] = useState(false);
-  const [email, setEmail] = useState('demo@agentwaypoint.local');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authenticated, setAuthenticated] = useState(false);
+  const [currentUserEmail, setCurrentUserEmail] = useState('');
   const [projects, setProjects] = useState<Project[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
@@ -236,14 +254,12 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
-    void loadAppSettings();
-    void loadAvailableModels();
-    void loadProjects();
+    void loadAuthSession();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    if (!mounted) {
+    if (!mounted || !authenticated) {
       return;
     }
 
@@ -261,7 +277,6 @@ export default function HomePage() {
         `/api/sim/fs/suggestions?${new URLSearchParams({ prefix, limit: '8' }).toString()}`,
         {
           method: 'GET',
-          email,
           signal: controller.signal,
         },
       )
@@ -285,10 +300,10 @@ export default function HomePage() {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [mounted, newProjectRepoPath, email]);
+  }, [mounted, newProjectRepoPath, authenticated]);
 
   useEffect(() => {
-    if (!mounted) {
+    if (!mounted || !authenticated) {
       return;
     }
 
@@ -306,7 +321,6 @@ export default function HomePage() {
         `/api/sim/fs/suggestions?${new URLSearchParams({ prefix, limit: '8' }).toString()}`,
         {
           method: 'GET',
-          email,
           signal: controller.signal,
         },
       )
@@ -330,13 +344,91 @@ export default function HomePage() {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [mounted, newSessionCwdOverride, email]);
+  }, [mounted, newSessionCwdOverride, authenticated]);
+
+  async function loadAuthSession(): Promise<void> {
+    try {
+      const response = await apiRequest<AuthSessionResponse>('/api/sim/auth/session', {
+        method: 'GET',
+      });
+      if (response.authenticated) {
+        setAuthenticated(true);
+        setCurrentUserEmail(response.principal.email);
+        await loadAppSettings();
+        await loadAvailableModels();
+        await loadProjects();
+        return;
+      }
+      setAuthenticated(false);
+      setCurrentUserEmail('');
+    } catch {
+      setAuthenticated(false);
+      setCurrentUserEmail('');
+    }
+  }
+
+  async function handleLogin(): Promise<void> {
+    if (!authEmail.trim() || !authPassword.trim()) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      await apiRequest<{ user: { email: string } }>('/api/sim/auth/login/password', {
+        method: 'POST',
+        body: {
+          email: authEmail.trim(),
+          password: authPassword,
+        },
+      });
+      setAuthPassword('');
+      await loadAuthSession();
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+      setAuthenticated(false);
+      setCurrentUserEmail('');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleLogout(): Promise<void> {
+    setBusy(true);
+    setError('');
+    try {
+      await apiRequest<{ success: boolean }>('/api/sim/auth/logout', {
+        method: 'POST',
+        body: {},
+      });
+      setAuthenticated(false);
+      setCurrentUserEmail('');
+      setProjects([]);
+      setSessions([]);
+      setSelectedProjectId('');
+      setSelectedSessionId('');
+      setMessages([]);
+      setTurns([]);
+      setEventLog([]);
+      setAssistantText('');
+      setReasoningText('');
+      setLatestPlan('');
+      setToolOutput('');
+      setDiffSummary('');
+      setActiveTurnId('');
+      setResumedTurnHint('');
+      setTurnStatus('idle');
+      setPendingApproval(null);
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function loadAppSettings(): Promise<void> {
     try {
       const response = await apiRequest<AppSettings>('/api/sim/settings', {
         method: 'GET',
-        email,
       });
       setAppSettings({ turnSteerEnabled: !!response.turnSteerEnabled });
     } catch (requestError) {
@@ -348,7 +440,6 @@ export default function HomePage() {
     try {
       const response = await apiRequest<{ data: AvailableModel[] }>('/api/sim/models', {
         method: 'GET',
-        email,
       });
       setAvailableModels(response.data ?? []);
     } catch (requestError) {
@@ -376,7 +467,6 @@ export default function HomePage() {
     try {
       const items = (await apiRequest<Project[]>('/api/sim/projects', {
         method: 'GET',
-        email,
       })) as Project[];
       setProjects(items);
       if (!selectedProjectId && items[0]) {
@@ -396,7 +486,6 @@ export default function HomePage() {
     try {
       const response = await apiRequest<AppSettings>('/api/sim/settings', {
         method: 'POST',
-        email,
         body: { turnSteerEnabled: enabled },
       });
       setAppSettings({ turnSteerEnabled: !!response.turnSteerEnabled });
@@ -419,7 +508,6 @@ export default function HomePage() {
     try {
       const items = (await apiRequest<Session[]>(`/api/sim/projects/${projectId}/sessions`, {
         method: 'GET',
-        email,
       })) as Session[];
       setSessions(items);
       if (items[0]) {
@@ -456,7 +544,6 @@ export default function HomePage() {
     try {
       const created = await apiRequest<Project>('/api/sim/projects', {
         method: 'POST',
-        email,
         body: {
           name: newProjectName.trim(),
           repoPath: newProjectRepoPath.trim(),
@@ -487,7 +574,6 @@ export default function HomePage() {
     try {
       const created = await apiRequest<Session>(`/api/sim/projects/${selectedProjectId}/sessions`, {
         method: 'POST',
-        email,
         body: {
           title: newSessionTitle.trim(),
           ...(newSessionCwdOverride.trim() ? { cwdOverride: newSessionCwdOverride.trim() } : {}),
@@ -518,7 +604,6 @@ export default function HomePage() {
     try {
       const forked = await apiRequest<Session>(`/api/sim/sessions/${selectedSessionId}/fork`, {
         method: 'POST',
-        email,
         body: {},
       });
       await loadSessions(selectedProjectId);
@@ -544,7 +629,6 @@ export default function HomePage() {
         const steerContent = prompt.trim();
         await apiRequest<TurnStatusResponse>(`/api/sim/turns/${activeTurnId}/steer`, {
           method: 'POST',
-          email,
           body: { content: steerContent },
         });
         setMessages((current) => [
@@ -571,7 +655,6 @@ export default function HomePage() {
 
       const result = await apiRequest<{ turnId: string; status: string }>(`/api/sim/sessions/${selectedSessionId}/turns`, {
         method: 'POST',
-        email,
         body: { content: prompt.trim() },
       });
 
@@ -598,7 +681,6 @@ export default function HomePage() {
     try {
       const cancelled = await apiRequest<{ status: string }>(`/api/sim/turns/${activeTurnId}/cancel`, {
         method: 'POST',
-        email,
       });
       setTurnStatus(cancelled.status);
       await loadSessionHistory(selectedSessionId, { resumeStream: false, resetEventLog: false });
@@ -619,7 +701,6 @@ export default function HomePage() {
     try {
       await apiRequest<TurnStatusResponse>(`/api/sim/turns/${activeTurnId}/approval`, {
         method: 'POST',
-        email,
         body: {
           approvalId: pendingApproval.id,
           decision,
@@ -665,7 +746,6 @@ export default function HomePage() {
     try {
       const history = await apiRequest<SessionHistory>(`/api/sim/sessions/${sessionId}/history`, {
         method: 'GET',
-        email,
       });
       setMessages(history.messages);
       setTurns(history.turns);
@@ -697,7 +777,6 @@ export default function HomePage() {
   async function syncTurnState(turnId: string): Promise<void> {
     const status = await apiRequest<TurnStatusResponse>(`/api/sim/turns/${turnId}`, {
       method: 'GET',
-      email,
     });
     setTurnStatus(status.status);
     setPendingApproval(status.pendingApproval);
@@ -708,7 +787,7 @@ export default function HomePage() {
 
   function openStream(turnId: string, sessionId: string): void {
     eventSourceRef.current?.close();
-    const streamUrl = `/api/sim/turns/${turnId}/stream?email=${encodeURIComponent(email)}`;
+    const streamUrl = `/api/sim/turns/${turnId}/stream`;
     const source = new EventSource(streamUrl);
     eventSourceRef.current = source;
 
@@ -814,7 +893,6 @@ export default function HomePage() {
         try {
           const status = await apiRequest<TurnStatusResponse>(`/api/sim/turns/${turnId}`, {
             method: 'GET',
-            email,
           });
           setTurnStatus(status.status);
           setPendingApproval(status.pendingApproval);
@@ -844,16 +922,47 @@ export default function HomePage() {
         <header className="sim-header">
           <p className="sim-kicker">AgentWaypoint Simulation</p>
           <h1>Web Interface MVP</h1>
-          <p className="sim-subtitle">Project/session setup + mock turn streaming through the real API surface.</p>
+          <p className="sim-subtitle">
+            {authenticated
+              ? 'Project/session setup + mock turn streaming through the real API surface.'
+              : 'Sign in to access projects, sessions, and turn execution.'}
+          </p>
         </header>
 
+        {!authenticated ? (
+          <div className="sim-grid">
+            <aside className="sim-card">
+              <h2>Sign In</h2>
+              <label>
+                Email
+                <input
+                  value={authEmail}
+                  onChange={(event) => setAuthEmail(event.target.value)}
+                  placeholder="admin@agentwaypoint.local"
+                />
+              </label>
+              <label>
+                Password
+                <input
+                  type="password"
+                  value={authPassword}
+                  onChange={(event) => setAuthPassword(event.target.value)}
+                  placeholder="Your password"
+                />
+              </label>
+              <button type="button" onClick={() => void handleLogin()} disabled={busy || !authEmail.trim() || !authPassword}>
+                Sign In
+              </button>
+            </aside>
+          </div>
+        ) : null}
+
+        {authenticated ? (
+        <>
         <div className="sim-grid">
           <aside className="sim-card">
             <h2>Identity</h2>
-            <label>
-              User Email
-              <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" />
-            </label>
+            <p>Signed in as: <strong>{currentUserEmail || '-'}</strong></p>
             <label>
               <span>Turn Steering (This User)</span>
               <input
@@ -865,6 +974,9 @@ export default function HomePage() {
             </label>
             <button type="button" onClick={() => void loadProjects()} disabled={busy}>
               Refresh Projects
+            </button>
+            <button type="button" className="button-secondary" onClick={() => void handleLogout()} disabled={busy}>
+              Sign Out
             </button>
           </aside>
 
@@ -1253,6 +1365,8 @@ export default function HomePage() {
             </ul>
           </article>
         </section>
+        </>
+        ) : null}
 
         {error ? <p className="sim-error">{error}</p> : null}
       </section>
@@ -1262,13 +1376,12 @@ export default function HomePage() {
 
 async function apiRequest<T>(
   path: string,
-  input: { method: 'GET' | 'POST'; email: string; body?: Record<string, unknown>; signal?: AbortSignal },
+  input: { method: 'GET' | 'POST'; body?: Record<string, unknown>; signal?: AbortSignal },
 ): Promise<T> {
   const response = await fetch(path, {
     method: input.method,
     headers: {
       'content-type': 'application/json',
-      'x-user-email': input.email,
     },
     body: input.body ? JSON.stringify(input.body) : undefined,
     signal: input.signal,

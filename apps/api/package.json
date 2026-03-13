@@ -12,7 +12,8 @@
     "test": "vitest run --passWithNoTests",
     "format": "prettier --write \"src/**/*.ts\"",
     "prisma:generate": "prisma generate",
-    "prisma:migrate:dev": "prisma migrate dev"
+    "prisma:migrate:dev": "prisma migrate dev",
+    "auth:bootstrap-admin": "tsx src/scripts/bootstrap-admin.ts"
   },
   "dependencies": {
     "@agentwaypoint/shared": "workspace:*",
