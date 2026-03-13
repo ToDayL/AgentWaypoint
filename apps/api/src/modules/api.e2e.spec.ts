@@ -28,6 +28,7 @@ describe('API e2e', () => {
   let prisma: PrismaService;
   const prevRunnerMode = process.env.RUNNER_MODE;
   const prevRunnerBaseUrl = process.env.RUNNER_BASE_URL;
+  const prevDefaultWorkspaceRoot = process.env.DEFAULT_WORKSPACE_ROOT;
 
   beforeAll(async () => {
     process.env.RUNNER_MODE = 'mock';
@@ -44,6 +45,7 @@ describe('API e2e', () => {
     await app.close();
     process.env.RUNNER_MODE = prevRunnerMode;
     process.env.RUNNER_BASE_URL = prevRunnerBaseUrl;
+    process.env.DEFAULT_WORKSPACE_ROOT = prevDefaultWorkspaceRoot;
   });
 
   it('returns 401 when x-user-email header is missing', async () => {
@@ -160,6 +162,168 @@ describe('API e2e', () => {
     const session = createSessionResponse.json();
     expect(session.cwdOverride).toBe(sessionPath);
     expect((await stat(sessionPath)).isDirectory()).toBe(true);
+  });
+
+  it('uses session-persisted execution settings even if project defaults change later', async () => {
+    const email = randomEmail('session-persisted-settings');
+
+    const projectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Persisted Session Config',
+        repoPath: TEST_REPO_PATH,
+        defaultModel: 'gpt-5-codex',
+      },
+    });
+    expect(projectResponse.statusCode).toBe(201);
+    const project = projectResponse.json() as { id: string };
+
+    const sessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Session Snapshot' },
+    });
+    expect(sessionResponse.statusCode).toBe(201);
+    const session = sessionResponse.json() as { id: string; modelOverride: string | null };
+    expect(session.modelOverride).toBe('gpt-5-codex');
+
+    await prisma.project.update({
+      where: { id: project.id },
+      data: { defaultModel: 'gpt-5-mini' },
+    });
+
+    const createTurnResponse = await app.inject({
+      method: 'POST',
+      url: `/api/sessions/${session.id}/turns`,
+      headers: { 'x-user-email': email },
+      payload: { content: 'check persisted model' },
+    });
+    expect(createTurnResponse.statusCode).toBe(201);
+    const { turnId } = createTurnResponse.json() as { turnId: string };
+
+    await sleep(1200);
+
+    const turnStatusResponse = await app.inject({
+      method: 'GET',
+      url: `/api/turns/${turnId}`,
+      headers: { 'x-user-email': email },
+    });
+    expect(turnStatusResponse.statusCode).toBe(200);
+    expect(turnStatusResponse.json()).toMatchObject({
+      requestedModel: 'gpt-5-codex',
+      effectiveModel: 'gpt-5-codex',
+    });
+  });
+
+  it('updates project config without changing existing session execution settings', async () => {
+    const email = randomEmail('project-config-update');
+
+    const projectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Project Config Source',
+        repoPath: TEST_REPO_PATH,
+        defaultModel: 'gpt-5-codex',
+      },
+    });
+    expect(projectResponse.statusCode).toBe(201);
+    const project = projectResponse.json() as { id: string };
+
+    const sessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Existing Session' },
+    });
+    expect(sessionResponse.statusCode).toBe(201);
+    const session = sessionResponse.json() as { id: string; modelOverride: string | null };
+    expect(session.modelOverride).toBe('gpt-5-codex');
+
+    const patchResponse = await app.inject({
+      method: 'PATCH',
+      url: `/api/projects/${project.id}`,
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Project Config Updated',
+        defaultModel: 'gpt-5-mini',
+      },
+    });
+    expect(patchResponse.statusCode).toBe(200);
+    expect(patchResponse.json()).toMatchObject({
+      id: project.id,
+      name: 'Project Config Updated',
+      defaultModel: 'gpt-5-mini',
+    });
+
+    const historyResponse = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${session.id}/history`,
+      headers: { 'x-user-email': email },
+    });
+    expect(historyResponse.statusCode).toBe(200);
+    expect(historyResponse.json()).toMatchObject({
+      session: {
+        id: session.id,
+        modelOverride: 'gpt-5-codex',
+      },
+    });
+  });
+
+  it('creates project workspace automatically when repoPath is omitted', async () => {
+    const email = randomEmail('workspace-default-root');
+    const tempRoot = await mkdtemp(path.join(tmpdir(), 'aw-default-workspace-'));
+    process.env.DEFAULT_WORKSPACE_ROOT = tempRoot;
+
+    const createProjectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Auto Workspace Project',
+      },
+    });
+
+    expect(createProjectResponse.statusCode).toBe(201);
+    const project = createProjectResponse.json() as { repoPath: string };
+    expect(project.repoPath.startsWith(`${tempRoot}${path.sep}`)).toBe(true);
+    expect((await stat(project.repoPath)).isDirectory()).toBe(true);
+  });
+
+  it('creates unique workspace folder names when target folder already exists', async () => {
+    const email = randomEmail('workspace-unique');
+    const tempRoot = await mkdtemp(path.join(tmpdir(), 'aw-unique-workspace-'));
+    process.env.DEFAULT_WORKSPACE_ROOT = tempRoot;
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Duplicate Name Project',
+      },
+    });
+    expect(firstResponse.statusCode).toBe(201);
+    const firstProject = firstResponse.json() as { repoPath: string };
+
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Duplicate Name Project',
+      },
+    });
+    expect(secondResponse.statusCode).toBe(201);
+    const secondProject = secondResponse.json() as { repoPath: string };
+
+    expect(secondProject.repoPath).not.toBe(firstProject.repoPath);
+    expect((await stat(firstProject.repoPath)).isDirectory()).toBe(true);
+    expect((await stat(secondProject.repoPath)).isDirectory()).toBe(true);
   });
 
   it('returns validation errors for invalid payloads', async () => {

@@ -12,18 +12,29 @@ export class SettingsService {
       where: { id: userId },
       select: {
         turnSteerEnabled: true,
+        defaultWorkspaceRoot: true,
       },
     });
   }
 
   async updateAppSettings(userId: string, input: UpdateAppSettingsBody) {
+    const data: {
+      turnSteerEnabled?: boolean;
+      defaultWorkspaceRoot?: string | null;
+    } = {};
+    if (typeof input.turnSteerEnabled === 'boolean') {
+      data.turnSteerEnabled = input.turnSteerEnabled;
+    }
+    if (Object.prototype.hasOwnProperty.call(input, 'defaultWorkspaceRoot')) {
+      data.defaultWorkspaceRoot = input.defaultWorkspaceRoot?.trim() || null;
+    }
+
     return this.prisma.user.update({
       where: { id: userId },
-      data: {
-        turnSteerEnabled: input.turnSteerEnabled,
-      },
+      data,
       select: {
         turnSteerEnabled: true,
+        defaultWorkspaceRoot: true,
       },
     });
   }
@@ -38,6 +49,7 @@ export class SettingsService {
         role: true,
         isActive: true,
         authPolicy: true,
+        defaultWorkspaceRoot: true,
         lastLoginAt: true,
         createdAt: true,
         updatedAt: true,
@@ -63,6 +75,7 @@ export class SettingsService {
         role: input.role ?? 'user',
         isActive: input.isActive ?? true,
         authPolicy: 'password_or_webauthn',
+        defaultWorkspaceRoot: input.defaultWorkspaceRoot?.trim() || null,
         passwordHash,
       },
       select: {
@@ -72,6 +85,7 @@ export class SettingsService {
         role: true,
         isActive: true,
         authPolicy: true,
+        defaultWorkspaceRoot: true,
         lastLoginAt: true,
         createdAt: true,
         updatedAt: true,
@@ -82,7 +96,7 @@ export class SettingsService {
   async updateUserForAdmin(adminUserId: string, userId: string, input: AdminUpdateUserBody) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, role: true, isActive: true },
+      select: { id: true, role: true, isActive: true, defaultWorkspaceRoot: true },
     });
     if (!user) {
       throw new NotFoundException({ message: 'User not found' });
@@ -101,6 +115,7 @@ export class SettingsService {
       role?: 'admin' | 'user';
       isActive?: boolean;
       passwordHash?: string;
+      defaultWorkspaceRoot?: string | null;
     } = {};
     if (Object.prototype.hasOwnProperty.call(input, 'displayName')) {
       data.displayName = input.displayName?.trim() || null;
@@ -114,6 +129,9 @@ export class SettingsService {
     if (input.password) {
       data.passwordHash = await hashPassword(input.password);
     }
+    if (Object.prototype.hasOwnProperty.call(input, 'defaultWorkspaceRoot')) {
+      data.defaultWorkspaceRoot = input.defaultWorkspaceRoot?.trim() || null;
+    }
 
     return this.prisma.user.update({
       where: { id: userId },
@@ -125,6 +143,7 @@ export class SettingsService {
         role: true,
         isActive: true,
         authPolicy: true,
+        defaultWorkspaceRoot: true,
         lastLoginAt: true,
         createdAt: true,
         updatedAt: true,

@@ -64,20 +64,16 @@ export class TurnsService implements OnModuleInit {
         modelOverride: true,
         sandboxOverride: true,
         approvalPolicyOverride: true,
-        project: {
-          select: { repoPath: true, defaultModel: true, defaultSandbox: true, defaultApprovalPolicy: true },
-        },
       },
     });
     if (!session) {
       throw new NotFoundException({ message: 'Session not found' });
     }
 
-    const cwd = session.cwdOverride?.trim() || session.project.repoPath?.trim() || null;
-    const model = session.modelOverride?.trim() || session.project.defaultModel?.trim() || null;
-    const sandbox = session.sandboxOverride?.trim() || session.project.defaultSandbox?.trim() || null;
-    const approvalPolicy =
-      session.approvalPolicyOverride?.trim() || session.project.defaultApprovalPolicy?.trim() || null;
+    const cwd = session.cwdOverride?.trim() || null;
+    const model = session.modelOverride?.trim() || null;
+    const sandbox = session.sandboxOverride?.trim() || null;
+    const approvalPolicy = session.approvalPolicyOverride?.trim() || null;
 
     const activeTurn = await this.prisma.turn.findFirst({
       where: {

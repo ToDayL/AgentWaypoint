@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readdir } from 'node:fs/promises';
+import { mkdir, readdir, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import * as path from 'node:path';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -150,7 +151,22 @@ export class MockRunnerAdapter implements RunnerAdapter {
   }
 
   async ensureDirectory(input: EnsureDirectoryInput): Promise<EnsureDirectoryResult> {
-    const absolutePath = path.resolve(input.path);
+    const absolutePath = path.resolve(expandHomeToken(input.path));
+    try {
+      const info = await stat(absolutePath);
+      if (!info.isDirectory()) {
+        throw new Error(`Project workspace is not a directory: ${absolutePath}`);
+      }
+      return {
+        path: absolutePath,
+        created: false,
+      };
+    } catch (error: unknown) {
+      if (!isMissingPathError(error)) {
+        throw error;
+      }
+    }
+
     await mkdir(absolutePath, { recursive: true });
     return {
       path: absolutePath,
@@ -161,7 +177,7 @@ export class MockRunnerAdapter implements RunnerAdapter {
   async suggestWorkspaceDirectories(input: WorkspaceSuggestionInput): Promise<string[]> {
     const sanitizedLimit = Number.isFinite(input.limit) ? Math.min(Math.max(Math.trunc(input.limit ?? 12), 1), 50) : 12;
     const prefix = input.prefix.trim();
-    const resolvedPrefix = path.resolve(prefix.length > 0 ? prefix : '.');
+    const resolvedPrefix = path.resolve(expandHomeToken(prefix.length > 0 ? prefix : '.'));
     const hasTrailingSeparator = /[\\/]+$/.test(prefix);
     const scanDirectory = hasTrailingSeparator ? resolvedPrefix : path.dirname(resolvedPrefix);
     const segmentPrefix = hasTrailingSeparator ? '' : path.basename(resolvedPrefix);
@@ -258,6 +274,37 @@ export class MockRunnerAdapter implements RunnerAdapter {
     }
     this.logger.error(message);
   }
+}
+
+function expandHomeToken(inputPath: string): string {
+  const homePath = process.env.HOME?.trim() || homedir().trim();
+  if (!homePath) {
+    return inputPath;
+  }
+
+  if (inputPath === '~' || inputPath.startsWith(`~${path.sep}`) || inputPath.startsWith('~/') || inputPath.startsWith('~\\')) {
+    return path.join(homePath, inputPath.slice(1));
+  }
+  if (
+    inputPath === '$HOME' ||
+    inputPath.startsWith(`$HOME${path.sep}`) ||
+    inputPath.startsWith('$HOME/') ||
+    inputPath.startsWith('$HOME\\')
+  ) {
+    return path.join(homePath, inputPath.slice('$HOME'.length));
+  }
+
+  return inputPath;
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    typeof (error as { code?: unknown }).code === 'string' &&
+    (error as { code: string }).code === 'ENOENT'
+  );
 }
 
 function chunkText(text: string, size: number): string[] {

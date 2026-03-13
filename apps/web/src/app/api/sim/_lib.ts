@@ -25,12 +25,24 @@ export async function forwardJson(
       cache: 'no-store',
     });
 
-    const responseHeaders: Record<string, string> = {
-      'content-type': upstream.headers.get('content-type') ?? 'application/json',
-    };
+    const responseHeaders: Record<string, string> = {};
+    const contentType = upstream.headers.get('content-type');
+    const noBodyStatus = upstream.status === 204 || upstream.status === 205 || upstream.status === 304;
+    if (contentType && !noBodyStatus) {
+      responseHeaders['content-type'] = contentType;
+    } else if (!noBodyStatus) {
+      responseHeaders['content-type'] = 'application/json';
+    }
     const upstreamSetCookie = upstream.headers.get('set-cookie');
     if (upstreamSetCookie) {
       responseHeaders['set-cookie'] = upstreamSetCookie;
+    }
+
+    if (noBodyStatus) {
+      return new Response(null, {
+        status: upstream.status,
+        headers: responseHeaders,
+      });
     }
 
     return new Response(await upstream.text(), {

@@ -31,7 +31,13 @@ export class SessionsService {
         id: projectId,
         ownerUserId: userId,
       },
-      select: { id: true },
+      select: {
+        id: true,
+        repoPath: true,
+        defaultModel: true,
+        defaultSandbox: true,
+        defaultApprovalPolicy: true,
+      },
     });
 
     if (!project) {
@@ -40,7 +46,12 @@ export class SessionsService {
 
     const cwdOverride = input.cwdOverride?.trim()
       ? (await this.runnerAdapter.ensureDirectory({ path: input.cwdOverride.trim() })).path
-      : undefined;
+      : project.repoPath?.trim() || null;
+
+    const modelOverride = input.modelOverride?.trim() || project.defaultModel?.trim() || null;
+    const sandboxOverride = input.sandboxOverride?.trim() || project.defaultSandbox?.trim() || null;
+    const approvalPolicyOverride =
+      input.approvalPolicyOverride?.trim() || project.defaultApprovalPolicy?.trim() || null;
 
     return this.prisma.session.create({
       data: {
@@ -48,9 +59,9 @@ export class SessionsService {
         title: input.title,
         status: 'active',
         cwdOverride,
-        modelOverride: input.modelOverride,
-        sandboxOverride: input.sandboxOverride,
-        approvalPolicyOverride: input.approvalPolicyOverride,
+        modelOverride,
+        sandboxOverride,
+        approvalPolicyOverride,
       },
     });
   }
@@ -149,14 +160,6 @@ export class SessionsService {
         modelOverride: true,
         sandboxOverride: true,
         approvalPolicyOverride: true,
-        project: {
-          select: {
-            repoPath: true,
-            defaultModel: true,
-            defaultSandbox: true,
-            defaultApprovalPolicy: true,
-          },
-        },
         messages: {
           orderBy: { createdAt: 'asc' },
           select: {
@@ -187,11 +190,10 @@ export class SessionsService {
       throw new ConflictException({ message: 'Cannot fork a session while a turn is active' });
     }
 
-    const cwd = sourceSession.cwdOverride?.trim() || sourceSession.project.repoPath?.trim() || null;
-    const model = sourceSession.modelOverride?.trim() || sourceSession.project.defaultModel?.trim() || null;
-    const sandbox = sourceSession.sandboxOverride?.trim() || sourceSession.project.defaultSandbox?.trim() || null;
-    const approvalPolicy =
-      sourceSession.approvalPolicyOverride?.trim() || sourceSession.project.defaultApprovalPolicy?.trim() || null;
+    const cwd = sourceSession.cwdOverride?.trim() || null;
+    const model = sourceSession.modelOverride?.trim() || null;
+    const sandbox = sourceSession.sandboxOverride?.trim() || null;
+    const approvalPolicy = sourceSession.approvalPolicyOverride?.trim() || null;
 
     const forked = await this.runnerAdapter.forkThread({
       threadId: sourceSession.codexThreadId,

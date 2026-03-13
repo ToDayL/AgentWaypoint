@@ -11,3 +11,8 @@ export async function DELETE(request: NextRequest, context: Params): Promise<Res
   const { projectId } = await context.params;
   return forwardJson(request, { path: `/api/projects/${projectId}`, method: 'DELETE' });
 }
+
+export async function PATCH(request: NextRequest, context: Params): Promise<Response> {
+  const { projectId } = await context.params;
+  return forwardJson(request, { path: `/api/projects/${projectId}`, method: 'PATCH' });
+}

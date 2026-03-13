@@ -1,4 +1,5 @@
 import { mkdir, readdir, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import * as path from 'node:path';
 
 type FilesystemBackendConfig = {
@@ -18,7 +19,7 @@ export class FilesystemBackend {
   }
 
   async ensureWorkspaceDirectory(inputPath: string): Promise<{ path: string; created: boolean }> {
-    const absolutePath = path.resolve(inputPath.trim());
+    const absolutePath = path.resolve(expandHomeToken(inputPath.trim()));
     this.assertWorkspaceAllowed(absolutePath);
 
     try {
@@ -39,7 +40,7 @@ export class FilesystemBackend {
   async suggestWorkspaceDirectories(inputPrefix: string, limit = 12): Promise<string[]> {
     const sanitizedLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 50) : 12;
     const prefix = inputPrefix.trim();
-    const resolvedPrefix = path.resolve(prefix.length > 0 ? prefix : '.');
+    const resolvedPrefix = path.resolve(expandHomeToken(prefix.length > 0 ? prefix : '.'));
     const hasTrailingSeparator = /[\\/]+$/.test(prefix);
     const scanDirectory = hasTrailingSeparator ? resolvedPrefix : path.dirname(resolvedPrefix);
     const segmentPrefix = hasTrailingSeparator ? '' : path.basename(resolvedPrefix);
@@ -67,7 +68,7 @@ export class FilesystemBackend {
   }
 
   private async assertExistingWorkspaceDirectory(normalizedCwd: string): Promise<string> {
-    const absolutePath = path.resolve(normalizedCwd);
+    const absolutePath = path.resolve(expandHomeToken(normalizedCwd));
     this.assertWorkspaceAllowed(absolutePath);
 
     let info;
@@ -123,6 +124,31 @@ export class FilesystemBackend {
       .map((entry) => path.resolve(entry.trim()))
       .filter((entry) => entry.length > 0);
   }
+}
+
+function expandHomeToken(inputPath: string): string {
+  if (!inputPath) {
+    return inputPath;
+  }
+
+  const homePath = process.env.HOME?.trim() || homedir().trim();
+  if (!homePath) {
+    return inputPath;
+  }
+
+  if (inputPath === '~' || inputPath.startsWith(`~${path.sep}`) || inputPath.startsWith('~/') || inputPath.startsWith('~\\')) {
+    return path.join(homePath, inputPath.slice(1));
+  }
+  if (
+    inputPath === '$HOME' ||
+    inputPath.startsWith(`$HOME${path.sep}`) ||
+    inputPath.startsWith('$HOME/') ||
+    inputPath.startsWith('$HOME\\')
+  ) {
+    return path.join(homePath, inputPath.slice('$HOME'.length));
+  }
+
+  return inputPath;
 }
 
 function isMissingPathError(error: unknown): boolean {

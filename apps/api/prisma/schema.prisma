@@ -17,6 +17,7 @@ model User {
   passwordHash     String?
   lastLoginAt      DateTime?
   turnSteerEnabled Boolean   @default(false)
+  defaultWorkspaceRoot String?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
   projects         Project[]
