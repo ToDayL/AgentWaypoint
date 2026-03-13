@@ -1,11 +1,13 @@
 # AgentWaypoint
 
-Web UI for chatting with Codex through a runner service.
+AgentWaypoint offers a WebUI for Codex CLI through a runner service.
 
 ## What It Offers
-- Chat interface for Codex with streaming responses.
+- WebUI chat interface for Codex CLI with streaming responses.
 - Project and session management for organized workspaces.
+- Multi-user support with role-based access.
 - Tooling insights (events/diff/tool output) for turn inspection.
+- Extensible interface layer; Discord and other clients are planned next.
 - Self-hosted deployment with Docker and a host runner service.
 
 ## Production Quick Start
