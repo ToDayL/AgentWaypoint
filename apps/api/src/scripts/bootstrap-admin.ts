@@ -12,6 +12,31 @@ async function main(): Promise<void> {
   const prisma = new PrismaClient();
 
   try {
+    const existingAdmin = await prisma.user.findFirst({
+      where: {
+        role: 'admin',
+      },
+      select: {
+        id: true,
+        email: true,
+      },
+    });
+    if (existingAdmin) {
+      // eslint-disable-next-line no-console
+      console.log(
+        JSON.stringify(
+          {
+            action: 'skipped',
+            reason: 'admin_exists',
+            user: existingAdmin,
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+
     const passwordHash = await hashPassword(input.password);
     const existing = await prisma.user.findUnique({
       where: { email: input.email },

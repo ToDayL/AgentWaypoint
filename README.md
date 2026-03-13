@@ -23,6 +23,15 @@ Prerequisite:
 ```bash
 cp .env.production.example .env.production
 ```
+Set admin bootstrap values for first startup:
+- `BOOTSTRAP_ADMIN_EMAIL`
+- `BOOTSTRAP_ADMIN_PASSWORD`
+- `BOOTSTRAP_ADMIN_DISPLAY_NAME` (optional)
+
+Security note:
+- `prod-up` bootstraps admin only when no admin exists.
+- After first successful login, immediately change the admin password in Settings.
+- Then clear `BOOTSTRAP_ADMIN_PASSWORD` from `.env.production`.
 2. Put TLS files in `infra/docker/nginx/certs/` (matching `.env.production`):
 - `NGINX_SSL_CERT_FILE`
 - `NGINX_SSL_KEY_FILE`

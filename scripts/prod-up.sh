@@ -33,6 +33,19 @@ if [[ "${SKIP_MIGRATE:-0}" != "1" ]]; then
   "
 fi
 
+if [[ -n "${BOOTSTRAP_ADMIN_EMAIL:-}" && -n "${BOOTSTRAP_ADMIN_PASSWORD:-}" ]]; then
+  echo "[prod-up] Bootstrapping first admin user (skips automatically if admin already exists)..."
+  docker compose -f "$COMPOSE_FILE" run --rm api sh -lc "
+    pnpm install --frozen-lockfile --reporter=append-only &&
+    pnpm --filter @agentwaypoint/api auth:bootstrap-admin -- \
+      --email '${BOOTSTRAP_ADMIN_EMAIL}' \
+      --password '${BOOTSTRAP_ADMIN_PASSWORD}' \
+      --display-name '${BOOTSTRAP_ADMIN_DISPLAY_NAME:-}'
+  "
+else
+  echo "[prod-up] BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD not set; skipping admin bootstrap."
+fi
+
 echo "[prod-up] Starting Docker app services (api/web/nginx)..."
 docker compose -f "$COMPOSE_FILE" up --build -d api web nginx
 
