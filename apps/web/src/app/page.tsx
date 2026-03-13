@@ -7,6 +7,7 @@ import {
   FolderPlus,
   FolderTree,
   GitFork,
+  Info,
   Menu,
   Pin,
   Plus,
@@ -124,6 +125,7 @@ type PendingApproval = {
 
 type AppSettings = {
   turnSteerEnabled: boolean;
+  defaultWorkspaceRoot: string | null;
 };
 
 type AdminManagedUser = {
@@ -133,6 +135,7 @@ type AdminManagedUser = {
   role: 'admin' | 'user';
   isActive: boolean;
   authPolicy: string;
+  defaultWorkspaceRoot: string | null;
   lastLoginAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -239,17 +242,24 @@ export default function HomePage() {
   const [newManagedUserPassword, setNewManagedUserPassword] = useState('');
   const [newManagedUserRole, setNewManagedUserRole] = useState<'admin' | 'user'>('user');
   const [newManagedUserIsActive, setNewManagedUserIsActive] = useState(true);
+  const [newManagedUserDefaultWorkspaceRoot, setNewManagedUserDefaultWorkspaceRoot] = useState('');
   const [managedUserTarget, setManagedUserTarget] = useState<AdminManagedUser | null>(null);
   const [managedUserRoleDraft, setManagedUserRoleDraft] = useState<'admin' | 'user'>('user');
   const [managedUserActiveDraft, setManagedUserActiveDraft] = useState(true);
   const [managedUserPasswordDraft, setManagedUserPasswordDraft] = useState('');
+  const [managedUserDefaultWorkspaceRootDraft, setManagedUserDefaultWorkspaceRootDraft] = useState('');
   const [authenticated, setAuthenticated] = useState(false);
   const [currentUserEmail, setCurrentUserEmail] = useState('');
   const [currentUserRole, setCurrentUserRole] = useState<'admin' | 'user'>('user');
   const [projects, setProjects] = useState<Project[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
-  const [appSettings, setAppSettings] = useState<AppSettings>({ turnSteerEnabled: false });
+  const [appSettings, setAppSettings] = useState<AppSettings>({
+    turnSteerEnabled: false,
+    defaultWorkspaceRoot: null,
+  });
+  const [turnSteerDraft, setTurnSteerDraft] = useState(false);
+  const [defaultWorkspaceRootInput, setDefaultWorkspaceRootInput] = useState('');
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
   const [newProjectName, setNewProjectName] = useState('Simulation Workspace');
@@ -259,6 +269,11 @@ export default function HomePage() {
   const [newProjectDefaultModel, setNewProjectDefaultModel] = useState('');
   const [newProjectDefaultSandbox, setNewProjectDefaultSandbox] = useState('');
   const [newProjectDefaultApprovalPolicy, setNewProjectDefaultApprovalPolicy] = useState('');
+  const [projectConfigName, setProjectConfigName] = useState('');
+  const [projectConfigRepoPath, setProjectConfigRepoPath] = useState('');
+  const [projectConfigDefaultModel, setProjectConfigDefaultModel] = useState('');
+  const [projectConfigDefaultSandbox, setProjectConfigDefaultSandbox] = useState('');
+  const [projectConfigDefaultApprovalPolicy, setProjectConfigDefaultApprovalPolicy] = useState('');
   const [newSessionTitle, setNewSessionTitle] = useState('First Simulation Session');
   const [newSessionCwdOverride, setNewSessionCwdOverride] = useState('');
   const [sessionCwdSuggestions, setSessionCwdSuggestions] = useState<string[]>([]);
@@ -285,6 +300,7 @@ export default function HomePage() {
   const [leftSidebarMode, setLeftSidebarMode] = useState<SidebarMode>('pin');
   const [rightSidebarMode, setRightSidebarMode] = useState<SidebarMode>('closed');
   const [insightsTab, setInsightsTab] = useState<InsightsTab>('diff');
+  const [sessionInfoOpen, setSessionInfoOpen] = useState(true);
   const [mobileLeftSidebarOpen, setMobileLeftSidebarOpen] = useState(false);
   const [mobileInsightsOpen, setMobileInsightsOpen] = useState(false);
   const [disableNativePathDatalist, setDisableNativePathDatalist] = useState(false);
@@ -303,6 +319,10 @@ export default function HomePage() {
   const canStartTurn = !!selectedSessionId && prompt.trim().length > 0 && activeTurnId === '';
   const canSteerTurn =
     appSettings.turnSteerEnabled && !!activeTurnId && prompt.trim().length > 0 && pendingApproval === null;
+  const normalizedDefaultWorkspaceRootDraft = defaultWorkspaceRootInput.trim() || null;
+  const appSettingsDirty =
+    turnSteerDraft !== appSettings.turnSteerEnabled ||
+    normalizedDefaultWorkspaceRootDraft !== (appSettings.defaultWorkspaceRoot ?? null);
   const selectedProject = useMemo(
     () => projects.find((item) => item.id === selectedProjectId),
     [projects, selectedProjectId],
@@ -311,6 +331,30 @@ export default function HomePage() {
     () => sessions.find((item) => item.id === selectedSessionId),
     [sessions, selectedSessionId],
   );
+  const sessionInfoTurn = useMemo(
+    () => turns.find((item) => item.id === activeTurnId) ?? turns[0] ?? null,
+    [turns, activeTurnId],
+  );
+  const resolvedSessionInfo = useMemo(() => {
+    const workspace =
+      sessionInfoTurn?.effectiveCwd?.trim() ||
+      selectedSession?.cwdOverride?.trim() ||
+      'not set';
+    const model =
+      sessionInfoTurn?.effectiveModel?.trim() ||
+      selectedSession?.modelOverride?.trim() ||
+      'runner default';
+    const approval =
+      sessionInfoTurn?.effectiveApprovalPolicy?.trim() ||
+      selectedSession?.approvalPolicyOverride?.trim() ||
+      'runner default';
+    const sandbox =
+      sessionInfoTurn?.effectiveSandbox?.trim() ||
+      selectedSession?.sandboxOverride?.trim() ||
+      'runner default';
+
+    return { workspace, model, approval, sandbox };
+  }, [sessionInfoTurn, selectedSession, selectedProject]);
   const displayedMessages = useMemo(() => {
     const base = messages.map((message) => ({ ...message, streaming: false }));
     if (assistantText.length === 0 || !streamBubbleTurnId) {
@@ -381,7 +425,8 @@ export default function HomePage() {
       return;
     }
 
-    const prefix = newProjectRepoPath.trim();
+    const prefix =
+      actionPanelMode === 'projectConfig' ? projectConfigRepoPath.trim() : newProjectRepoPath.trim();
     if (!prefix) {
       setWorkspaceSuggestions([]);
       setWorkspaceSuggestionBusy(false);
@@ -418,7 +463,7 @@ export default function HomePage() {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [mounted, newProjectRepoPath, authenticated]);
+  }, [mounted, newProjectRepoPath, projectConfigRepoPath, actionPanelMode, authenticated]);
 
   useEffect(() => {
     if (!mounted || !authenticated) {
@@ -584,6 +629,10 @@ export default function HomePage() {
       setAdminUsers([]);
       setManagedUserTarget(null);
       setManagedUserPasswordDraft('');
+      setManagedUserDefaultWorkspaceRootDraft('');
+      setNewManagedUserDefaultWorkspaceRoot('');
+      setDefaultWorkspaceRootInput('');
+      setTurnSteerDraft(false);
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
@@ -651,6 +700,7 @@ export default function HomePage() {
           password: newManagedUserPassword,
           role: newManagedUserRole,
           isActive: newManagedUserIsActive,
+          defaultWorkspaceRoot: newManagedUserDefaultWorkspaceRoot.trim() || null,
         },
       });
       setNewManagedUserEmail('');
@@ -658,6 +708,7 @@ export default function HomePage() {
       setNewManagedUserPassword('');
       setNewManagedUserRole('user');
       setNewManagedUserIsActive(true);
+      setNewManagedUserDefaultWorkspaceRoot('');
       await loadAdminUsers();
       return true;
     } catch (requestError) {
@@ -670,7 +721,7 @@ export default function HomePage() {
 
   async function handleUpdateManagedUser(
     userId: string,
-    patch: Partial<Pick<AdminManagedUser, 'role' | 'isActive'>> & { password?: string },
+    patch: Partial<Pick<AdminManagedUser, 'role' | 'isActive' | 'defaultWorkspaceRoot'>> & { password?: string },
   ): Promise<void> {
     setBusy(true);
     setError('');
@@ -692,7 +743,13 @@ export default function HomePage() {
       const response = await apiRequest<AppSettings>('/api/sim/settings', {
         method: 'GET',
       });
-      setAppSettings({ turnSteerEnabled: !!response.turnSteerEnabled });
+      const normalizedWorkspaceRoot = response.defaultWorkspaceRoot?.trim() || null;
+      setAppSettings({
+        turnSteerEnabled: !!response.turnSteerEnabled,
+        defaultWorkspaceRoot: normalizedWorkspaceRoot,
+      });
+      setTurnSteerDraft(!!response.turnSteerEnabled);
+      setDefaultWorkspaceRootInput(normalizedWorkspaceRoot ?? '');
     } catch (requestError) {
       setError(extractMessage(requestError));
     }
@@ -749,15 +806,24 @@ export default function HomePage() {
     }
   }
 
-  async function handleTurnSteerToggle(enabled: boolean): Promise<void> {
+  async function handleSaveAppSettings(): Promise<void> {
     setBusy(true);
     setError('');
     try {
       const response = await apiRequest<AppSettings>('/api/sim/settings', {
         method: 'POST',
-        body: { turnSteerEnabled: enabled },
+        body: {
+          turnSteerEnabled: turnSteerDraft,
+          defaultWorkspaceRoot: normalizedDefaultWorkspaceRootDraft,
+        },
       });
-      setAppSettings({ turnSteerEnabled: !!response.turnSteerEnabled });
+      const normalizedWorkspaceRoot = response.defaultWorkspaceRoot?.trim() || null;
+      setAppSettings({
+        turnSteerEnabled: !!response.turnSteerEnabled,
+        defaultWorkspaceRoot: normalizedWorkspaceRoot,
+      });
+      setTurnSteerDraft(!!response.turnSteerEnabled);
+      setDefaultWorkspaceRootInput(normalizedWorkspaceRoot ?? '');
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
@@ -810,7 +876,7 @@ export default function HomePage() {
   }
 
   async function handleCreateProject(): Promise<boolean> {
-    if (!newProjectName.trim() || !newProjectRepoPath.trim()) {
+    if (!newProjectName.trim()) {
       return false;
     }
 
@@ -821,7 +887,7 @@ export default function HomePage() {
         method: 'POST',
         body: {
           name: newProjectName.trim(),
-          repoPath: newProjectRepoPath.trim(),
+          ...(newProjectRepoPath.trim() ? { repoPath: newProjectRepoPath.trim() } : {}),
           ...(newProjectDefaultModel.trim() ? { defaultModel: newProjectDefaultModel.trim() } : {}),
           ...(newProjectDefaultSandbox.trim() ? { defaultSandbox: newProjectDefaultSandbox.trim() } : {}),
           ...(newProjectDefaultApprovalPolicy.trim()
@@ -1258,6 +1324,33 @@ export default function HomePage() {
     }
   }
 
+  async function handleUpdateProjectConfigFromPanel(): Promise<void> {
+    if (!selectedProjectId || !projectConfigName.trim()) {
+      return;
+    }
+
+    setBusy(true);
+    setError('');
+    try {
+      await apiRequest<Project>(`/api/sim/projects/${selectedProjectId}`, {
+        method: 'PATCH',
+        body: {
+          name: projectConfigName.trim(),
+          repoPath: projectConfigRepoPath.trim() || null,
+          defaultModel: projectConfigDefaultModel.trim() || null,
+          defaultSandbox: projectConfigDefaultSandbox.trim() || null,
+          defaultApprovalPolicy: projectConfigDefaultApprovalPolicy.trim() || null,
+        },
+      });
+      await loadProjects();
+      closeActionPanel();
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function openActionPanel(mode: ActionPanelMode): void {
     setActionPanelMode(mode);
   }
@@ -1267,6 +1360,7 @@ export default function HomePage() {
     setManagedUserRoleDraft(user.role);
     setManagedUserActiveDraft(user.isActive);
     setManagedUserPasswordDraft('');
+    setManagedUserDefaultWorkspaceRootDraft(user.defaultWorkspaceRoot ?? '');
     openActionPanel('manageUser');
   }
 
@@ -1276,7 +1370,18 @@ export default function HomePage() {
     setNewManagedUserPassword('');
     setNewManagedUserRole('user');
     setNewManagedUserIsActive(true);
+    setNewManagedUserDefaultWorkspaceRoot('');
     openActionPanel('createUser');
+  }
+
+  function openProjectConfigPanel(project: Project): void {
+    setSelectedProjectId(project.id);
+    setProjectConfigName(project.name);
+    setProjectConfigRepoPath(project.repoPath ?? '');
+    setProjectConfigDefaultModel(project.defaultModel ?? '');
+    setProjectConfigDefaultSandbox(project.defaultSandbox ?? '');
+    setProjectConfigDefaultApprovalPolicy(project.defaultApprovalPolicy ?? '');
+    openActionPanel('projectConfig');
   }
 
   function handleLeftSidebarButtonClick(): void {
@@ -1337,13 +1442,19 @@ export default function HomePage() {
     setSessionDeleteTarget(null);
     setManagedUserTarget(null);
     setManagedUserPasswordDraft('');
+    setManagedUserDefaultWorkspaceRootDraft('');
+    setProjectConfigName('');
+    setProjectConfigRepoPath('');
+    setProjectConfigDefaultModel('');
+    setProjectConfigDefaultSandbox('');
+    setProjectConfigDefaultApprovalPolicy('');
   }
 
   async function handleApplyManagedUserFromPanel(): Promise<void> {
     if (!managedUserTarget) {
       return;
     }
-    const patch: Partial<Pick<AdminManagedUser, 'role' | 'isActive'>> & { password?: string } = {};
+    const patch: Partial<Pick<AdminManagedUser, 'role' | 'isActive' | 'defaultWorkspaceRoot'>> & { password?: string } = {};
     if (managedUserRoleDraft !== managedUserTarget.role) {
       patch.role = managedUserRoleDraft;
     }
@@ -1352,6 +1463,9 @@ export default function HomePage() {
     }
     if (managedUserPasswordDraft.trim()) {
       patch.password = managedUserPasswordDraft.trim();
+    }
+    if ((managedUserDefaultWorkspaceRootDraft.trim() || null) !== (managedUserTarget.defaultWorkspaceRoot ?? null)) {
+      patch.defaultWorkspaceRoot = managedUserDefaultWorkspaceRootDraft.trim() || null;
     }
     if (Object.keys(patch).length === 0) {
       closeActionPanel();
@@ -1521,7 +1635,9 @@ export default function HomePage() {
                       </datalist>
                     )}
                     <span className="sim-input-hint">
-                      {workspaceSuggestionBusy ? 'Loading suggestions…' : 'Directory suggestions by prefix.'}
+                      {workspaceSuggestionBusy
+                        ? 'Loading suggestions…'
+                        : 'Directory suggestions by prefix. Leave empty to auto-create under your default workspace root.'}
                     </span>
                   </label>
                   <label>
@@ -1639,10 +1755,107 @@ export default function HomePage() {
               {actionPanelMode === 'projectConfig' ? (
                 <div className="action-panel-body">
                   <h3>Project Config</h3>
-                  <p className="sim-subtitle">Project config UI shell is ready. API wiring comes in next step.</p>
-                  <button type="button" className="button-secondary" onClick={() => closeActionPanel()}>
-                    Close
-                  </button>
+                  <label>
+                    Name
+                    <input value={projectConfigName} onChange={(event) => setProjectConfigName(event.target.value)} />
+                  </label>
+                  <label>
+                    Workspace Path
+                    <div className="path-input-wrap">
+                      <input
+                        value={projectConfigRepoPath}
+                        onFocus={() => setProjectPathInputFocused(true)}
+                        onChange={(event) => setProjectConfigRepoPath(event.target.value)}
+                        onBlur={(event) => {
+                          setProjectConfigRepoPath(
+                            applyDirectorySuggestionSelection(event.target.value, workspaceSuggestions),
+                          );
+                          setProjectPathInputFocused(false);
+                        }}
+                        list={disableNativePathDatalist ? undefined : WORKSPACE_SUGGESTIONS_LIST_ID}
+                      />
+                      {disableNativePathDatalist && projectPathInputFocused && workspaceSuggestions.length > 0 ? (
+                        <div className="path-suggestions">
+                          {workspaceSuggestions.map((suggestion) => (
+                            <button
+                              key={suggestion}
+                              type="button"
+                              className="path-suggestion-item"
+                              onPointerDown={(event) => event.preventDefault()}
+                              onClick={() => {
+                                setProjectConfigRepoPath(ensureTrailingSlash(suggestion));
+                                setProjectPathInputFocused(true);
+                              }}
+                            >
+                              {suggestion}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                    {disableNativePathDatalist ? null : (
+                      <datalist id={WORKSPACE_SUGGESTIONS_LIST_ID}>
+                        {workspaceSuggestions.map((suggestion) => (
+                          <option key={suggestion} value={suggestion} />
+                        ))}
+                      </datalist>
+                    )}
+                    <span className="sim-input-hint">
+                      {workspaceSuggestionBusy ? 'Loading suggestions…' : 'Directory suggestions by prefix.'}
+                    </span>
+                  </label>
+                  <label>
+                    Default Model
+                    <select
+                      value={projectConfigDefaultModel}
+                      onChange={(event) => setProjectConfigDefaultModel(event.target.value)}
+                    >
+                      <option value="">Use runner default</option>
+                      {availableModels.map((model) => (
+                        <option key={model.id} value={model.model}>
+                          {model.displayName}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Default Sandbox
+                    <select
+                      value={projectConfigDefaultSandbox}
+                      onChange={(event) => setProjectConfigDefaultSandbox(event.target.value)}
+                    >
+                      {SANDBOX_OPTIONS.map((option) => (
+                        <option key={`project-config-sandbox-${option.value || 'default'}`} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Default Approval Policy
+                    <select
+                      value={projectConfigDefaultApprovalPolicy}
+                      onChange={(event) => setProjectConfigDefaultApprovalPolicy(event.target.value)}
+                    >
+                      {APPROVAL_POLICY_OPTIONS.map((option) => (
+                        <option key={`project-config-approval-${option.value || 'default'}`} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="sim-actions">
+                    <button
+                      type="button"
+                      onClick={() => void handleUpdateProjectConfigFromPanel()}
+                      disabled={busy || !projectConfigName.trim()}
+                    >
+                      Save
+                    </button>
+                    <button type="button" className="button-secondary" onClick={() => closeActionPanel()}>
+                      Cancel
+                    </button>
+                  </div>
                 </div>
               ) : null}
               {actionPanelMode === 'createUser' ? (
@@ -1661,6 +1874,14 @@ export default function HomePage() {
                     <input
                       value={newManagedUserDisplayName}
                       onChange={(event) => setNewManagedUserDisplayName(event.target.value)}
+                      placeholder="Optional"
+                    />
+                  </label>
+                  <label>
+                    Default Workspace Root
+                    <input
+                      value={newManagedUserDefaultWorkspaceRoot}
+                      onChange={(event) => setNewManagedUserDefaultWorkspaceRoot(event.target.value)}
                       placeholder="Optional"
                     />
                   </label>
@@ -1684,7 +1905,7 @@ export default function HomePage() {
                         <option value="admin">admin</option>
                       </select>
                     </label>
-                    <label>
+                    <label className="inline-checkbox">
                       Active
                       <input
                         type="checkbox"
@@ -1726,7 +1947,7 @@ export default function HomePage() {
                       <option value="admin">admin</option>
                     </select>
                   </label>
-                  <label>
+                  <label className="inline-checkbox">
                     Active
                     <input
                       type="checkbox"
@@ -1741,6 +1962,14 @@ export default function HomePage() {
                       value={managedUserPasswordDraft}
                       onChange={(event) => setManagedUserPasswordDraft(event.target.value)}
                       placeholder="Leave empty to keep unchanged"
+                    />
+                  </label>
+                  <label>
+                    Default Workspace Root
+                    <input
+                      value={managedUserDefaultWorkspaceRootDraft}
+                      onChange={(event) => setManagedUserDefaultWorkspaceRootDraft(event.target.value)}
+                      placeholder="Optional"
                     />
                   </label>
                   <div className="sim-actions">
@@ -1897,8 +2126,7 @@ export default function HomePage() {
                                     aria-label="Project Config"
                                     onClick={(event) => {
                                       event.stopPropagation();
-                                      setSelectedProjectId(project.id);
-                                      openActionPanel('projectConfig');
+                                      openProjectConfigPanel(project);
                                     }}
                                   >
                                     <Settings />
@@ -1977,15 +2205,31 @@ export default function HomePage() {
                       <div className="left-config-panel">
                         <h2>Config</h2>
                         <p>Signed in as: <strong>{currentUserEmail}</strong></p>
-                        <label>
+                        <label className="inline-checkbox">
                           <span>Turn Steering</span>
                           <input
                             type="checkbox"
-                            checked={appSettings.turnSteerEnabled}
-                            onChange={(event) => void handleTurnSteerToggle(event.target.checked)}
+                            checked={turnSteerDraft}
+                            onChange={(event) => setTurnSteerDraft(event.target.checked)}
                             disabled={busy}
                           />
                         </label>
+                        <label>
+                          Default Workspace Root
+                          <input
+                            value={defaultWorkspaceRootInput}
+                            onChange={(event) => setDefaultWorkspaceRootInput(event.target.value)}
+                            placeholder="$HOME/AgentWaypoint/workspaces"
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          className="button-secondary"
+                          onClick={() => void handleSaveAppSettings()}
+                          disabled={busy || !appSettingsDirty}
+                        >
+                          Save Settings
+                        </button>
                         <button type="button" className="button-secondary" onClick={() => void handleLogout()} disabled={busy}>
                           Sign Out
                         </button>
@@ -2183,78 +2427,106 @@ export default function HomePage() {
                     Events
                   </button>
                 </div>
-                {insightsTab === 'diff' ? (
-                  <article className="sim-output">
-                    <h3>Diff Summary</h3>
-                    {diffSummaries.length === 0 ? <pre>No diff updates yet.</pre> : null}
-                    {renderedDiffs.length > 0 ? (
-                      <div className="diff-list">
-                        {renderedDiffs.map((diff, diffIndex) => (
-                          <section key={diff.id} className="diff-block">
-                            <div className="diff-block-head">Diff #{diffIndex + 1}</div>
-                            {diff.files.length === 0 ? <pre>{diff.rawDiff}</pre> : null}
-                            {diff.files.length > 0 ? (
-                              <div className="diff-rdv-shell">
-                                {diff.files.map((file, fileIndex) => (
-                                  <Diff
-                                    key={`diff-${diff.id}-file-${fileIndex}`}
-                                    viewType="unified"
-                                    diffType={file.type}
-                                    hunks={file.hunks}
-                                  >
-                                    {(hunks) => hunks.map((hunk, hunkIndex) => <Hunk key={hunkIndex} hunk={hunk} />)}
-                                  </Diff>
-                                ))}
-                              </div>
-                            ) : null}
-                          </section>
-                        ))}
-                      </div>
-                    ) : null}
-                  </article>
-                ) : null}
-                {insightsTab === 'tools' ? (
-                  <article className="sim-output">
-                    <h3>Tool Output</h3>
-                    <pre>{toolOutput || 'No tool output yet.'}</pre>
-                  </article>
-                ) : null}
-                {insightsTab === 'reasoning' ? (
-                  <>
+                <div className="insights-content">
+                  {insightsTab === 'diff' ? (
                     <article className="sim-output">
-                      <h3>Reasoning</h3>
-                      <pre>{reasoningText || 'No reasoning deltas yet.'}</pre>
+                      <h3>Diff Summary</h3>
+                      {diffSummaries.length === 0 ? <pre>No diff updates yet.</pre> : null}
+                      {renderedDiffs.length > 0 ? (
+                        <div className="diff-list">
+                          {renderedDiffs.map((diff, diffIndex) => (
+                            <section key={diff.id} className="diff-block">
+                              <div className="diff-block-head">Diff #{diffIndex + 1}</div>
+                              {diff.files.length === 0 ? <pre>{diff.rawDiff}</pre> : null}
+                              {diff.files.length > 0 ? (
+                                <div className="diff-rdv-shell">
+                                  {diff.files.map((file, fileIndex) => (
+                                    <Diff
+                                      key={`diff-${diff.id}-file-${fileIndex}`}
+                                      viewType="unified"
+                                      diffType={file.type}
+                                      hunks={file.hunks}
+                                    >
+                                      {(hunks) => hunks.map((hunk, hunkIndex) => <Hunk key={hunkIndex} hunk={hunk} />)}
+                                    </Diff>
+                                  ))}
+                                </div>
+                              ) : null}
+                            </section>
+                          ))}
+                        </div>
+                      ) : null}
                     </article>
+                  ) : null}
+                  {insightsTab === 'tools' ? (
                     <article className="sim-output">
-                      <h3>Latest Plan</h3>
-                      <pre>{latestPlan || 'No plan updates yet.'}</pre>
+                      <h3>Tool Output</h3>
+                      <pre>{toolOutput || 'No tool output yet.'}</pre>
                     </article>
-                  </>
-                ) : null}
-                {insightsTab === 'events' ? (
-                  <>
-                    <article className="sim-events">
-                      <h3>Event Timeline</h3>
-                      <ul>
-                        {eventLog.length === 0 ? <li>No events yet.</li> : null}
-                        {eventLog.map((entry, index) => (
-                          <li key={`${entry}-${index}`}>{entry}</li>
-                        ))}
-                      </ul>
+                  ) : null}
+                  {insightsTab === 'reasoning' ? (
+                    <>
+                      <article className="sim-output">
+                        <h3>Reasoning</h3>
+                        <pre>{reasoningText || 'No reasoning deltas yet.'}</pre>
+                      </article>
+                      <article className="sim-output">
+                        <h3>Latest Plan</h3>
+                        <pre>{latestPlan || 'No plan updates yet.'}</pre>
+                      </article>
+                    </>
+                  ) : null}
+                  {insightsTab === 'events' ? (
+                    <>
+                      <article className="sim-events">
+                        <h3>Event Timeline</h3>
+                        <ul>
+                          {eventLog.length === 0 ? <li>No events yet.</li> : null}
+                          {eventLog.map((entry, index) => (
+                            <li key={`${entry}-${index}`}>{entry}</li>
+                          ))}
+                        </ul>
+                      </article>
+                      <article className="sim-events">
+                        <h3>Turn History</h3>
+                        <ul>
+                          {turns.length === 0 ? <li>No turns yet.</li> : null}
+                          {turns.map((turn) => (
+                            <li key={turn.id}>
+                              <strong>{turn.status}</strong> {turn.id}
+                            </li>
+                          ))}
+                        </ul>
+                      </article>
+                    </>
+                  ) : null}
+                </div>
+                <div className={`session-info-wrap ${sessionInfoOpen ? 'open' : 'closed'}`}>
+                  {sessionInfoOpen ? (
+                    <article className="session-info-card">
+                      <h3>Current Session</h3>
+                      <dl>
+                        <dt>Workspace</dt>
+                        <dd>{resolvedSessionInfo.workspace}</dd>
+                        <dt>Model</dt>
+                        <dd>{resolvedSessionInfo.model}</dd>
+                        <dt>Approval</dt>
+                        <dd>{resolvedSessionInfo.approval}</dd>
+                        <dt>Sandbox</dt>
+                        <dd>{resolvedSessionInfo.sandbox}</dd>
+                      </dl>
                     </article>
-                    <article className="sim-events">
-                      <h3>Turn History</h3>
-                      <ul>
-                        {turns.length === 0 ? <li>No turns yet.</li> : null}
-                        {turns.map((turn) => (
-                          <li key={turn.id}>
-                            <strong>{turn.status}</strong> {turn.id}
-                          </li>
-                        ))}
-                      </ul>
-                    </article>
-                  </>
-                ) : null}
+                  ) : null}
+                  <button
+                    type="button"
+                    className="icon-button session-info-toggle"
+                    onClick={() => setSessionInfoOpen((current) => !current)}
+                    aria-label={sessionInfoOpen ? 'Hide current session info' : 'Show current session info'}
+                    title={sessionInfoOpen ? 'Hide current session info' : 'Show current session info'}
+                  >
+                    <Info />
+                  </button>
+                </div>
               </aside>
             ) : null}
           </div>
