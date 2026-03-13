@@ -355,13 +355,65 @@ body {
   font-size: 0.76rem;
 }
 
-.chat-message pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: inherit;
+.chat-markdown {
   font-size: 0.87rem;
-  line-height: 1.35;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.chat-markdown > :first-child {
+  margin-top: 0;
+}
+
+.chat-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.chat-markdown p,
+.chat-markdown ul,
+.chat-markdown ol,
+.chat-markdown pre,
+.chat-markdown blockquote {
+  margin: 0.4rem 0;
+}
+
+.chat-markdown ul,
+.chat-markdown ol {
+  padding-left: 1.25rem;
+}
+
+.chat-markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: 0.82rem;
+  background: color-mix(in srgb, #0f1725 78%, #ffffff 22%);
+  border: 1px solid color-mix(in srgb, var(--line) 84%, #ffffff 16%);
+  border-radius: 6px;
+  padding: 0.08rem 0.3rem;
+}
+
+.chat-markdown pre {
+  overflow: auto;
+  background: color-mix(in srgb, #0f1725 86%, #ffffff 14%);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.5rem 0.6rem;
+}
+
+.chat-markdown pre code {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+}
+
+.chat-markdown a {
+  color: #7bc4ff;
+}
+
+.chat-markdown blockquote {
+  border-left: 3px solid color-mix(in srgb, var(--line) 76%, #ffffff 24%);
+  padding-left: 0.65rem;
+  color: var(--text-muted);
 }
 
 .chat-composer {

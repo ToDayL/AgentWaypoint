@@ -19,6 +19,8 @@ import {
   UserCog,
 } from 'lucide-react';
 import { Diff, Hunk, parseDiff } from 'react-diff-view';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 type Project = {
   id: string;
@@ -212,7 +214,8 @@ const STREAM_EVENTS = [
   'turn.failed',
   'turn.cancelled',
 ];
-  const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+const CHAT_MARKDOWN_REMARK_PLUGINS = [remarkGfm];
 const WORKSPACE_SUGGESTIONS_LIST_ID = 'workspace-path-suggestions';
 const SESSION_CWD_SUGGESTIONS_LIST_ID = 'session-cwd-path-suggestions';
 type LeftSidebarTab = 'explorer' | 'config';
@@ -2353,7 +2356,9 @@ export default function HomePage() {
                         </div>
                       ) : null}
                     </header>
-                    <pre>{message.content}</pre>
+                    <div className="chat-markdown">
+                      <ReactMarkdown remarkPlugins={CHAT_MARKDOWN_REMARK_PLUGINS}>{message.content}</ReactMarkdown>
+                    </div>
                   </article>
                 ))}
               </div>
