@@ -1,7 +1,7 @@
-import { Body, Controller, Get, Inject, Post, Req, Res } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import { parseWithZod } from '../../common/validation/zod';
 import { AuthService, readSessionCookieName } from './auth.service';
-import { PasswordLoginBodySchema } from './auth.schemas';
+import { PasswordChangeBodySchema, PasswordLoginBodySchema } from './auth.schemas';
 import { AuthenticatedRequest } from './auth.types';
 
 type ReplyLike = {
@@ -34,6 +34,18 @@ export class AuthController {
   async logout(@Req() request: AuthenticatedRequest, @Res({ passthrough: true }) reply: ReplyLike) {
     await this.authService.revokeSessionFromRequest(request);
     clearSessionCookie(reply);
+    return { success: true };
+  }
+
+  @Post('/password/change')
+  async changePassword(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
+    const input = parseWithZod(PasswordChangeBodySchema, body);
+    const session = await this.authService.getAuthenticatedSession(request);
+    if (!session || session.principal.type !== 'user') {
+      throw new UnauthorizedException({ message: 'Authentication required' });
+    }
+
+    await this.authService.changePassword(session.principal.userId, input.currentPassword, input.newPassword);
     return { success: true };
   }
 

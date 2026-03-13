@@ -124,6 +124,32 @@ export class AuthService {
     return hashPassword(password);
   }
 
+  async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+    });
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException({ message: 'Authentication required' });
+    }
+    if (!user.passwordHash?.trim()) {
+      throw new UnauthorizedException({ message: 'Password login is not available for this account' });
+    }
+    if (!isPasswordLoginAllowed(user.authPolicy)) {
+      throw new ForbiddenException({ message: 'Password login is disabled for this account' });
+    }
+
+    const currentPasswordValid = await verifyPassword(currentPassword, user.passwordHash);
+    if (!currentPasswordValid) {
+      throw new UnauthorizedException({ message: 'Current password is incorrect' });
+    }
+
+    const nextPasswordHash = await hashPassword(newPassword);
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash: nextPasswordHash },
+    });
+  }
+
   private async resolveSessionPrincipal(request: AuthenticatedRequest): Promise<RequestPrincipal | null> {
     const token = readSessionTokenFromRequest(request);
     if (!token) {

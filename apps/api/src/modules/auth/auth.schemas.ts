@@ -6,3 +6,10 @@ export const PasswordLoginBodySchema = z.object({
 });
 
 export type PasswordLoginBody = z.infer<typeof PasswordLoginBodySchema>;
+
+export const PasswordChangeBodySchema = z.object({
+  currentPassword: z.string().min(8).max(512),
+  newPassword: z.string().min(8).max(512),
+});
+
+export type PasswordChangeBody = z.infer<typeof PasswordChangeBodySchema>;
