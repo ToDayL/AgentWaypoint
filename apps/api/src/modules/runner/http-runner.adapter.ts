@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import {
   AvailableModel,
   CancelTurnInput,
+  CloseThreadInput,
   EnsureDirectoryInput,
   EnsureDirectoryResult,
   ForkThreadInput,
@@ -220,6 +221,16 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       throw new Error('Runner fork thread response did not include threadId');
     }
     return { threadId };
+  }
+
+  async closeThread(input: CloseThreadInput): Promise<void> {
+    await this.request({
+      method: 'POST',
+      path: '/runner/threads/close',
+      body: {
+        threadId: input.threadId,
+      },
+    });
   }
 
   async ensureDirectory(input: EnsureDirectoryInput): Promise<EnsureDirectoryResult> {

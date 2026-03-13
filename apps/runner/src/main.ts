@@ -7,6 +7,7 @@ import type {
   ActiveTurn,
   BufferedRunnerEvent,
   CancelTurnBody,
+  CloseThreadBody,
   EnsureDirectoryBody,
   ForkThreadBody,
   ModelListItem,
@@ -212,6 +213,21 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (pathname === '/runner/threads/close') {
+      const payload = parseCloseThreadBody(await readJsonBody(request));
+
+      if (runnerBackend === 'mock') {
+        response.statusCode = 204;
+        response.end();
+        return;
+      }
+
+      await codexBackend.closeThread(payload);
+      response.statusCode = 204;
+      response.end();
+      return;
+    }
+
     if (pathname === '/runner/turns/steer') {
       const payload = parseSteerTurnBody(await readJsonBody(request));
       const turn = activeTurns.get(payload.turnId);
@@ -352,6 +368,16 @@ function parseEnsureDirectoryBody(input: unknown): EnsureDirectoryBody {
   const record = input as Record<string, unknown>;
   return {
     path: readNonEmptyString(record.path, 'path'),
+  };
+}
+
+function parseCloseThreadBody(input: unknown): CloseThreadBody {
+  if (!input || typeof input !== 'object') {
+    throw new Error('Invalid close-thread payload');
+  }
+  const record = input as Record<string, unknown>;
+  return {
+    threadId: readNonEmptyString(record.threadId, 'threadId'),
   };
 }
 

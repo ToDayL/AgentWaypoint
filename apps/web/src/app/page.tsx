@@ -183,6 +183,16 @@ const STREAM_EVENTS = [
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const WORKSPACE_SUGGESTIONS_LIST_ID = 'workspace-path-suggestions';
 const SESSION_CWD_SUGGESTIONS_LIST_ID = 'session-cwd-path-suggestions';
+type LeftSidebarTab = 'explorer' | 'user' | 'admin';
+type InsightsTab = 'diff' | 'tools' | 'reasoning' | 'events';
+type ActionPanelMode =
+  | 'closed'
+  | 'menu'
+  | 'createProject'
+  | 'createSession'
+  | 'projectConfig'
+  | 'confirmDeleteProject'
+  | 'confirmDeleteSession';
 
 export default function HomePage() {
   const [mounted, setMounted] = useState(false);
@@ -190,6 +200,7 @@ export default function HomePage() {
   const [authPassword, setAuthPassword] = useState('');
   const [authenticated, setAuthenticated] = useState(false);
   const [currentUserEmail, setCurrentUserEmail] = useState('');
+  const [currentUserRole, setCurrentUserRole] = useState<'admin' | 'user'>('user');
   const [projects, setProjects] = useState<Project[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
@@ -223,6 +234,12 @@ export default function HomePage() {
   const [resumedTurnHint, setResumedTurnHint] = useState('');
   const [turnStatus, setTurnStatus] = useState('idle');
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  const [leftSidebarTab, setLeftSidebarTab] = useState<LeftSidebarTab>('explorer');
+  const [insightsOpen, setInsightsOpen] = useState(true);
+  const [insightsTab, setInsightsTab] = useState<InsightsTab>('diff');
+  const [actionPanelMode, setActionPanelMode] = useState<ActionPanelMode>('closed');
+  const [projectDeleteTarget, setProjectDeleteTarget] = useState<Project | null>(null);
+  const [sessionDeleteTarget, setSessionDeleteTarget] = useState<Session | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -239,6 +256,7 @@ export default function HomePage() {
     () => sessions.find((item) => item.id === selectedSessionId),
     [sessions, selectedSessionId],
   );
+  const isAdmin = currentUserRole === 'admin';
 
   useEffect(() => {
     return () => {
@@ -354,6 +372,7 @@ export default function HomePage() {
       if (response.authenticated) {
         setAuthenticated(true);
         setCurrentUserEmail(response.principal.email);
+        setCurrentUserRole(response.principal.role);
         await loadAppSettings();
         await loadAvailableModels();
         await loadProjects();
@@ -361,9 +380,11 @@ export default function HomePage() {
       }
       setAuthenticated(false);
       setCurrentUserEmail('');
+      setCurrentUserRole('user');
     } catch {
       setAuthenticated(false);
       setCurrentUserEmail('');
+      setCurrentUserRole('user');
     }
   }
 
@@ -387,6 +408,7 @@ export default function HomePage() {
       setError(extractMessage(requestError));
       setAuthenticated(false);
       setCurrentUserEmail('');
+      setCurrentUserRole('user');
     } finally {
       setBusy(false);
     }
@@ -461,7 +483,7 @@ export default function HomePage() {
     );
   }
 
-  async function loadProjects(): Promise<void> {
+  async function loadProjects(options?: { forceSelectFirst?: boolean }): Promise<void> {
     setBusy(true);
     setError('');
     try {
@@ -469,9 +491,16 @@ export default function HomePage() {
         method: 'GET',
       })) as Project[];
       setProjects(items);
-      if (!selectedProjectId && items[0]) {
+      const hasSelectedProject = items.some((item) => item.id === selectedProjectId);
+      const shouldSelectFirst =
+        options?.forceSelectFirst === true || !selectedProjectId || !hasSelectedProject;
+
+      if (shouldSelectFirst && items[0]) {
         setSelectedProjectId(items[0].id);
         await loadSessions(items[0].id);
+      } else if (shouldSelectFirst) {
+        setSessions([]);
+        setSelectedSessionId('');
       }
     } catch (requestError) {
       setError(extractMessage(requestError));
@@ -534,9 +563,9 @@ export default function HomePage() {
     }
   }
 
-  async function handleCreateProject(): Promise<void> {
+  async function handleCreateProject(): Promise<boolean> {
     if (!newProjectName.trim() || !newProjectRepoPath.trim()) {
-      return;
+      return false;
     }
 
     setBusy(true);
@@ -557,16 +586,18 @@ export default function HomePage() {
       await loadProjects();
       setSelectedProjectId(created.id);
       await loadSessions(created.id);
+      return true;
     } catch (requestError) {
       setError(extractMessage(requestError));
+      return false;
     } finally {
       setBusy(false);
     }
   }
 
-  async function handleCreateSession(): Promise<void> {
+  async function handleCreateSession(): Promise<boolean> {
     if (!selectedProjectId || !newSessionTitle.trim()) {
-      return;
+      return false;
     }
 
     setBusy(true);
@@ -587,8 +618,10 @@ export default function HomePage() {
       await loadSessions(selectedProjectId);
       setSelectedSessionId(created.id);
       await loadSessionHistory(created.id, { resumeStream: true, resetEventLog: true });
+      return true;
     } catch (requestError) {
       setError(extractMessage(requestError));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -916,22 +949,243 @@ export default function HomePage() {
     }, 1200);
   }
 
+  async function handleCreateProjectFromPanel(): Promise<void> {
+    const created = await handleCreateProject();
+    if (created) {
+      setActionPanelMode('closed');
+    }
+  }
+
+  async function handleCreateSessionFromPanel(): Promise<void> {
+    const created = await handleCreateSession();
+    if (created) {
+      setActionPanelMode('closed');
+    }
+  }
+
+  function requestProjectDelete(project: Project): void {
+    setProjectDeleteTarget(project);
+    setSessionDeleteTarget(null);
+    setActionPanelMode('confirmDeleteProject');
+  }
+
+  function requestSessionDelete(session: Session): void {
+    setSessionDeleteTarget(session);
+    setProjectDeleteTarget(null);
+    setActionPanelMode('confirmDeleteSession');
+  }
+
+  function closeActionPanel(): void {
+    setActionPanelMode('closed');
+    setProjectDeleteTarget(null);
+    setSessionDeleteTarget(null);
+  }
+
+  async function handleConfirmDelete(): Promise<void> {
+    setBusy(true);
+    setError('');
+    try {
+      if (actionPanelMode === 'confirmDeleteProject' && projectDeleteTarget) {
+        const deletingSelectedProject = selectedProjectId === projectDeleteTarget.id;
+        await apiRequest(`/api/sim/projects/${projectDeleteTarget.id}`, {
+          method: 'DELETE',
+        });
+        if (deletingSelectedProject) {
+          setSelectedProjectId('');
+          setSelectedSessionId('');
+        }
+        await loadProjects({ forceSelectFirst: deletingSelectedProject });
+      }
+      if (actionPanelMode === 'confirmDeleteSession' && sessionDeleteTarget) {
+        if (!selectedProjectId) {
+          throw new Error('No project selected');
+        }
+        const deletingSelectedSession = selectedSessionId === sessionDeleteTarget.id;
+        await apiRequest(`/api/sim/sessions/${sessionDeleteTarget.id}`, {
+          method: 'DELETE',
+        });
+        if (deletingSelectedSession) {
+          setSelectedSessionId('');
+        }
+        await loadSessions(selectedProjectId);
+      }
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    } finally {
+      setBusy(false);
+      closeActionPanel();
+    }
+  }
+
   return (
     <main className="sim-shell">
       <section className="sim-panel">
-        <header className="sim-header">
-          <p className="sim-kicker">AgentWaypoint Simulation</p>
-          <h1>Web Interface MVP</h1>
-          <p className="sim-subtitle">
-            {authenticated
-              ? 'Project/session setup + mock turn streaming through the real API surface.'
-              : 'Sign in to access projects, sessions, and turn execution.'}
-          </p>
+        <header className="sim-header shell-header">
+          <div>
+            <p className="sim-kicker">AgentWaypoint</p>
+            <h1>Production UI Refactor</h1>
+            <p className="sim-subtitle">
+              {authenticated
+                ? 'Left explorer + center chat + toggleable right insights.'
+                : 'Sign in to access project and session workspace.'}
+            </p>
+          </div>
+          {authenticated ? (
+            <div className="header-actions">
+              <button type="button" className="button-secondary" onClick={() => setInsightsOpen((value) => !value)}>
+                {insightsOpen ? 'Hide Insights' : 'Show Insights'}
+              </button>
+            </div>
+          ) : null}
+          {authenticated ? (
+            <div className="action-anchor">
+              <button type="button" className="action-plus" onClick={() => setActionPanelMode('menu')}>
+                +
+              </button>
+            </div>
+          ) : null}
+          {authenticated && actionPanelMode !== 'closed' ? (
+            <div className="action-panel">
+              {actionPanelMode === 'menu' ? (
+                <div className="action-panel-body">
+                  <h3>Actions</h3>
+                  <button type="button" onClick={() => setActionPanelMode('createProject')}>
+                    Create Project
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActionPanelMode('createSession')}
+                    disabled={!selectedProjectId}
+                  >
+                    Create Session
+                  </button>
+                  <button type="button" className="button-secondary" onClick={() => closeActionPanel()}>
+                    Close
+                  </button>
+                </div>
+              ) : null}
+              {actionPanelMode === 'createProject' ? (
+                <div className="action-panel-body">
+                  <h3>Create Project</h3>
+                  <label>
+                    Name
+                    <input value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} />
+                  </label>
+                  <label>
+                    Workspace Path
+                    <input
+                      value={newProjectRepoPath}
+                      onChange={(event) =>
+                        setNewProjectRepoPath(
+                          applyDirectorySuggestionSelection(event.target.value, workspaceSuggestions),
+                        )
+                      }
+                      list={WORKSPACE_SUGGESTIONS_LIST_ID}
+                    />
+                    <datalist id={WORKSPACE_SUGGESTIONS_LIST_ID}>
+                      {workspaceSuggestions.map((suggestion) => (
+                        <option key={suggestion} value={suggestion} />
+                      ))}
+                    </datalist>
+                    <span className="sim-input-hint">
+                      {workspaceSuggestionBusy ? 'Loading suggestions…' : 'Directory suggestions by prefix.'}
+                    </span>
+                  </label>
+                  <label>
+                    Default Model
+                    <select
+                      value={newProjectDefaultModel}
+                      onChange={(event) => setNewProjectDefaultModel(event.target.value)}
+                    >
+                      <option value="">Use runner default</option>
+                      {availableModels.map((model) => (
+                        <option key={model.id} value={model.model}>
+                          {model.displayName}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="sim-actions">
+                    <button type="button" onClick={() => void handleCreateProjectFromPanel()} disabled={busy}>
+                      Create
+                    </button>
+                    <button type="button" className="button-secondary" onClick={() => closeActionPanel()}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {actionPanelMode === 'createSession' ? (
+                <div className="action-panel-body">
+                  <h3>Create Session</h3>
+                  <label>
+                    Title
+                    <input value={newSessionTitle} onChange={(event) => setNewSessionTitle(event.target.value)} />
+                  </label>
+                  <label>
+                    CWD Override
+                    <input
+                      value={newSessionCwdOverride}
+                      onChange={(event) =>
+                        setNewSessionCwdOverride(
+                          applyDirectorySuggestionSelection(event.target.value, sessionCwdSuggestions),
+                        )
+                      }
+                      list={SESSION_CWD_SUGGESTIONS_LIST_ID}
+                    />
+                    <datalist id={SESSION_CWD_SUGGESTIONS_LIST_ID}>
+                      {sessionCwdSuggestions.map((suggestion) => (
+                        <option key={suggestion} value={suggestion} />
+                      ))}
+                    </datalist>
+                    <span className="sim-input-hint">
+                      {sessionCwdSuggestionBusy ? 'Loading suggestions…' : 'Directory suggestions by prefix.'}
+                    </span>
+                  </label>
+                  <div className="sim-actions">
+                    <button type="button" onClick={() => void handleCreateSessionFromPanel()} disabled={busy}>
+                      Create
+                    </button>
+                    <button type="button" className="button-secondary" onClick={() => closeActionPanel()}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {actionPanelMode === 'projectConfig' ? (
+                <div className="action-panel-body">
+                  <h3>Project Config</h3>
+                  <p className="sim-subtitle">Project config UI shell is ready. API wiring comes in next step.</p>
+                  <button type="button" className="button-secondary" onClick={() => closeActionPanel()}>
+                    Close
+                  </button>
+                </div>
+              ) : null}
+              {actionPanelMode === 'confirmDeleteProject' || actionPanelMode === 'confirmDeleteSession' ? (
+                <div className="action-panel-body">
+                  <h3>Confirm Delete</h3>
+                  <p>
+                    {actionPanelMode === 'confirmDeleteProject'
+                      ? `Delete project "${projectDeleteTarget?.name ?? '-'}"?`
+                      : `Delete session "${sessionDeleteTarget?.title ?? '-'}"?`}
+                  </p>
+                  <div className="sim-actions">
+                    <button type="button" onClick={() => void handleConfirmDelete()} disabled={busy}>
+                      Confirm Delete
+                    </button>
+                    <button type="button" className="button-secondary" onClick={() => closeActionPanel()}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </header>
 
         {!authenticated ? (
-          <div className="sim-grid">
-            <aside className="sim-card">
+          <section className="login-shell">
+            <article className="sim-card login-card">
               <h2>Sign In</h2>
               <label>
                 Email
@@ -953,419 +1207,304 @@ export default function HomePage() {
               <button type="button" onClick={() => void handleLogin()} disabled={busy || !authEmail.trim() || !authPassword}>
                 Sign In
               </button>
-            </aside>
-          </div>
+            </article>
+          </section>
         ) : null}
 
         {authenticated ? (
-        <>
-        <div className="sim-grid">
-          <aside className="sim-card">
-            <h2>Identity</h2>
-            <p>Signed in as: <strong>{currentUserEmail || '-'}</strong></p>
-            <label>
-              <span>Turn Steering (This User)</span>
-              <input
-                type="checkbox"
-                checked={appSettings.turnSteerEnabled}
-                onChange={(event) => void handleTurnSteerToggle(event.target.checked)}
-                disabled={busy}
-              />
-            </label>
-            <button type="button" onClick={() => void loadProjects()} disabled={busy}>
-              Refresh Projects
-            </button>
-            <button type="button" className="button-secondary" onClick={() => void handleLogout()} disabled={busy}>
-              Sign Out
-            </button>
-          </aside>
-
-          <aside className="sim-card">
-            <h2>Projects</h2>
-            <label>
-              New Project
-              <input
-                value={newProjectName}
-                onChange={(event) => setNewProjectName(event.target.value)}
-                placeholder="Project name"
-              />
-            </label>
-            <label>
-              Workspace Path
-              <input
-                value={newProjectRepoPath}
-                onChange={(event) =>
-                  setNewProjectRepoPath(applyDirectorySuggestionSelection(event.target.value, workspaceSuggestions))
-                }
-                placeholder="/absolute/path/to/repo"
-                list={WORKSPACE_SUGGESTIONS_LIST_ID}
-              />
-              <datalist id={WORKSPACE_SUGGESTIONS_LIST_ID}>
-                {workspaceSuggestions.map((suggestion) => (
-                  <option key={suggestion} value={suggestion} />
-                ))}
-              </datalist>
-              <span className="sim-input-hint">
-                {workspaceSuggestionBusy ? 'Loading suggestions…' : 'Type a path to see matching directories.'}
-              </span>
-            </label>
-            <label>
-              Default Model
-              <select
-                value={newProjectDefaultModel}
-                onChange={(event) => setNewProjectDefaultModel(event.target.value)}
-              >
-                <option value="">Use runner default</option>
-                {availableModels.map((model) => (
-                  <option key={model.id} value={model.model}>
-                    {model.displayName}
-                    {model.isDefault ? ' (Default)' : ''}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Default Sandbox
-              <select
-                value={newProjectDefaultSandbox}
-                onChange={(event) => setNewProjectDefaultSandbox(event.target.value)}
-              >
-                {SANDBOX_OPTIONS.map((option) => (
-                  <option key={`project-sandbox-${option.label}`} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Default Approval Policy
-              <select
-                value={newProjectDefaultApprovalPolicy}
-                onChange={(event) => setNewProjectDefaultApprovalPolicy(event.target.value)}
-              >
-                {APPROVAL_POLICY_OPTIONS.map((option) => (
-                  <option key={`project-approval-${option.label}`} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              type="button"
-              onClick={() => void handleCreateProject()}
-              disabled={busy || !newProjectName.trim() || !newProjectRepoPath.trim()}
-            >
-              Create Project
-            </button>
-            <label>
-              Current Project
-              <select
-                value={selectedProjectId}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  setSelectedProjectId(value);
-                  void loadSessions(value);
-                }}
-              >
-                <option value="">Select a project</option>
-                {projects.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </aside>
-
-          <aside className="sim-card">
-            <h2>Sessions</h2>
-            <label>
-              New Session
-              <input
-                value={newSessionTitle}
-                onChange={(event) => setNewSessionTitle(event.target.value)}
-                placeholder="Session title"
-              />
-            </label>
-            <label>
-              Session CWD Override
-              <input
-                value={newSessionCwdOverride}
-                onChange={(event) =>
-                  setNewSessionCwdOverride(applyDirectorySuggestionSelection(event.target.value, sessionCwdSuggestions))
-                }
-                placeholder="Leave blank to use project workspace"
-                list={SESSION_CWD_SUGGESTIONS_LIST_ID}
-              />
-              <datalist id={SESSION_CWD_SUGGESTIONS_LIST_ID}>
-                {sessionCwdSuggestions.map((suggestion) => (
-                  <option key={suggestion} value={suggestion} />
-                ))}
-              </datalist>
-              <span className="sim-input-hint">
-                {sessionCwdSuggestionBusy ? 'Loading suggestions…' : 'Type a path to see matching directories.'}
-              </span>
-            </label>
-            <label>
-              Model Override
-              <select
-                value={newSessionModelOverride}
-                onChange={(event) => setNewSessionModelOverride(event.target.value)}
-              >
-                <option value="">Use project default</option>
-                {availableModels.map((model) => (
-                  <option key={model.id} value={model.model}>
-                    {model.displayName}
-                    {model.isDefault ? ' (Default)' : ''}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Sandbox Override
-              <select
-                value={newSessionSandboxOverride}
-                onChange={(event) => setNewSessionSandboxOverride(event.target.value)}
-              >
-                {SANDBOX_OPTIONS.map((option) => (
-                  <option key={`session-sandbox-${option.label}`} value={option.value}>
-                    {option.value === '' ? 'Use project default' : option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Approval Policy Override
-              <select
-                value={newSessionApprovalPolicyOverride}
-                onChange={(event) => setNewSessionApprovalPolicyOverride(event.target.value)}
-              >
-                {APPROVAL_POLICY_OPTIONS.map((option) => (
-                  <option key={`session-approval-${option.label}`} value={option.value}>
-                    {option.value === '' ? 'Use project default' : option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button type="button" onClick={() => void handleCreateSession()} disabled={busy || !selectedProjectId}>
-              Create Session
-            </button>
-            <button type="button" onClick={() => void handleForkSession()} disabled={busy || !selectedSessionId || !!activeTurnId}>
-              Fork Session
-            </button>
-            <label>
-              Current Session
-              <select
-                value={selectedSessionId}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  setSelectedSessionId(value);
-                  void loadSessionHistory(value, { resumeStream: true, resetEventLog: true });
-                }}
-              >
-                <option value="">Select a session</option>
-                {sessions.map((session) => (
-                  <option key={session.id} value={session.id}>
-                    {session.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </aside>
-        </div>
-
-        <section className="sim-chat">
-          <div className="sim-chat-head">
-            <h2>Turn Simulation</h2>
-            <p>
-              Project: <strong>{selectedProject?.name ?? '-'}</strong> | Session:{' '}
-              <strong>{selectedSession?.title ?? '-'}</strong>
-            </p>
-            <p>
-              Workspace: <strong>{selectedProject?.repoPath ?? '-'}</strong>
-            </p>
-            <p>
-              Session CWD Override: <strong>{selectedSession?.cwdOverride ?? '-'}</strong>
-            </p>
-            <p>
-              Effective CWD: <strong>{selectedSession?.cwdOverride ?? selectedProject?.repoPath ?? '-'}</strong>
-            </p>
-            <p>
-              Project Model: <strong>{selectedProject?.defaultModel ?? '-'}</strong>
-            </p>
-            <p>
-              Session Model Override: <strong>{selectedSession?.modelOverride ?? '-'}</strong>
-            </p>
-            <p>
-              Effective Model: <strong>{selectedSession?.modelOverride ?? selectedProject?.defaultModel ?? '-'}</strong>
-            </p>
-            <p>
-              Project Sandbox: <strong>{selectedProject?.defaultSandbox ?? '-'}</strong>
-            </p>
-            <p>
-              Session Sandbox Override: <strong>{selectedSession?.sandboxOverride ?? '-'}</strong>
-            </p>
-            <p>
-              Effective Sandbox:{' '}
-              <strong>{selectedSession?.sandboxOverride ?? selectedProject?.defaultSandbox ?? '-'}</strong>
-            </p>
-            <p>
-              Project Approval Policy: <strong>{selectedProject?.defaultApprovalPolicy ?? '-'}</strong>
-            </p>
-            <p>
-              Session Approval Policy Override: <strong>{selectedSession?.approvalPolicyOverride ?? '-'}</strong>
-            </p>
-            <p>
-              Effective Approval Policy:{' '}
-              <strong>
-                {selectedSession?.approvalPolicyOverride ?? selectedProject?.defaultApprovalPolicy ?? '-'}
-              </strong>
-            </p>
-            <p>
-              Status: <span className="status-pill">{turnStatus}</span>
-            </p>
-            {resumedTurnHint ? <p>{resumedTurnHint}</p> : null}
-          </div>
-
-          <label>
-            Prompt
-            <textarea
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              placeholder="Send a prompt to start a turn..."
-              rows={4}
-            />
-          </label>
-          <div className="sim-actions">
-            <button
-              type="button"
-              onClick={() => void handleSendTurn()}
-              disabled={(!canStartTurn && !canSteerTurn) || busy}
-            >
-              {canSteerTurn ? 'Steer Current Turn' : 'Start Turn'}
-            </button>
-            <button type="button" onClick={() => void handleCancelTurn()} disabled={!activeTurnId || busy}>
-              Cancel Turn
-            </button>
-          </div>
-
-          {pendingApproval ? (
-            <article className="sim-approval">
-              <h3>Approval Required</h3>
-              <p>
-                <strong>{formatApprovalKind(pendingApproval.kind)}</strong>
-                {typeof pendingApproval.payload.reason === 'string' && pendingApproval.payload.reason.length > 0
-                  ? `: ${pendingApproval.payload.reason}`
-                  : ''}
-              </p>
-              {typeof pendingApproval.payload.command === 'string' && pendingApproval.payload.command.length > 0 ? (
-                <pre>{pendingApproval.payload.command}</pre>
-              ) : null}
-              {typeof pendingApproval.payload.cwd === 'string' && pendingApproval.payload.cwd.length > 0 ? (
-                <p>
-                  Working directory: <code>{pendingApproval.payload.cwd}</code>
-                </p>
-              ) : null}
-              {Array.isArray(pendingApproval.payload.proposedExecpolicyAmendment) &&
-              pendingApproval.payload.proposedExecpolicyAmendment.length > 0 ? (
-                <p>Exec policy amendment available.</p>
-              ) : null}
-              {Array.isArray(pendingApproval.payload.proposedNetworkPolicyAmendments) &&
-              pendingApproval.payload.proposedNetworkPolicyAmendments.length > 0 ? (
-                <p>Network policy amendment available.</p>
-              ) : null}
-              <div className="sim-actions sim-actions-approval">
-                {getApprovalActionOptions(pendingApproval).map((option) => (
+          <div className="shell-grid">
+            <aside className="left-sidebar">
+              <div className="sidebar-tabs">
+                <button
+                  type="button"
+                  className={leftSidebarTab === 'explorer' ? 'tab-active' : ''}
+                  onClick={() => setLeftSidebarTab('explorer')}
+                >
+                  Explorer
+                </button>
+                <button
+                  type="button"
+                  className={leftSidebarTab === 'user' ? 'tab-active' : ''}
+                  onClick={() => setLeftSidebarTab('user')}
+                >
+                  User Config
+                </button>
+                {isAdmin ? (
                   <button
-                    key={option.key}
                     type="button"
-                    className={option.secondary ? 'button-secondary' : undefined}
-                    onClick={() => void handleResolveApproval(option.decision)}
-                    disabled={busy}
+                    className={leftSidebarTab === 'admin' ? 'tab-active' : ''}
+                    onClick={() => setLeftSidebarTab('admin')}
                   >
-                    {option.label}
+                    Admin Config
                   </button>
-                ))}
+                ) : null}
               </div>
-            </article>
-          ) : null}
 
-          <article className="sim-output">
-            <h3>Assistant Stream</h3>
-            <pre>{assistantText || 'No active stream output.'}</pre>
-          </article>
+              {leftSidebarTab === 'explorer' ? (
+                <div className="explorer-tree">
+                  <div className="tree-actions-top">
+                    <button type="button" onClick={() => setActionPanelMode('createProject')}>
+                      + Project
+                    </button>
+                    <button type="button" className="button-secondary" onClick={() => void loadProjects()}>
+                      Refresh
+                    </button>
+                  </div>
+                  <ul className="tree-root">
+                    {projects.map((project) => (
+                      <li key={project.id}>
+                        <div
+                          className={`tree-row ${selectedProjectId === project.id ? 'active' : ''}`}
+                          onClick={() => {
+                            setSelectedProjectId(project.id);
+                            void loadSessions(project.id);
+                          }}
+                        >
+                          <span className="tree-label">{project.name}</span>
+                          <div className="row-actions">
+                            <button
+                              type="button"
+                              title="Create Session"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setSelectedProjectId(project.id);
+                                setActionPanelMode('createSession');
+                              }}
+                            >
+                              +S
+                            </button>
+                            <button
+                              type="button"
+                              title="Project Config"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setSelectedProjectId(project.id);
+                                setActionPanelMode('projectConfig');
+                              }}
+                            >
+                              Cfg
+                            </button>
+                            <button
+                              type="button"
+                              title="Remove Project"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                requestProjectDelete(project);
+                              }}
+                            >
+                              Del
+                            </button>
+                          </div>
+                        </div>
+                        {selectedProjectId === project.id ? (
+                          <ul className="tree-children">
+                            {sessions.length === 0 ? <li className="tree-empty">No sessions</li> : null}
+                            {sessions.map((session) => (
+                              <li key={session.id}>
+                                <div
+                                  className={`tree-row session-row ${selectedSessionId === session.id ? 'active' : ''}`}
+                                  onClick={() => {
+                                    setSelectedSessionId(session.id);
+                                    void loadSessionHistory(session.id, { resumeStream: true, resetEventLog: true });
+                                  }}
+                                >
+                                  <span className="tree-label">{session.title}</span>
+                                  <div className="row-actions">
+                                    <button
+                                      type="button"
+                                      title="Remove Session"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        requestSessionDelete(session);
+                                      }}
+                                    >
+                                      Del
+                                    </button>
+                                  </div>
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
 
-          <div className="sim-output-grid">
-            <article className="sim-output">
-              <h3>Tool Output</h3>
-              <pre>{toolOutput || 'No tool output yet.'}</pre>
-            </article>
+              {leftSidebarTab === 'user' ? (
+                <div className="sim-card">
+                  <h2>User Config</h2>
+                  <p>Signed in as: <strong>{currentUserEmail}</strong></p>
+                  <label>
+                    <span>Turn Steering</span>
+                    <input
+                      type="checkbox"
+                      checked={appSettings.turnSteerEnabled}
+                      onChange={(event) => void handleTurnSteerToggle(event.target.checked)}
+                      disabled={busy}
+                    />
+                  </label>
+                  <button type="button" className="button-secondary" onClick={() => void handleLogout()} disabled={busy}>
+                    Sign Out
+                  </button>
+                </div>
+              ) : null}
 
-            <article className="sim-output">
-              <h3>Reasoning</h3>
-              <pre>{reasoningText || 'No reasoning deltas yet.'}</pre>
-            </article>
+              {leftSidebarTab === 'admin' && isAdmin ? (
+                <div className="sim-card">
+                  <h2>Admin Config</h2>
+                  <p className="sim-subtitle">Admin controls UI shell is ready for next backend wiring step.</p>
+                </div>
+              ) : null}
+            </aside>
+
+            <section className="chat-pane">
+              <div className="chat-pane-head">
+                <h2>{selectedSession?.title ?? 'Select a session'}</h2>
+                <p>
+                  Project: <strong>{selectedProject?.name ?? '-'}</strong> | CWD:{' '}
+                  <strong>{selectedSession?.cwdOverride ?? selectedProject?.repoPath ?? '-'}</strong> | Status:{' '}
+                  <span className="status-pill">{turnStatus}</span>
+                </p>
+                {resumedTurnHint ? <p>{resumedTurnHint}</p> : null}
+              </div>
+
+              <article className="sim-output chat-stream">
+                <h3>Assistant Stream</h3>
+                <pre>{assistantText || 'No active stream output.'}</pre>
+              </article>
+
+              <article className="sim-events chat-history">
+                <h3>Chat History</h3>
+                <ul>
+                  {messages.length === 0 ? <li>No messages yet.</li> : null}
+                  {messages.map((message) => (
+                    <li key={message.id}>
+                      <strong>{message.role}:</strong> {message.content}
+                    </li>
+                  ))}
+                </ul>
+              </article>
+
+              {pendingApproval ? (
+                <article className="sim-approval">
+                  <h3>Approval Required</h3>
+                  <p>
+                    <strong>{formatApprovalKind(pendingApproval.kind)}</strong>
+                    {typeof pendingApproval.payload.reason === 'string' && pendingApproval.payload.reason.length > 0
+                      ? `: ${pendingApproval.payload.reason}`
+                      : ''}
+                  </p>
+                  <div className="sim-actions sim-actions-approval">
+                    {getApprovalActionOptions(pendingApproval).map((option) => (
+                      <button
+                        key={option.key}
+                        type="button"
+                        className={option.secondary ? 'button-secondary' : undefined}
+                        onClick={() => void handleResolveApproval(option.decision)}
+                        disabled={busy}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </article>
+              ) : null}
+
+              <label>
+                Prompt
+                <textarea
+                  value={prompt}
+                  onChange={(event) => setPrompt(event.target.value)}
+                  placeholder="Send a prompt to start a turn..."
+                  rows={4}
+                />
+              </label>
+              <div className="sim-actions">
+                <button
+                  type="button"
+                  onClick={() => void handleSendTurn()}
+                  disabled={(!canStartTurn && !canSteerTurn) || busy}
+                >
+                  {canSteerTurn ? 'Steer Current Turn' : 'Start Turn'}
+                </button>
+                <button type="button" onClick={() => void handleCancelTurn()} disabled={!activeTurnId || busy}>
+                  Cancel Turn
+                </button>
+              </div>
+              <button type="button" className="button-secondary" onClick={() => void handleForkSession()} disabled={busy || !selectedSessionId || !!activeTurnId}>
+                Fork Session
+              </button>
+            </section>
+
+            {insightsOpen ? (
+              <aside className="insights-pane">
+                <div className="insights-tabs">
+                  <button type="button" className={insightsTab === 'diff' ? 'tab-active' : ''} onClick={() => setInsightsTab('diff')}>
+                    Diff
+                  </button>
+                  <button type="button" className={insightsTab === 'tools' ? 'tab-active' : ''} onClick={() => setInsightsTab('tools')}>
+                    Tools
+                  </button>
+                  <button type="button" className={insightsTab === 'reasoning' ? 'tab-active' : ''} onClick={() => setInsightsTab('reasoning')}>
+                    Reasoning
+                  </button>
+                  <button type="button" className={insightsTab === 'events' ? 'tab-active' : ''} onClick={() => setInsightsTab('events')}>
+                    Events
+                  </button>
+                </div>
+                {insightsTab === 'diff' ? (
+                  <article className="sim-output">
+                    <h3>Diff Summary</h3>
+                    <pre>{diffSummary || 'No diff updates yet.'}</pre>
+                  </article>
+                ) : null}
+                {insightsTab === 'tools' ? (
+                  <article className="sim-output">
+                    <h3>Tool Output</h3>
+                    <pre>{toolOutput || 'No tool output yet.'}</pre>
+                  </article>
+                ) : null}
+                {insightsTab === 'reasoning' ? (
+                  <>
+                    <article className="sim-output">
+                      <h3>Reasoning</h3>
+                      <pre>{reasoningText || 'No reasoning deltas yet.'}</pre>
+                    </article>
+                    <article className="sim-output">
+                      <h3>Latest Plan</h3>
+                      <pre>{latestPlan || 'No plan updates yet.'}</pre>
+                    </article>
+                  </>
+                ) : null}
+                {insightsTab === 'events' ? (
+                  <>
+                    <article className="sim-events">
+                      <h3>Event Timeline</h3>
+                      <ul>
+                        {eventLog.length === 0 ? <li>No events yet.</li> : null}
+                        {eventLog.map((entry, index) => (
+                          <li key={`${entry}-${index}`}>{entry}</li>
+                        ))}
+                      </ul>
+                    </article>
+                    <article className="sim-events">
+                      <h3>Turn History</h3>
+                      <ul>
+                        {turns.length === 0 ? <li>No turns yet.</li> : null}
+                        {turns.map((turn) => (
+                          <li key={turn.id}>
+                            <strong>{turn.status}</strong> {turn.id}
+                          </li>
+                        ))}
+                      </ul>
+                    </article>
+                  </>
+                ) : null}
+              </aside>
+            ) : null}
           </div>
-
-          <div className="sim-output-grid">
-            <article className="sim-output">
-              <h3>Latest Plan</h3>
-              <pre>{latestPlan || 'No plan updates yet.'}</pre>
-            </article>
-
-            <article className="sim-output">
-              <h3>Diff Summary</h3>
-              <pre>{diffSummary || 'No diff updates yet.'}</pre>
-            </article>
-          </div>
-
-          <article className="sim-events">
-            <h3>Turn History</h3>
-            <ul>
-              {turns.length === 0 ? <li>No turns yet.</li> : null}
-              {turns.map((turn) => (
-                <li key={turn.id}>
-                  <strong>{turn.status}</strong> {turn.id}
-                  <br />
-                  Requested: model={turn.requestedModel ?? '-'} cwd={turn.requestedCwd ?? '-'} sandbox=
-                  {turn.requestedSandbox ?? '-'} approval={turn.requestedApprovalPolicy ?? '-'}
-                  <br />
-                  Effective: model={turn.effectiveModel ?? '-'} cwd={turn.effectiveCwd ?? '-'} sandbox=
-                  {turn.effectiveSandbox ?? '-'} approval={turn.effectiveApprovalPolicy ?? '-'}
-                  {turn.failureMessage ? (
-                    <>
-                      <br />
-                      Failure: {turn.failureMessage}
-                    </>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          </article>
-
-          <article className="sim-events">
-            <h3>Chat History</h3>
-            <ul>
-              {messages.length === 0 ? <li>No messages yet.</li> : null}
-              {messages.map((message) => (
-                <li key={message.id}>
-                  <strong>{message.role}:</strong> {message.content}
-                </li>
-              ))}
-            </ul>
-          </article>
-
-          <article className="sim-events">
-            <h3>Event Timeline</h3>
-            <ul>
-              {eventLog.length === 0 ? <li>No events yet.</li> : null}
-              {eventLog.map((entry, index) => (
-                <li key={`${entry}-${index}`}>{entry}</li>
-              ))}
-            </ul>
-          </article>
-        </section>
-        </>
         ) : null}
 
         {error ? <p className="sim-error">{error}</p> : null}
@@ -1376,7 +1515,7 @@ export default function HomePage() {
 
 async function apiRequest<T>(
   path: string,
-  input: { method: 'GET' | 'POST'; body?: Record<string, unknown>; signal?: AbortSignal },
+  input: { method: 'GET' | 'POST' | 'PATCH' | 'DELETE'; body?: Record<string, unknown>; signal?: AbortSignal },
 ): Promise<T> {
   const response = await fetch(path, {
     method: input.method,

@@ -233,6 +233,129 @@ describe('API e2e', () => {
     expect(listSessionsAsOtherUserResponse.statusCode).toBe(404);
   });
 
+  it('deletes a session for the owner', async () => {
+    const email = randomEmail('session-delete');
+
+    const projectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: { name: 'Session Delete Project', repoPath: TEST_REPO_PATH },
+    });
+    expect(projectResponse.statusCode).toBe(201);
+    const project = projectResponse.json();
+
+    const sessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Session To Delete' },
+    });
+    expect(sessionResponse.statusCode).toBe(201);
+    const session = sessionResponse.json();
+
+    const deleteResponse = await app.inject({
+      method: 'DELETE',
+      url: `/api/sessions/${session.id}`,
+      headers: { 'x-user-email': email },
+    });
+    expect(deleteResponse.statusCode).toBe(204);
+
+    const listSessionsResponse = await app.inject({
+      method: 'GET',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+    });
+    expect(listSessionsResponse.statusCode).toBe(200);
+    expect(listSessionsResponse.json()).toEqual([]);
+  });
+
+  it('deletes a project and cascades all sessions', async () => {
+    const email = randomEmail('project-delete');
+
+    const projectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: { name: 'Project To Delete', repoPath: TEST_REPO_PATH },
+    });
+    expect(projectResponse.statusCode).toBe(201);
+    const project = projectResponse.json();
+
+    const firstSessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'First Session' },
+    });
+    expect(firstSessionResponse.statusCode).toBe(201);
+
+    const secondSessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Second Session' },
+    });
+    expect(secondSessionResponse.statusCode).toBe(201);
+
+    const deleteResponse = await app.inject({
+      method: 'DELETE',
+      url: `/api/projects/${project.id}`,
+      headers: { 'x-user-email': email },
+    });
+    expect(deleteResponse.statusCode).toBe(204);
+
+    const listProjectsResponse = await app.inject({
+      method: 'GET',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+    });
+    expect(listProjectsResponse.statusCode).toBe(200);
+    expect(listProjectsResponse.json().some((item: { id: string }) => item.id === project.id)).toBe(false);
+  });
+
+  it('returns 409 when deleting a session with an active turn', async () => {
+    const email = randomEmail('session-delete-active');
+
+    const projectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: { name: 'Active Turn Project', repoPath: TEST_REPO_PATH },
+    });
+    expect(projectResponse.statusCode).toBe(201);
+    const project = projectResponse.json();
+
+    const sessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Active Turn Session' },
+    });
+    expect(sessionResponse.statusCode).toBe(201);
+    const session = sessionResponse.json();
+
+    const turnResponse = await app.inject({
+      method: 'POST',
+      url: `/api/sessions/${session.id}/turns`,
+      headers: { 'x-user-email': email },
+      payload: { content: 'start and keep active briefly' },
+    });
+    expect(turnResponse.statusCode).toBe(201);
+
+    const deleteResponse = await app.inject({
+      method: 'DELETE',
+      url: `/api/sessions/${session.id}`,
+      headers: { 'x-user-email': email },
+    });
+    expect(deleteResponse.statusCode).toBe(409);
+    expect(deleteResponse.json()).toMatchObject({
+      error: {
+        code: 'CONFLICT',
+      },
+    });
+  });
+
   it('creates turn and streams completed events', async () => {
     const email = randomEmail('turn-complete');
 

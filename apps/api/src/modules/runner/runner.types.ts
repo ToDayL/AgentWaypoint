@@ -39,6 +39,10 @@ export type ForkThreadResult = {
   threadId: string;
 };
 
+export type CloseThreadInput = {
+  threadId: string;
+};
+
 export type EnsureDirectoryInput = {
   path: string;
 };
@@ -110,6 +114,7 @@ export interface RunnerAdapter {
   resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void>;
   listModels(): Promise<AvailableModel[]>;
   forkThread(input: ForkThreadInput): Promise<ForkThreadResult>;
+  closeThread(input: CloseThreadInput): Promise<void>;
   ensureDirectory(input: EnsureDirectoryInput): Promise<EnsureDirectoryResult>;
   suggestWorkspaceDirectories(input: WorkspaceSuggestionInput): Promise<string[]>;
 }

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Inject, Param, Post, UseGuards } from '@nestjs/common';
 import { parseWithZod } from '../../common/validation/zod';
 import { AuthGuard } from '../auth/auth.guard';
 import { CurrentUserDecorator } from '../auth/current-user.decorator';
@@ -26,5 +26,12 @@ export class ProjectsController {
   async getProject(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown) {
     const { id } = parseWithZod(ProjectIdParamsSchema, params);
     return this.projectsService.getByIdForUser(user.id, id);
+  }
+
+  @Delete(':id')
+  @HttpCode(204)
+  async deleteProject(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown) {
+    const { id } = parseWithZod(ProjectIdParamsSchema, params);
+    await this.projectsService.deleteByIdForUser(user.id, id);
   }
 }

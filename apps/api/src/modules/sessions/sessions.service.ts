@@ -1,4 +1,4 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ProjectsService } from '../projects/projects.service';
 import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
@@ -8,6 +8,8 @@ const ACTIVE_TURN_STATUSES = new Set(['queued', 'running', 'waiting_approval']);
 
 @Injectable()
 export class SessionsService {
+  private readonly logger = new Logger(SessionsService.name);
+
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(ProjectsService) private readonly projectsService: ProjectsService,
@@ -228,6 +230,55 @@ export class SessionsService {
       }
 
       return session;
+    });
+  }
+
+  async deleteByIdForUser(userId: string, sessionId: string) {
+    const session = await this.prisma.session.findFirst({
+      where: {
+        id: sessionId,
+        project: {
+          ownerUserId: userId,
+        },
+      },
+      select: { id: true, codexThreadId: true },
+    });
+
+    if (!session) {
+      throw new NotFoundException({ message: 'Session not found' });
+    }
+
+    const activeTurn = await this.prisma.turn.findFirst({
+      where: {
+        sessionId,
+        status: {
+          in: [...ACTIVE_TURN_STATUSES],
+        },
+      },
+      select: { id: true },
+    });
+
+    if (activeTurn) {
+      throw new ConflictException({ message: 'Cannot delete session while a turn is active' });
+    }
+
+    const threadId = session.codexThreadId?.trim();
+    if (threadId) {
+      try {
+        await this.runnerAdapter.closeThread({ threadId });
+      } catch (error: unknown) {
+        if (error instanceof Error) {
+          this.logger.warn(`Failed to close thread ${threadId} during session delete ${sessionId}: ${error.message}`);
+        } else {
+          this.logger.warn(`Failed to close thread ${threadId} during session delete ${sessionId}`);
+        }
+      }
+    }
+
+    await this.prisma.session.delete({
+      where: {
+        id: sessionId,
+      },
     });
   }
 }

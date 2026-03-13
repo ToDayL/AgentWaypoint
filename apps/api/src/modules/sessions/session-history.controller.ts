@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Inject, Param, Post, UseGuards } from '@nestjs/common';
 import { parseWithZod } from '../../common/validation/zod';
 import { AuthGuard } from '../auth/auth.guard';
 import { CurrentUserDecorator } from '../auth/current-user.decorator';
@@ -10,6 +10,13 @@ import { SessionsService } from './sessions.service';
 @UseGuards(AuthGuard)
 export class SessionHistoryController {
   constructor(@Inject(SessionsService) private readonly sessionsService: SessionsService) {}
+
+  @Delete('/:id')
+  @HttpCode(204)
+  async deleteSession(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown) {
+    const { id } = parseWithZod(SessionIdParamsSchema, params);
+    await this.sessionsService.deleteByIdForUser(user.id, id);
+  }
 
   @Get('/:id/history')
   async getSessionHistory(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown) {

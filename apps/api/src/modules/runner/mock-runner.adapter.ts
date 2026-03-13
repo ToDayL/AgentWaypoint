@@ -7,6 +7,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import {
   AvailableModel,
   CancelTurnInput,
+  CloseThreadInput,
   EnsureDirectoryInput,
   EnsureDirectoryResult,
   ForkThreadInput,
@@ -142,6 +143,10 @@ export class MockRunnerAdapter implements RunnerAdapter {
       throw new Error('Source thread is required');
     }
     return { threadId: `mock-fork-${randomUUID()}` };
+  }
+
+  async closeThread(_input: CloseThreadInput): Promise<void> {
+    return;
   }
 
   async ensureDirectory(input: EnsureDirectoryInput): Promise<EnsureDirectoryResult> {

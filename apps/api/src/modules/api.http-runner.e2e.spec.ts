@@ -24,6 +24,7 @@ type RunnerEventType =
 
 type TestRunnerServer = {
   baseUrl: string;
+  getClosedThreadIds: () => string[];
   close: () => Promise<void>;
 };
 
@@ -93,6 +94,7 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
 async function createTestRunnerServer(): Promise<TestRunnerServer> {
   const activeTurns = new Map<string, ActiveTurnState>();
   const forkedThreadIds = new Map<string, string>();
+  const closedThreadIds = new Set<string>();
   const bufferedTurns = new Map<string, BufferedTurnState>();
 
   const ensureBufferedTurn = (turnId: string): BufferedTurnState => {
@@ -300,6 +302,15 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
         return;
       }
 
+      if (request.url === '/runner/threads/close') {
+        const payload = await readJsonBody(request);
+        const threadId = readRequiredString(payload, 'threadId');
+        closedThreadIds.add(threadId);
+        response.statusCode = 204;
+        response.end();
+        return;
+      }
+
       if (request.url === '/runner/turns/steer') {
         const payload = await readJsonBody(request);
         const turnId = readRequiredString(payload, 'turnId');
@@ -380,6 +391,7 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
 
   return {
     baseUrl: `http://127.0.0.1:${addr.port}`,
+    getClosedThreadIds: () => [...closedThreadIds],
     close: () => {
       activeTurns.forEach((turn) => {
         if (turn.completionTimer) {
@@ -388,6 +400,7 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
       });
       activeTurns.clear();
       bufferedTurns.clear();
+      closedThreadIds.clear();
       return new Promise<void>((resolve, reject) => {
         server.close((error) => {
           if (error) {
@@ -734,6 +747,42 @@ describe.sequential('API e2e (http runner)', () => {
       { role: 'assistant', content: expect.stringContaining('Echo: create forkable history') },
     ]);
     expect(history.turns).toHaveLength(0);
+  });
+
+  it('closes codex thread when deleting a session', async () => {
+    const email = randomEmail('http-delete-close-thread');
+
+    const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ name: 'Delete Session Project', repoPath: TEST_REPO_PATH }),
+    });
+    expect(projectResponse.status).toBe(201);
+    const project = (await projectResponse.json()) as { id: string };
+
+    const sessionResponse = await fetch(`${apiBaseUrl}/api/projects/${project.id}/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ title: 'Delete Session Thread' }),
+    });
+    expect(sessionResponse.status).toBe(201);
+    const session = (await sessionResponse.json()) as { id: string };
+
+    const turnResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}/turns`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'populate session thread id before delete' }),
+    });
+    expect(turnResponse.status).toBe(201);
+
+    await sleep(1300);
+
+    const deleteSessionResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}`, {
+      method: 'DELETE',
+      headers: { 'x-user-email': email },
+    });
+    expect(deleteSessionResponse.status).toBe(204);
+    expect(runner.getClosedThreadIds()).toContain(`thread-${session.id}`);
   });
 
   it('steers an active turn through the http runner adapter when enabled', async () => {

@@ -6,9 +6,9 @@ export function getApiBaseUrl(): string {
 
 export async function forwardJson(
   request: NextRequest,
-  input: { path: string; method: 'GET' | 'POST' },
+  input: { path: string; method: 'GET' | 'POST' | 'PATCH' | 'DELETE' },
 ): Promise<Response> {
-  const rawBody = input.method === 'POST' ? await request.text() : '';
+  const rawBody = input.method === 'GET' || input.method === 'DELETE' ? '' : await request.text();
   const hasJsonBody = rawBody.trim().length > 0;
   const cookieHeader = request.headers.get('cookie');
   const devEmailHeader = request.headers.get('x-user-email');

@@ -5,6 +5,7 @@ import type {
   ActiveCodexTurn,
   ActiveTurn,
   CodexWorker,
+  CloseThreadBody,
   ForkThreadBody,
   ModelListItem,
   PendingApprovalRequest,
@@ -157,6 +158,14 @@ export class CodexBackend {
       throw new Error('thread/fork did not return thread id');
     }
     return threadId;
+  }
+
+  async closeThread(input: CloseThreadBody): Promise<void> {
+    const worker = await this.ensureCodexWorker();
+    await worker.readyPromise;
+    await this.sendWorkerRequest(worker, 'thread/close', {
+      threadId: input.threadId,
+    });
   }
 
   async steerTurn(input: SteerTurnBody): Promise<void> {
