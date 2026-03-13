@@ -1,6 +1,21 @@
 'use client';
 
 import { KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Eye,
+  EyeOff,
+  FolderPlus,
+  FolderTree,
+  GitFork,
+  Menu,
+  Pin,
+  Plus,
+  RefreshCw,
+  Send,
+  Settings,
+  SlidersHorizontal,
+  Trash2,
+} from 'lucide-react';
 import { Diff, Hunk, parseDiff } from 'react-diff-view';
 
 type Project = {
@@ -181,11 +196,12 @@ const STREAM_EVENTS = [
   'turn.failed',
   'turn.cancelled',
 ];
-const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+  const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const WORKSPACE_SUGGESTIONS_LIST_ID = 'workspace-path-suggestions';
 const SESSION_CWD_SUGGESTIONS_LIST_ID = 'session-cwd-path-suggestions';
 type LeftSidebarTab = 'explorer' | 'config';
 type InsightsTab = 'diff' | 'tools' | 'reasoning' | 'events';
+type SidebarMode = 'closed' | 'pop' | 'pin';
 type ActionPanelMode =
   | 'closed'
   | 'createProject'
@@ -193,46 +209,6 @@ type ActionPanelMode =
   | 'projectConfig'
   | 'confirmDeleteProject'
   | 'confirmDeleteSession';
-
-function IconPlus() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M7 2h2v5h5v2H9v5H7V9H2V7h5z" />
-    </svg>
-  );
-}
-
-function IconSend() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M2 2l12 6-12 6 3-5-3-5zm4.2 5.2l-.8 1.3 5.3-.5-5.3-.8z" />
-    </svg>
-  );
-}
-
-function IconFolderPlus() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M1 3h5l1 1h8v9H1V3zm11 2h-2v2H8v2h2v2h2V9h2V7h-2V5z" />
-    </svg>
-  );
-}
-
-function IconMenu() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M2 3h12v2H2V3zm0 4h12v2H2V7zm0 4h12v2H2v-2z" />
-    </svg>
-  );
-}
-
-function IconInspect() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M2 2h12v12H2V2zm2 2v8h3V4H4zm5 0v8h3V4H9z" />
-    </svg>
-  );
-}
 
 export default function HomePage() {
   const [mounted, setMounted] = useState(false);
@@ -277,10 +253,14 @@ export default function HomePage() {
   const [streamBubbleTurnId, setStreamBubbleTurnId] = useState('');
   const [streamActive, setStreamActive] = useState(false);
   const [leftSidebarTab, setLeftSidebarTab] = useState<LeftSidebarTab>('explorer');
-  const [insightsOpen, setInsightsOpen] = useState(true);
+  const [leftSidebarMode, setLeftSidebarMode] = useState<SidebarMode>('pin');
+  const [rightSidebarMode, setRightSidebarMode] = useState<SidebarMode>('closed');
   const [insightsTab, setInsightsTab] = useState<InsightsTab>('diff');
   const [mobileLeftSidebarOpen, setMobileLeftSidebarOpen] = useState(false);
   const [mobileInsightsOpen, setMobileInsightsOpen] = useState(false);
+  const [disableNativePathDatalist, setDisableNativePathDatalist] = useState(false);
+  const [projectPathInputFocused, setProjectPathInputFocused] = useState(false);
+  const [sessionPathInputFocused, setSessionPathInputFocused] = useState(false);
   const [actionPanelMode, setActionPanelMode] = useState<ActionPanelMode>('closed');
   const [projectDeleteTarget, setProjectDeleteTarget] = useState<Project | null>(null);
   const [sessionDeleteTarget, setSessionDeleteTarget] = useState<Session | null>(null);
@@ -289,6 +269,7 @@ export default function HomePage() {
   const eventSourceRef = useRef<EventSource | null>(null);
   const turnPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const chatThreadRef = useRef<HTMLDivElement | null>(null);
+  const chatAtBottomRef = useRef(true);
 
   const canStartTurn = !!selectedSessionId && prompt.trim().length > 0 && activeTurnId === '';
   const canSteerTurn =
@@ -319,6 +300,7 @@ export default function HomePage() {
     ];
   }, [messages, assistantText, streamBubbleTurnId, streamActive]);
   const isAdmin = currentUserRole === 'admin';
+  const shellGridClassName = ['shell-grid', `left-${leftSidebarMode}`, `right-${rightSidebarMode}`].join(' ');
   const renderedDiffs = useMemo(() => {
     return diffSummaries.map((rawDiff, index) => ({
       id: `${index}-${rawDiff.length}`,
@@ -343,6 +325,17 @@ export default function HomePage() {
   useEffect(() => {
     void loadAuthSession();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (typeof navigator === 'undefined') {
+      return;
+    }
+    const ua = navigator.userAgent || '';
+    const isiOS =
+      /iPad|iPhone|iPod/i.test(ua) ||
+      (navigator.platform === 'MacIntel' && typeof navigator.maxTouchPoints === 'number' && navigator.maxTouchPoints > 1);
+    setDisableNativePathDatalist(isiOS);
   }, []);
 
   useEffect(() => {
@@ -435,11 +428,37 @@ export default function HomePage() {
 
   useEffect(() => {
     const container = chatThreadRef.current;
-    if (!container) {
+    if (!container || !chatAtBottomRef.current) {
       return;
     }
     container.scrollTop = container.scrollHeight;
   }, [displayedMessages]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    if (!chatAtBottomRef.current) {
+      return;
+    }
+    const rafId = window.requestAnimationFrame(() => {
+      const container = chatThreadRef.current;
+      if (!container) {
+        return;
+      }
+      container.scrollTop = container.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [leftSidebarMode, rightSidebarMode]);
+
+  function handleChatScroll(): void {
+    const container = chatThreadRef.current;
+    if (!container) {
+      return;
+    }
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    chatAtBottomRef.current = distanceFromBottom <= 24;
+  }
 
   async function loadAuthSession(): Promise<void> {
     try {
@@ -1101,6 +1120,46 @@ export default function HomePage() {
     setActionPanelMode(mode);
   }
 
+  function handleLeftSidebarButtonClick(): void {
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 860px)').matches) {
+      setMobileLeftSidebarOpen(true);
+      return;
+    }
+    setLeftSidebarMode((current) => (current === 'closed' ? 'pin' : 'closed'));
+  }
+
+  function handleInsightsButtonClick(): void {
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 860px)').matches) {
+      setMobileInsightsOpen(true);
+      return;
+    }
+    setRightSidebarMode((current) => (current === 'closed' ? 'pop' : 'closed'));
+  }
+
+  function toggleLeftSidebarPinMode(): void {
+    setLeftSidebarMode((current) => (current === 'pin' ? 'pop' : 'pin'));
+  }
+
+  function toggleRightSidebarPinMode(): void {
+    setRightSidebarMode((current) => (current === 'pin' ? 'pop' : 'pin'));
+  }
+
+  function closeLeftSidebar(): void {
+    if (mobileLeftSidebarOpen) {
+      setMobileLeftSidebarOpen(false);
+      return;
+    }
+    setLeftSidebarMode('closed');
+  }
+
+  function closeRightSidebar(): void {
+    if (mobileInsightsOpen) {
+      setMobileInsightsOpen(false);
+      return;
+    }
+    setRightSidebarMode('closed');
+  }
+
   function requestProjectDelete(project: Project): void {
     setProjectDeleteTarget(project);
     setSessionDeleteTarget(null);
@@ -1166,15 +1225,34 @@ export default function HomePage() {
     void handleSendTurn();
   }
 
+  const insightsOpen = rightSidebarMode !== 'closed' || mobileInsightsOpen;
+
   return (
     <main className="sim-shell">
       <section className="sim-panel">
         <header className="sim-header shell-header">
           {authenticated ? (
             <div className="header-mobile-side header-mobile-left">
-              <button type="button" className="icon-button" onClick={() => setMobileLeftSidebarOpen(true)} aria-label="Open sidebar">
-                <IconMenu />
+              <button
+                type="button"
+                className="icon-button"
+                onClick={handleLeftSidebarButtonClick}
+                aria-label="Toggle sidebar"
+                title="Toggle sidebar"
+              >
+                <Menu />
               </button>
+              {leftSidebarMode !== 'closed' ? (
+                <button
+                  type="button"
+                  className={`icon-button desktop-only ${leftSidebarMode === 'pin' ? 'is-active' : ''}`}
+                  onClick={() => toggleLeftSidebarPinMode()}
+                  aria-label={leftSidebarMode === 'pin' ? 'Unpin sidebar' : 'Pin sidebar'}
+                  title={leftSidebarMode === 'pin' ? 'Unpin sidebar' : 'Pin sidebar'}
+                >
+                  <Pin />
+                </button>
+              ) : null}
             </div>
           ) : null}
           <div className="header-title">
@@ -1186,16 +1264,26 @@ export default function HomePage() {
             </h1>
           </div>
           {authenticated ? (
-            <div className="header-actions">
-              <button type="button" className="button-secondary" onClick={() => setInsightsOpen((value) => !value)}>
-                {insightsOpen ? 'Hide Insights' : 'Show Insights'}
-              </button>
-            </div>
-          ) : null}
-          {authenticated ? (
             <div className="header-mobile-side header-mobile-right">
-              <button type="button" className="icon-button" onClick={() => setMobileInsightsOpen(true)} aria-label="Open insights">
-                <IconInspect />
+              {rightSidebarMode !== 'closed' ? (
+                <button
+                  type="button"
+                  className={`icon-button desktop-only ${rightSidebarMode === 'pin' ? 'is-active' : ''}`}
+                  onClick={() => toggleRightSidebarPinMode()}
+                  aria-label={rightSidebarMode === 'pin' ? 'Unpin insights' : 'Pin insights'}
+                  title={rightSidebarMode === 'pin' ? 'Unpin insights' : 'Pin insights'}
+                >
+                  <Pin />
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="icon-button"
+                onClick={handleInsightsButtonClick}
+                aria-label="Toggle insights"
+                title="Toggle insights"
+              >
+                {insightsOpen ? <EyeOff /> : <Eye />}
               </button>
             </div>
           ) : null}
@@ -1210,20 +1298,45 @@ export default function HomePage() {
                   </label>
                   <label>
                     Workspace Path
-                    <input
-                      value={newProjectRepoPath}
-                      onChange={(event) =>
-                        setNewProjectRepoPath(
-                          applyDirectorySuggestionSelection(event.target.value, workspaceSuggestions),
-                        )
-                      }
-                      list={WORKSPACE_SUGGESTIONS_LIST_ID}
-                    />
-                    <datalist id={WORKSPACE_SUGGESTIONS_LIST_ID}>
-                      {workspaceSuggestions.map((suggestion) => (
-                        <option key={suggestion} value={suggestion} />
-                      ))}
-                    </datalist>
+                    <div className="path-input-wrap">
+                      <input
+                        value={newProjectRepoPath}
+                        onFocus={() => setProjectPathInputFocused(true)}
+                        onChange={(event) => setNewProjectRepoPath(event.target.value)}
+                        onBlur={(event) => {
+                          setNewProjectRepoPath(
+                            applyDirectorySuggestionSelection(event.target.value, workspaceSuggestions),
+                          );
+                          setProjectPathInputFocused(false);
+                        }}
+                        list={disableNativePathDatalist ? undefined : WORKSPACE_SUGGESTIONS_LIST_ID}
+                      />
+                      {disableNativePathDatalist && projectPathInputFocused && workspaceSuggestions.length > 0 ? (
+                        <div className="path-suggestions">
+                          {workspaceSuggestions.map((suggestion) => (
+                            <button
+                              key={suggestion}
+                              type="button"
+                              className="path-suggestion-item"
+                              onPointerDown={(event) => event.preventDefault()}
+                              onClick={() => {
+                                setNewProjectRepoPath(ensureTrailingSlash(suggestion));
+                                setProjectPathInputFocused(true);
+                              }}
+                            >
+                              {suggestion}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                    {disableNativePathDatalist ? null : (
+                      <datalist id={WORKSPACE_SUGGESTIONS_LIST_ID}>
+                        {workspaceSuggestions.map((suggestion) => (
+                          <option key={suggestion} value={suggestion} />
+                        ))}
+                      </datalist>
+                    )}
                     <span className="sim-input-hint">
                       {workspaceSuggestionBusy ? 'Loading suggestions…' : 'Directory suggestions by prefix.'}
                     </span>
@@ -1238,6 +1351,32 @@ export default function HomePage() {
                       {availableModels.map((model) => (
                         <option key={model.id} value={model.model}>
                           {model.displayName}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Default Sandbox
+                    <select
+                      value={newProjectDefaultSandbox}
+                      onChange={(event) => setNewProjectDefaultSandbox(event.target.value)}
+                    >
+                      {SANDBOX_OPTIONS.map((option) => (
+                        <option key={`project-sandbox-${option.value || 'default'}`} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Default Approval Policy
+                    <select
+                      value={newProjectDefaultApprovalPolicy}
+                      onChange={(event) => setNewProjectDefaultApprovalPolicy(event.target.value)}
+                    >
+                      {APPROVAL_POLICY_OPTIONS.map((option) => (
+                        <option key={`project-approval-${option.value || 'default'}`} value={option.value}>
+                          {option.label}
                         </option>
                       ))}
                     </select>
@@ -1261,20 +1400,45 @@ export default function HomePage() {
                   </label>
                   <label>
                     CWD Override
-                    <input
-                      value={newSessionCwdOverride}
-                      onChange={(event) =>
-                        setNewSessionCwdOverride(
-                          applyDirectorySuggestionSelection(event.target.value, sessionCwdSuggestions),
-                        )
-                      }
-                      list={SESSION_CWD_SUGGESTIONS_LIST_ID}
-                    />
-                    <datalist id={SESSION_CWD_SUGGESTIONS_LIST_ID}>
-                      {sessionCwdSuggestions.map((suggestion) => (
-                        <option key={suggestion} value={suggestion} />
-                      ))}
-                    </datalist>
+                    <div className="path-input-wrap">
+                      <input
+                        value={newSessionCwdOverride}
+                        onFocus={() => setSessionPathInputFocused(true)}
+                        onChange={(event) => setNewSessionCwdOverride(event.target.value)}
+                        onBlur={(event) => {
+                          setNewSessionCwdOverride(
+                            applyDirectorySuggestionSelection(event.target.value, sessionCwdSuggestions),
+                          );
+                          setSessionPathInputFocused(false);
+                        }}
+                        list={disableNativePathDatalist ? undefined : SESSION_CWD_SUGGESTIONS_LIST_ID}
+                      />
+                      {disableNativePathDatalist && sessionPathInputFocused && sessionCwdSuggestions.length > 0 ? (
+                        <div className="path-suggestions">
+                          {sessionCwdSuggestions.map((suggestion) => (
+                            <button
+                              key={suggestion}
+                              type="button"
+                              className="path-suggestion-item"
+                              onPointerDown={(event) => event.preventDefault()}
+                              onClick={() => {
+                                setNewSessionCwdOverride(ensureTrailingSlash(suggestion));
+                                setSessionPathInputFocused(true);
+                              }}
+                            >
+                              {suggestion}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                    {disableNativePathDatalist ? null : (
+                      <datalist id={SESSION_CWD_SUGGESTIONS_LIST_ID}>
+                        {sessionCwdSuggestions.map((suggestion) => (
+                          <option key={suggestion} value={suggestion} />
+                        ))}
+                      </datalist>
+                    )}
                     <span className="sim-input-hint">
                       {sessionCwdSuggestionBusy ? 'Loading suggestions…' : 'Directory suggestions by prefix.'}
                     </span>
@@ -1349,175 +1513,202 @@ export default function HomePage() {
         ) : null}
 
         {authenticated ? (
-          <div className="shell-grid">
-            <aside className={`left-sidebar ${mobileLeftSidebarOpen ? 'mobile-open' : ''}`}>
-              <div className="mobile-sidebar-head mobile-sidebar-head-left">
-                <button type="button" className="icon-button" onClick={() => setMobileLeftSidebarOpen(false)} aria-label="Close sidebar">
-                  <IconMenu />
-                </button>
-              </div>
-              <div className="sidebar-tabs">
-                <button
-                  type="button"
-                  className={leftSidebarTab === 'explorer' ? 'tab-active' : ''}
-                  onClick={() => setLeftSidebarTab('explorer')}
-                >
-                  Explorer
-                </button>
-                <button
-                  type="button"
-                  className={leftSidebarTab === 'config' ? 'tab-active' : ''}
-                  onClick={() => setLeftSidebarTab('config')}
-                >
-                  Config
-                </button>
-              </div>
-
-              {leftSidebarTab === 'explorer' ? (
-                <div className="explorer-tree">
-                  <div className="tree-actions-top">
+          <div className={shellGridClassName}>
+            {leftSidebarMode !== 'closed' || mobileLeftSidebarOpen ? (
+              <aside className={`left-sidebar ${mobileLeftSidebarOpen ? 'mobile-open' : `mode-${leftSidebarMode}`}`}>
+                <div className="mobile-sidebar-head mobile-sidebar-head-left">
+                  <button type="button" className="icon-button" onClick={() => closeLeftSidebar()} aria-label="Close sidebar">
+                    <Menu />
+                  </button>
+                </div>
+                <div className="left-sidebar-body">
+                  <div className="left-sidebar-rail">
                     <button
                       type="button"
-                      className="icon-button"
-                      title="Create Project"
-                      aria-label="Create Project"
-                      onClick={() => openActionPanel('createProject')}
+                      className={`icon-button ${leftSidebarTab === 'explorer' ? 'tab-active' : ''}`}
+                      aria-label="Explorer"
+                      title="Explorer"
+                      onClick={() => setLeftSidebarTab('explorer')}
                     >
-                      <IconFolderPlus />
+                      <FolderTree />
                     </button>
-                    <button type="button" className="button-secondary" onClick={() => void loadProjects()}>
-                      Refresh
+                    <button
+                      type="button"
+                      className={`icon-button ${leftSidebarTab === 'config' ? 'tab-active' : ''}`}
+                      aria-label="Config"
+                      title="Config"
+                      onClick={() => setLeftSidebarTab('config')}
+                    >
+                      <SlidersHorizontal />
                     </button>
                   </div>
-                  <ul className="tree-root">
-                    {projects.map((project) => (
-                      <li key={project.id}>
-                        <div
-                          className={`tree-row ${selectedProjectId === project.id ? 'active' : ''}`}
-                          onClick={() => {
-                            setSelectedProjectId(project.id);
-                            void loadSessions(project.id);
-                            setMobileLeftSidebarOpen(false);
-                          }}
-                        >
-                          <span className="tree-label">{project.name}</span>
-                          <div className="row-actions">
+
+                  <div className="left-sidebar-content">
+                    {leftSidebarTab === 'explorer' ? (
+                      <div className="explorer-tree">
+                        <div className="explorer-head">
+                          <h3>Explorer</h3>
+                          <div className="tree-actions-top">
                             <button
                               type="button"
                               className="icon-button"
-                              title="Create Session"
-                              aria-label="Create Session"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                setSelectedProjectId(project.id);
-                                openActionPanel('createSession');
-                              }}
+                              title="Create Project"
+                              aria-label="Create Project"
+                              onClick={() => openActionPanel('createProject')}
                             >
-                              <IconPlus />
+                              <FolderPlus />
                             </button>
                             <button
                               type="button"
-                              title="Project Config"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                setSelectedProjectId(project.id);
-                                openActionPanel('projectConfig');
-                              }}
+                              className="icon-button"
+                              title="Refresh Projects"
+                              aria-label="Refresh Projects"
+                              onClick={() => void loadProjects()}
                             >
-                              Cfg
-                            </button>
-                            <button
-                              type="button"
-                              title="Remove Project"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                requestProjectDelete(project);
-                              }}
-                            >
-                              Del
+                              <RefreshCw />
                             </button>
                           </div>
                         </div>
-                        {selectedProjectId === project.id ? (
-                          <ul className="tree-children">
-                            {sessions.length === 0 ? <li className="tree-empty">No sessions</li> : null}
-                            {sessions.map((session) => (
-                              <li key={session.id}>
-                                <div
-                                  className={`tree-row session-row ${selectedSessionId === session.id ? 'active' : ''}`}
-                                  onClick={() => {
-                                    setSelectedSessionId(session.id);
-                                    void loadSessionHistory(session.id, {
-                                      resumeStream: true,
-                                      resetEventLog: true,
-                                      resetInspectPanel: true,
-                                    });
-                                    setMobileLeftSidebarOpen(false);
-                                  }}
-                                >
-                                  <span className="tree-label">{session.title}</span>
-                                  <div className="row-actions">
-                                    <button
-                                      type="button"
-                                      title="Fork Session"
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        void handleForkSession({ sessionId: session.id, projectId: project.id });
-                                      }}
-                                      disabled={busy}
-                                    >
-                                      Fork
-                                    </button>
-                                    <button
-                                      type="button"
-                                      title="Remove Session"
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        requestSessionDelete(session);
-                                      }}
-                                    >
-                                      Del
-                                    </button>
-                                  </div>
+                        <ul className="tree-root">
+                          {projects.map((project) => (
+                            <li key={project.id}>
+                              <div
+                                className={`tree-row ${selectedProjectId === project.id ? 'active' : ''}`}
+                                onClick={() => {
+                                  setSelectedProjectId(project.id);
+                                  void loadSessions(project.id);
+                                  setMobileLeftSidebarOpen(false);
+                                }}
+                              >
+                                <span className="tree-label">{project.name}</span>
+                                <div className="row-actions">
+                                  <button
+                                    type="button"
+                                    className="icon-button"
+                                    title="Create Session"
+                                    aria-label="Create Session"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      setSelectedProjectId(project.id);
+                                      openActionPanel('createSession');
+                                    }}
+                                  >
+                                    <Plus />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="icon-button"
+                                    title="Project Config"
+                                    aria-label="Project Config"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      setSelectedProjectId(project.id);
+                                      openActionPanel('projectConfig');
+                                    }}
+                                  >
+                                    <Settings />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="icon-button"
+                                    title="Remove Project"
+                                    aria-label="Remove Project"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      requestProjectDelete(project);
+                                    }}
+                                  >
+                                    <Trash2 />
+                                  </button>
                                 </div>
-                              </li>
-                            ))}
-                          </ul>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
+                              </div>
+                              {selectedProjectId === project.id ? (
+                                <ul className="tree-children">
+                                  {sessions.length === 0 ? <li className="tree-empty">No sessions</li> : null}
+                                  {sessions.map((session) => (
+                                    <li key={session.id}>
+                                      <div
+                                        className={`tree-row session-row ${selectedSessionId === session.id ? 'active' : ''}`}
+                                        onClick={() => {
+                                          setSelectedSessionId(session.id);
+                                          void loadSessionHistory(session.id, {
+                                            resumeStream: true,
+                                            resetEventLog: true,
+                                            resetInspectPanel: true,
+                                          });
+                                          setMobileLeftSidebarOpen(false);
+                                        }}
+                                      >
+                                        <span className="tree-label">{session.title}</span>
+                                        <div className="row-actions">
+                                          <button
+                                            type="button"
+                                            className="icon-button"
+                                            title="Fork Session"
+                                            aria-label="Fork Session"
+                                            onClick={(event) => {
+                                              event.stopPropagation();
+                                              void handleForkSession({ sessionId: session.id, projectId: project.id });
+                                            }}
+                                            disabled={busy}
+                                          >
+                                            <GitFork />
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="icon-button"
+                                            title="Remove Session"
+                                            aria-label="Remove Session"
+                                            onClick={(event) => {
+                                              event.stopPropagation();
+                                              requestSessionDelete(session);
+                                            }}
+                                          >
+                                            <Trash2 />
+                                          </button>
+                                        </div>
+                                      </div>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : null}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
 
-              {leftSidebarTab === 'config' ? (
-                <div className="sim-card">
-                  <h2>Config</h2>
-                  <p>Signed in as: <strong>{currentUserEmail}</strong></p>
-                  <label>
-                    <span>Turn Steering</span>
-                    <input
-                      type="checkbox"
-                      checked={appSettings.turnSteerEnabled}
-                      onChange={(event) => void handleTurnSteerToggle(event.target.checked)}
-                      disabled={busy}
-                    />
-                  </label>
-                  <button type="button" className="button-secondary" onClick={() => void handleLogout()} disabled={busy}>
-                    Sign Out
-                  </button>
-                  {isAdmin ? (
-                    <>
-                      <h3>Admin</h3>
-                      <p className="sim-subtitle">Admin controls UI shell is ready for next backend wiring step.</p>
-                    </>
-                  ) : null}
+                    {leftSidebarTab === 'config' ? (
+                      <div className="left-config-panel">
+                        <h2>Config</h2>
+                        <p>Signed in as: <strong>{currentUserEmail}</strong></p>
+                        <label>
+                          <span>Turn Steering</span>
+                          <input
+                            type="checkbox"
+                            checked={appSettings.turnSteerEnabled}
+                            onChange={(event) => void handleTurnSteerToggle(event.target.checked)}
+                            disabled={busy}
+                          />
+                        </label>
+                        <button type="button" className="button-secondary" onClick={() => void handleLogout()} disabled={busy}>
+                          Sign Out
+                        </button>
+                        {isAdmin ? (
+                          <>
+                            <h3>Admin</h3>
+                            <p className="sim-subtitle">Admin controls UI shell is ready for next backend wiring step.</p>
+                          </>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
-              ) : null}
-            </aside>
+              </aside>
+            ) : null}
 
             <section className="chat-pane">
-              <div className="chat-thread" ref={chatThreadRef}>
+              <div className="chat-thread" ref={chatThreadRef} onScroll={handleChatScroll}>
                 {displayedMessages.length === 0 ? <p className="chat-empty">No messages yet.</p> : null}
                 {displayedMessages.map((message) => (
                   <article
@@ -1587,17 +1778,17 @@ export default function HomePage() {
                     onClick={() => void handleSendTurn()}
                     disabled={(!canStartTurn && !canSteerTurn) || busy}
                   >
-                    <IconSend />
+                    <Send />
                   </button>
                 </div>
               </div>
             </section>
 
-            {insightsOpen ? (
-              <aside className={`insights-pane ${mobileInsightsOpen ? 'mobile-open' : ''}`}>
+            {rightSidebarMode !== 'closed' || mobileInsightsOpen ? (
+              <aside className={`insights-pane ${mobileInsightsOpen ? 'mobile-open' : `mode-${rightSidebarMode}`}`}>
                 <div className="mobile-sidebar-head mobile-sidebar-head-right">
-                  <button type="button" className="icon-button" onClick={() => setMobileInsightsOpen(false)} aria-label="Close insights">
-                    <IconInspect />
+                  <button type="button" className="icon-button" onClick={() => closeRightSidebar()} aria-label="Close insights">
+                    <EyeOff />
                   </button>
                 </div>
                 <div className="insights-tabs">
