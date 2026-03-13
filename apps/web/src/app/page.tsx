@@ -1519,6 +1519,7 @@ async function apiRequest<T>(
 ): Promise<T> {
   const response = await fetch(path, {
     method: input.method,
+    cache: 'no-store',
     headers: {
       'content-type': 'application/json',
     },
