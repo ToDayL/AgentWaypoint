@@ -1,4 +1,4 @@
-import { mkdir, stat } from 'node:fs/promises';
+import { mkdir, readdir, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 
 type FilesystemBackendConfig = {
@@ -36,6 +36,36 @@ export class FilesystemBackend {
     }
   }
 
+  async suggestWorkspaceDirectories(inputPrefix: string, limit = 12): Promise<string[]> {
+    const sanitizedLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 50) : 12;
+    const prefix = inputPrefix.trim();
+    const resolvedPrefix = path.resolve(prefix.length > 0 ? prefix : '.');
+    const hasTrailingSeparator = /[\\/]+$/.test(prefix);
+    const scanDirectory = hasTrailingSeparator ? resolvedPrefix : path.dirname(resolvedPrefix);
+    const segmentPrefix = hasTrailingSeparator ? '' : path.basename(resolvedPrefix);
+
+    if (!this.isPathPotentiallyAllowed(scanDirectory)) {
+      return [];
+    }
+
+    let entries;
+    try {
+      entries = await readdir(scanDirectory, { withFileTypes: true, encoding: 'utf8' });
+    } catch (error: unknown) {
+      if (isMissingPathError(error) || isPermissionDeniedError(error)) {
+        return [];
+      }
+      throw error;
+    }
+
+    return entries
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith(segmentPrefix))
+      .map((entry) => path.join(scanDirectory, entry.name))
+      .filter((candidate) => this.isPathPotentiallyAllowed(candidate))
+      .sort((a, b) => a.localeCompare(b))
+      .slice(0, sanitizedLimit);
+  }
+
   private async assertExistingWorkspaceDirectory(normalizedCwd: string): Promise<string> {
     const absolutePath = path.resolve(normalizedCwd);
     this.assertWorkspaceAllowed(absolutePath);
@@ -55,25 +85,50 @@ export class FilesystemBackend {
   }
 
   private assertWorkspaceAllowed(absolutePath: string): void {
-    const rootsConfig = this.config.allowedRepoRoots?.trim();
-    if (!rootsConfig) {
-      return;
+    if (!this.isPathWithinAllowedRoots(absolutePath)) {
+      throw new Error(`Project workspace is outside allowed roots: ${absolutePath}`);
+    }
+  }
+
+  private isPathPotentiallyAllowed(absolutePath: string): boolean {
+    const allowedRoots = this.readAllowedRoots();
+    if (allowedRoots.length === 0) {
+      return true;
     }
 
-    const allowedRoots = rootsConfig
+    return allowedRoots.some(
+      (root) =>
+        absolutePath === root ||
+        absolutePath.startsWith(`${root}${path.sep}`) ||
+        root.startsWith(`${absolutePath}${path.sep}`),
+    );
+  }
+
+  private isPathWithinAllowedRoots(absolutePath: string): boolean {
+    const allowedRoots = this.readAllowedRoots();
+    if (allowedRoots.length === 0) {
+      return true;
+    }
+
+    return allowedRoots.some((root) => absolutePath === root || absolutePath.startsWith(`${root}${path.sep}`));
+  }
+
+  private readAllowedRoots(): string[] {
+    const rootsConfig = this.config.allowedRepoRoots?.trim();
+    if (!rootsConfig) {
+      return [];
+    }
+    return rootsConfig
       .split(',')
       .map((entry) => path.resolve(entry.trim()))
       .filter((entry) => entry.length > 0);
-
-    const isAllowed = allowedRoots.some(
-      (root) => absolutePath === root || absolutePath.startsWith(`${root}${path.sep}`),
-    );
-    if (!isAllowed) {
-      throw new Error(`Project workspace is outside allowed roots: ${absolutePath}`);
-    }
   }
 }
 
 function isMissingPathError(error: unknown): boolean {
   return !!error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'ENOENT';
+}
+
+function isPermissionDeniedError(error: unknown): boolean {
+  return !!error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'EACCES';
 }

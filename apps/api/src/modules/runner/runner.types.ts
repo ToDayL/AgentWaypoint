@@ -48,6 +48,11 @@ export type EnsureDirectoryResult = {
   created: boolean;
 };
 
+export type WorkspaceSuggestionInput = {
+  prefix: string;
+  limit?: number;
+};
+
 export type ApprovalDecisionInput =
   | 'accept'
   | 'acceptForSession'
@@ -106,6 +111,7 @@ export interface RunnerAdapter {
   listModels(): Promise<AvailableModel[]>;
   forkThread(input: ForkThreadInput): Promise<ForkThreadResult>;
   ensureDirectory(input: EnsureDirectoryInput): Promise<EnsureDirectoryResult>;
+  suggestWorkspaceDirectories(input: WorkspaceSuggestionInput): Promise<string[]>;
 }
 
 export const RUNNER_ADAPTER = Symbol('RUNNER_ADAPTER');

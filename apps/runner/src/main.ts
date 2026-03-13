@@ -78,6 +78,14 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === 'GET' && pathname === '/runner/fs/suggestions') {
+      const prefix = (url.searchParams.get('prefix') ?? '').trim();
+      const limit = Number.parseInt(url.searchParams.get('limit') ?? '12', 10);
+      const suggestions = await filesystemBackend.suggestWorkspaceDirectories(prefix, limit);
+      sendJson(response, 200, { data: suggestions });
+      return;
+    }
+
     const turnStatusMatch = request.method === 'GET' ? pathname.match(/^\/runner\/turns\/([^/]+)$/) : null;
     if (turnStatusMatch) {
       const turnId = decodeURIComponent(turnStatusMatch[1] ?? '');

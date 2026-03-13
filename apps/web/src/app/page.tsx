@@ -166,6 +166,8 @@ const STREAM_EVENTS = [
   'turn.cancelled',
 ];
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+const WORKSPACE_SUGGESTIONS_LIST_ID = 'workspace-path-suggestions';
+const SESSION_CWD_SUGGESTIONS_LIST_ID = 'session-cwd-path-suggestions';
 
 export default function HomePage() {
   const [mounted, setMounted] = useState(false);
@@ -178,11 +180,15 @@ export default function HomePage() {
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
   const [newProjectName, setNewProjectName] = useState('Simulation Workspace');
   const [newProjectRepoPath, setNewProjectRepoPath] = useState('');
+  const [workspaceSuggestions, setWorkspaceSuggestions] = useState<string[]>([]);
+  const [workspaceSuggestionBusy, setWorkspaceSuggestionBusy] = useState(false);
   const [newProjectDefaultModel, setNewProjectDefaultModel] = useState('');
   const [newProjectDefaultSandbox, setNewProjectDefaultSandbox] = useState('');
   const [newProjectDefaultApprovalPolicy, setNewProjectDefaultApprovalPolicy] = useState('');
   const [newSessionTitle, setNewSessionTitle] = useState('First Simulation Session');
   const [newSessionCwdOverride, setNewSessionCwdOverride] = useState('');
+  const [sessionCwdSuggestions, setSessionCwdSuggestions] = useState<string[]>([]);
+  const [sessionCwdSuggestionBusy, setSessionCwdSuggestionBusy] = useState(false);
   const [newSessionModelOverride, setNewSessionModelOverride] = useState('');
   const [newSessionSandboxOverride, setNewSessionSandboxOverride] = useState('');
   const [newSessionApprovalPolicyOverride, setNewSessionApprovalPolicyOverride] = useState('');
@@ -235,6 +241,96 @@ export default function HomePage() {
     void loadProjects();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!mounted) {
+      return;
+    }
+
+    const prefix = newProjectRepoPath.trim();
+    if (!prefix) {
+      setWorkspaceSuggestions([]);
+      setWorkspaceSuggestionBusy(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      setWorkspaceSuggestionBusy(true);
+      void apiRequest<{ data: string[] }>(
+        `/api/sim/fs/suggestions?${new URLSearchParams({ prefix, limit: '8' }).toString()}`,
+        {
+          method: 'GET',
+          email,
+          signal: controller.signal,
+        },
+      )
+        .then((response) => {
+          setWorkspaceSuggestions(response.data ?? []);
+        })
+        .catch((requestError) => {
+          if (isAbortError(requestError)) {
+            return;
+          }
+          setWorkspaceSuggestions([]);
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) {
+            setWorkspaceSuggestionBusy(false);
+          }
+        });
+    }, 180);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [mounted, newProjectRepoPath, email]);
+
+  useEffect(() => {
+    if (!mounted) {
+      return;
+    }
+
+    const prefix = newSessionCwdOverride.trim();
+    if (!prefix) {
+      setSessionCwdSuggestions([]);
+      setSessionCwdSuggestionBusy(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      setSessionCwdSuggestionBusy(true);
+      void apiRequest<{ data: string[] }>(
+        `/api/sim/fs/suggestions?${new URLSearchParams({ prefix, limit: '8' }).toString()}`,
+        {
+          method: 'GET',
+          email,
+          signal: controller.signal,
+        },
+      )
+        .then((response) => {
+          setSessionCwdSuggestions(response.data ?? []);
+        })
+        .catch((requestError) => {
+          if (isAbortError(requestError)) {
+            return;
+          }
+          setSessionCwdSuggestions([]);
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) {
+            setSessionCwdSuggestionBusy(false);
+          }
+        });
+    }, 180);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [mounted, newSessionCwdOverride, email]);
 
   async function loadAppSettings(): Promise<void> {
     try {
@@ -786,9 +882,20 @@ export default function HomePage() {
               Workspace Path
               <input
                 value={newProjectRepoPath}
-                onChange={(event) => setNewProjectRepoPath(event.target.value)}
+                onChange={(event) =>
+                  setNewProjectRepoPath(applyDirectorySuggestionSelection(event.target.value, workspaceSuggestions))
+                }
                 placeholder="/absolute/path/to/repo"
+                list={WORKSPACE_SUGGESTIONS_LIST_ID}
               />
+              <datalist id={WORKSPACE_SUGGESTIONS_LIST_ID}>
+                {workspaceSuggestions.map((suggestion) => (
+                  <option key={suggestion} value={suggestion} />
+                ))}
+              </datalist>
+              <span className="sim-input-hint">
+                {workspaceSuggestionBusy ? 'Loading suggestions…' : 'Type a path to see matching directories.'}
+              </span>
             </label>
             <label>
               Default Model
@@ -872,9 +979,20 @@ export default function HomePage() {
               Session CWD Override
               <input
                 value={newSessionCwdOverride}
-                onChange={(event) => setNewSessionCwdOverride(event.target.value)}
+                onChange={(event) =>
+                  setNewSessionCwdOverride(applyDirectorySuggestionSelection(event.target.value, sessionCwdSuggestions))
+                }
                 placeholder="Leave blank to use project workspace"
+                list={SESSION_CWD_SUGGESTIONS_LIST_ID}
               />
+              <datalist id={SESSION_CWD_SUGGESTIONS_LIST_ID}>
+                {sessionCwdSuggestions.map((suggestion) => (
+                  <option key={suggestion} value={suggestion} />
+                ))}
+              </datalist>
+              <span className="sim-input-hint">
+                {sessionCwdSuggestionBusy ? 'Loading suggestions…' : 'Type a path to see matching directories.'}
+              </span>
             </label>
             <label>
               Model Override
@@ -1144,7 +1262,7 @@ export default function HomePage() {
 
 async function apiRequest<T>(
   path: string,
-  input: { method: 'GET' | 'POST'; email: string; body?: Record<string, unknown> },
+  input: { method: 'GET' | 'POST'; email: string; body?: Record<string, unknown>; signal?: AbortSignal },
 ): Promise<T> {
   const response = await fetch(path, {
     method: input.method,
@@ -1153,6 +1271,7 @@ async function apiRequest<T>(
       'x-user-email': input.email,
     },
     body: input.body ? JSON.stringify(input.body) : undefined,
+    signal: input.signal,
   });
 
   const text = await response.text();
@@ -1186,6 +1305,21 @@ function extractMessage(error: unknown): string {
     return error.message;
   }
   return 'Unexpected error';
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+function applyDirectorySuggestionSelection(value: string, suggestions: string[]): string {
+  if (!value) {
+    return value;
+  }
+  return suggestions.includes(value) ? ensureTrailingSlash(value) : value;
+}
+
+function ensureTrailingSlash(value: string): string {
+  return value.endsWith('/') ? value : `${value}/`;
 }
 
 function formatApprovalKind(kind: string): string {

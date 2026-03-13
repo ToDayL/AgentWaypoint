@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readdir } from 'node:fs/promises';
 import * as path from 'node:path';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -16,6 +16,7 @@ import {
   RunnerAdapter,
   SteerTurnInput,
   StartTurnInput,
+  WorkspaceSuggestionInput,
 } from './runner.types';
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
@@ -150,6 +151,28 @@ export class MockRunnerAdapter implements RunnerAdapter {
       path: absolutePath,
       created: true,
     };
+  }
+
+  async suggestWorkspaceDirectories(input: WorkspaceSuggestionInput): Promise<string[]> {
+    const sanitizedLimit = Number.isFinite(input.limit) ? Math.min(Math.max(Math.trunc(input.limit ?? 12), 1), 50) : 12;
+    const prefix = input.prefix.trim();
+    const resolvedPrefix = path.resolve(prefix.length > 0 ? prefix : '.');
+    const hasTrailingSeparator = /[\\/]+$/.test(prefix);
+    const scanDirectory = hasTrailingSeparator ? resolvedPrefix : path.dirname(resolvedPrefix);
+    const segmentPrefix = hasTrailingSeparator ? '' : path.basename(resolvedPrefix);
+
+    let entries;
+    try {
+      entries = await readdir(scanDirectory, { withFileTypes: true, encoding: 'utf8' });
+    } catch {
+      return [];
+    }
+
+    return entries
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith(segmentPrefix))
+      .map((entry) => path.join(scanDirectory, entry.name))
+      .sort((a, b) => a.localeCompare(b))
+      .slice(0, sanitizedLimit);
   }
 
   private async handleDelta(turnId: string, chunk: string): Promise<void> {

@@ -7,6 +7,7 @@ import {
   ForkThreadInput,
   ForkThreadResult,
   ResolveTurnApprovalInput,
+  WorkspaceSuggestionInput,
   RunnerStreamEvent,
   RunnerAdapter,
   SteerTurnInput,
@@ -241,6 +242,24 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       path: ensuredPath,
       created: (response as { created?: unknown }).created === true,
     };
+  }
+
+  async suggestWorkspaceDirectories(input: WorkspaceSuggestionInput): Promise<string[]> {
+    const query = new URLSearchParams({
+      prefix: input.prefix,
+      limit: String(input.limit ?? 12),
+    });
+    const response = await this.request({
+      method: 'GET',
+      path: `/runner/fs/suggestions?${query.toString()}`,
+    });
+    if (!response || typeof response !== 'object' || !Array.isArray((response as { data?: unknown }).data)) {
+      throw new Error('Runner workspace suggestions response is invalid');
+    }
+
+    return ((response as { data: unknown[] }).data ?? [])
+      .filter((item): item is string => typeof item === 'string')
+      .filter((item) => item.trim().length > 0);
   }
 
   private async request(options: RunnerHttpRequestOptions): Promise<unknown> {
