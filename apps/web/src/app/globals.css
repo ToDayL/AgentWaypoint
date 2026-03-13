@@ -167,6 +167,13 @@ body {
   grid-template-columns: minmax(0, 1fr) var(--right-pane-width);
 }
 
+.shell-grid.config-open,
+.shell-grid.config-open.left-pin,
+.shell-grid.config-open.right-pin,
+.shell-grid.config-open.left-pin.right-pin {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .chat-pane,
 .sim-card {
   border: 1px solid var(--line);
@@ -205,6 +212,19 @@ body {
   background: color-mix(in srgb, var(--bg-panel) 94%, #101620 6%);
   border-right: 1px solid var(--line);
   box-shadow: 14px 0 28px rgba(0, 0, 0, 0.28);
+}
+
+.left-sidebar.config-fullscreen {
+  position: relative;
+  top: auto;
+  left: auto;
+  bottom: auto;
+  width: auto;
+  z-index: auto;
+  height: 100%;
+  background: color-mix(in srgb, var(--bg-panel) 96%, #101620 4%);
+  box-shadow: none;
+  border-right: none;
 }
 
 .chat-pane {
@@ -423,6 +443,56 @@ body {
 .left-config-panel p {
   margin: 0.25rem 0 0.5rem;
   font-size: 0.8rem;
+}
+
+.admin-user-list {
+  margin-top: 0.55rem;
+}
+
+.admin-user-table button {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.admin-user-create-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+.admin-user-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.admin-user-table th,
+.admin-user-table td {
+  text-align: left;
+  padding: 0.35rem 0.4rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 45%, transparent);
+  vertical-align: middle;
+}
+
+.admin-user-table th {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.admin-user-table tbody tr:nth-child(odd) {
+  background: color-mix(in srgb, var(--bg-subtle) 28%, transparent);
+}
+
+.admin-user-table tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--bg-subtle) 12%, transparent);
+}
+
+.admin-user-create-bottom {
+  margin-top: 0.45rem;
+  margin-left: auto;
+  display: inline-flex;
 }
 
 .mobile-sidebar-head {

@@ -15,6 +15,7 @@ import {
   Settings,
   SlidersHorizontal,
   Trash2,
+  UserCog,
 } from 'lucide-react';
 import { Diff, Hunk, parseDiff } from 'react-diff-view';
 
@@ -125,6 +126,18 @@ type AppSettings = {
   turnSteerEnabled: boolean;
 };
 
+type AdminManagedUser = {
+  id: string;
+  email: string;
+  displayName: string | null;
+  role: 'admin' | 'user';
+  isActive: boolean;
+  authPolicy: string;
+  lastLoginAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type AuthSessionResponse =
   | {
       authenticated: true;
@@ -207,6 +220,8 @@ type ActionPanelMode =
   | 'createProject'
   | 'createSession'
   | 'projectConfig'
+  | 'createUser'
+  | 'manageUser'
   | 'confirmDeleteProject'
   | 'confirmDeleteSession';
 
@@ -214,6 +229,20 @@ export default function HomePage() {
   const [mounted, setMounted] = useState(false);
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
+  const [currentPasswordInput, setCurrentPasswordInput] = useState('');
+  const [nextPasswordInput, setNextPasswordInput] = useState('');
+  const [confirmNextPasswordInput, setConfirmNextPasswordInput] = useState('');
+  const [passwordChangeNotice, setPasswordChangeNotice] = useState('');
+  const [adminUsers, setAdminUsers] = useState<AdminManagedUser[]>([]);
+  const [newManagedUserEmail, setNewManagedUserEmail] = useState('');
+  const [newManagedUserDisplayName, setNewManagedUserDisplayName] = useState('');
+  const [newManagedUserPassword, setNewManagedUserPassword] = useState('');
+  const [newManagedUserRole, setNewManagedUserRole] = useState<'admin' | 'user'>('user');
+  const [newManagedUserIsActive, setNewManagedUserIsActive] = useState(true);
+  const [managedUserTarget, setManagedUserTarget] = useState<AdminManagedUser | null>(null);
+  const [managedUserRoleDraft, setManagedUserRoleDraft] = useState<'admin' | 'user'>('user');
+  const [managedUserActiveDraft, setManagedUserActiveDraft] = useState(true);
+  const [managedUserPasswordDraft, setManagedUserPasswordDraft] = useState('');
   const [authenticated, setAuthenticated] = useState(false);
   const [currentUserEmail, setCurrentUserEmail] = useState('');
   const [currentUserRole, setCurrentUserRole] = useState<'admin' | 'user'>('user');
@@ -300,7 +329,16 @@ export default function HomePage() {
     ];
   }, [messages, assistantText, streamBubbleTurnId, streamActive]);
   const isAdmin = currentUserRole === 'admin';
-  const shellGridClassName = ['shell-grid', `left-${leftSidebarMode}`, `right-${rightSidebarMode}`].join(' ');
+  const configFullscreenActive =
+    leftSidebarTab === 'config' && (leftSidebarMode !== 'closed' || mobileLeftSidebarOpen);
+  const shellGridClassName = [
+    'shell-grid',
+    `left-${leftSidebarMode}`,
+    `right-${rightSidebarMode}`,
+    configFullscreenActive ? 'config-open' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
   const renderedDiffs = useMemo(() => {
     return diffSummaries.map((rawDiff, index) => ({
       id: `${index}-${rawDiff.length}`,
@@ -470,6 +508,11 @@ export default function HomePage() {
         setCurrentUserEmail(response.principal.email);
         setCurrentUserRole(response.principal.role);
         await loadAppSettings();
+        if (response.principal.role === 'admin') {
+          await loadAdminUsers();
+        } else {
+          setAdminUsers([]);
+        }
         await loadAvailableModels();
         await loadProjects();
         return;
@@ -538,6 +581,105 @@ export default function HomePage() {
       setPendingApproval(null);
       setStreamBubbleTurnId('');
       setStreamActive(false);
+      setAdminUsers([]);
+      setManagedUserTarget(null);
+      setManagedUserPasswordDraft('');
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleChangePassword(): Promise<void> {
+    if (!currentPasswordInput || !nextPasswordInput || !confirmNextPasswordInput) {
+      return;
+    }
+    if (nextPasswordInput !== confirmNextPasswordInput) {
+      setError('New password and confirmation do not match');
+      setPasswordChangeNotice('');
+      return;
+    }
+
+    setBusy(true);
+    setError('');
+    setPasswordChangeNotice('');
+    try {
+      await apiRequest<{ success: boolean }>('/api/sim/auth/password/change', {
+        method: 'POST',
+        body: {
+          currentPassword: currentPasswordInput,
+          newPassword: nextPasswordInput,
+        },
+      });
+      setCurrentPasswordInput('');
+      setNextPasswordInput('');
+      setConfirmNextPasswordInput('');
+      setPasswordChangeNotice('Password updated');
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+      setPasswordChangeNotice('');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadAdminUsers(): Promise<void> {
+    try {
+      const users = (await apiRequest<AdminManagedUser[]>('/api/sim/settings/users', {
+        method: 'GET',
+      })) as AdminManagedUser[];
+      setAdminUsers(users);
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    }
+  }
+
+  async function handleCreateManagedUser(): Promise<boolean> {
+    if (!newManagedUserEmail.trim() || !newManagedUserPassword) {
+      return false;
+    }
+
+    setBusy(true);
+    setError('');
+    try {
+      await apiRequest<AdminManagedUser>('/api/sim/settings/users', {
+        method: 'POST',
+        body: {
+          email: newManagedUserEmail.trim(),
+          displayName: newManagedUserDisplayName.trim() || null,
+          password: newManagedUserPassword,
+          role: newManagedUserRole,
+          isActive: newManagedUserIsActive,
+        },
+      });
+      setNewManagedUserEmail('');
+      setNewManagedUserDisplayName('');
+      setNewManagedUserPassword('');
+      setNewManagedUserRole('user');
+      setNewManagedUserIsActive(true);
+      await loadAdminUsers();
+      return true;
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUpdateManagedUser(
+    userId: string,
+    patch: Partial<Pick<AdminManagedUser, 'role' | 'isActive'>> & { password?: string },
+  ): Promise<void> {
+    setBusy(true);
+    setError('');
+    try {
+      await apiRequest<AdminManagedUser>(`/api/sim/settings/users/${userId}`, {
+        method: 'PATCH',
+        body: patch as Record<string, unknown>,
+      });
+      await loadAdminUsers();
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
@@ -1120,6 +1262,23 @@ export default function HomePage() {
     setActionPanelMode(mode);
   }
 
+  function openManageUserPanel(user: AdminManagedUser): void {
+    setManagedUserTarget(user);
+    setManagedUserRoleDraft(user.role);
+    setManagedUserActiveDraft(user.isActive);
+    setManagedUserPasswordDraft('');
+    openActionPanel('manageUser');
+  }
+
+  function openCreateUserPanel(): void {
+    setNewManagedUserEmail('');
+    setNewManagedUserDisplayName('');
+    setNewManagedUserPassword('');
+    setNewManagedUserRole('user');
+    setNewManagedUserIsActive(true);
+    openActionPanel('createUser');
+  }
+
   function handleLeftSidebarButtonClick(): void {
     if (typeof window !== 'undefined' && window.matchMedia('(max-width: 860px)').matches) {
       setMobileLeftSidebarOpen(true);
@@ -1176,6 +1335,30 @@ export default function HomePage() {
     setActionPanelMode('closed');
     setProjectDeleteTarget(null);
     setSessionDeleteTarget(null);
+    setManagedUserTarget(null);
+    setManagedUserPasswordDraft('');
+  }
+
+  async function handleApplyManagedUserFromPanel(): Promise<void> {
+    if (!managedUserTarget) {
+      return;
+    }
+    const patch: Partial<Pick<AdminManagedUser, 'role' | 'isActive'>> & { password?: string } = {};
+    if (managedUserRoleDraft !== managedUserTarget.role) {
+      patch.role = managedUserRoleDraft;
+    }
+    if (managedUserActiveDraft !== managedUserTarget.isActive) {
+      patch.isActive = managedUserActiveDraft;
+    }
+    if (managedUserPasswordDraft.trim()) {
+      patch.password = managedUserPasswordDraft.trim();
+    }
+    if (Object.keys(patch).length === 0) {
+      closeActionPanel();
+      return;
+    }
+    await handleUpdateManagedUser(managedUserTarget.id, patch);
+    closeActionPanel();
   }
 
   async function handleConfirmDelete(): Promise<void> {
@@ -1462,6 +1645,114 @@ export default function HomePage() {
                   </button>
                 </div>
               ) : null}
+              {actionPanelMode === 'createUser' ? (
+                <div className="action-panel-body">
+                  <h3>Create User</h3>
+                  <label>
+                    Email
+                    <input
+                      value={newManagedUserEmail}
+                      onChange={(event) => setNewManagedUserEmail(event.target.value)}
+                      placeholder="user@agentwaypoint.local"
+                    />
+                  </label>
+                  <label>
+                    Display Name
+                    <input
+                      value={newManagedUserDisplayName}
+                      onChange={(event) => setNewManagedUserDisplayName(event.target.value)}
+                      placeholder="Optional"
+                    />
+                  </label>
+                  <label>
+                    Initial Password
+                    <input
+                      type="password"
+                      value={newManagedUserPassword}
+                      onChange={(event) => setNewManagedUserPassword(event.target.value)}
+                      autoComplete="new-password"
+                    />
+                  </label>
+                  <div className="admin-user-create-row">
+                    <label>
+                      Role
+                      <select
+                        value={newManagedUserRole}
+                        onChange={(event) => setNewManagedUserRole(event.target.value === 'admin' ? 'admin' : 'user')}
+                      >
+                        <option value="user">user</option>
+                        <option value="admin">admin</option>
+                      </select>
+                    </label>
+                    <label>
+                      Active
+                      <input
+                        type="checkbox"
+                        checked={newManagedUserIsActive}
+                        onChange={(event) => setNewManagedUserIsActive(event.target.checked)}
+                      />
+                    </label>
+                  </div>
+                  <div className="sim-actions">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const created = await handleCreateManagedUser();
+                        if (created) {
+                          closeActionPanel();
+                        }
+                      }}
+                      disabled={busy || !newManagedUserEmail.trim() || !newManagedUserPassword}
+                    >
+                      Create
+                    </button>
+                    <button type="button" className="button-secondary" onClick={() => closeActionPanel()}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {actionPanelMode === 'manageUser' ? (
+                <div className="action-panel-body">
+                  <h3>Manage User</h3>
+                  <p>{managedUserTarget?.email ?? '-'}</p>
+                  <label>
+                    Role
+                    <select
+                      value={managedUserRoleDraft}
+                      onChange={(event) => setManagedUserRoleDraft(event.target.value === 'admin' ? 'admin' : 'user')}
+                    >
+                      <option value="user">user</option>
+                      <option value="admin">admin</option>
+                    </select>
+                  </label>
+                  <label>
+                    Active
+                    <input
+                      type="checkbox"
+                      checked={managedUserActiveDraft}
+                      onChange={(event) => setManagedUserActiveDraft(event.target.checked)}
+                    />
+                  </label>
+                  <label>
+                    Reset Password
+                    <input
+                      type="password"
+                      value={managedUserPasswordDraft}
+                      onChange={(event) => setManagedUserPasswordDraft(event.target.value)}
+                      placeholder="Leave empty to keep unchanged"
+                    />
+                  </label>
+                  <div className="sim-actions">
+                    <button type="button" onClick={() => void handleApplyManagedUserFromPanel()} disabled={busy}>
+                      Apply
+                    </button>
+                    <button type="button" className="button-secondary" onClick={() => closeActionPanel()}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               {actionPanelMode === 'confirmDeleteProject' || actionPanelMode === 'confirmDeleteSession' ? (
                 <div className="action-panel-body">
                   <h3>Confirm Delete</h3>
@@ -1515,7 +1806,11 @@ export default function HomePage() {
         {authenticated ? (
           <div className={shellGridClassName}>
             {leftSidebarMode !== 'closed' || mobileLeftSidebarOpen ? (
-              <aside className={`left-sidebar ${mobileLeftSidebarOpen ? 'mobile-open' : `mode-${leftSidebarMode}`}`}>
+              <aside
+                className={`left-sidebar ${mobileLeftSidebarOpen ? 'mobile-open' : `mode-${leftSidebarMode}`} ${
+                  leftSidebarTab === 'config' ? 'config-fullscreen' : ''
+                }`}
+              >
                 <div className="mobile-sidebar-head mobile-sidebar-head-left">
                   <button type="button" className="icon-button" onClick={() => closeLeftSidebar()} aria-label="Close sidebar">
                     <Menu />
@@ -1694,10 +1989,93 @@ export default function HomePage() {
                         <button type="button" className="button-secondary" onClick={() => void handleLogout()} disabled={busy}>
                           Sign Out
                         </button>
+                        <h3>Password</h3>
+                        <label>
+                          Current Password
+                          <input
+                            type="password"
+                            value={currentPasswordInput}
+                            onChange={(event) => setCurrentPasswordInput(event.target.value)}
+                            autoComplete="current-password"
+                          />
+                        </label>
+                        <label>
+                          New Password
+                          <input
+                            type="password"
+                            value={nextPasswordInput}
+                            onChange={(event) => setNextPasswordInput(event.target.value)}
+                            autoComplete="new-password"
+                          />
+                        </label>
+                        <label>
+                          Confirm New Password
+                          <input
+                            type="password"
+                            value={confirmNextPasswordInput}
+                            onChange={(event) => setConfirmNextPasswordInput(event.target.value)}
+                            autoComplete="new-password"
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => void handleChangePassword()}
+                          disabled={busy || !currentPasswordInput || !nextPasswordInput || !confirmNextPasswordInput}
+                        >
+                          Update Password
+                        </button>
+                        {passwordChangeNotice ? <p className="sim-input-hint">{passwordChangeNotice}</p> : null}
                         {isAdmin ? (
                           <>
-                            <h3>Admin</h3>
-                            <p className="sim-subtitle">Admin controls UI shell is ready for next backend wiring step.</p>
+                            <h3>Admin Users</h3>
+                            <div className="admin-user-list">
+                              {adminUsers.length === 0 ? <p className="sim-subtitle">No users found.</p> : null}
+                              {adminUsers.length > 0 ? (
+                                <table className="admin-user-table">
+                                  <thead>
+                                    <tr>
+                                      <th>Email</th>
+                                      <th>Name</th>
+                                      <th>Role</th>
+                                      <th>Status</th>
+                                      <th>Last Login</th>
+                                      <th />
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {adminUsers.map((user) => (
+                                      <tr key={user.id}>
+                                        <td>{user.email}</td>
+                                        <td>{user.displayName || '-'}</td>
+                                        <td>{user.role}</td>
+                                        <td>{user.isActive ? 'active' : 'inactive'}</td>
+                                        <td>{user.lastLoginAt ? new Date(user.lastLoginAt).toLocaleString() : '-'}</td>
+                                        <td>
+                                          <button
+                                            type="button"
+                                            className="button-secondary"
+                                            onClick={() => openManageUserPanel(user)}
+                                            disabled={busy}
+                                          >
+                                            <UserCog /> Manage
+                                          </button>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              ) : null}
+                              <button
+                                type="button"
+                                className="icon-button admin-user-create-bottom"
+                                onClick={() => openCreateUserPanel()}
+                                aria-label="Create User"
+                                title="Create User"
+                                disabled={busy}
+                              >
+                                <Plus />
+                              </button>
+                            </div>
                           </>
                         ) : null}
                       </div>
@@ -1707,7 +2085,7 @@ export default function HomePage() {
               </aside>
             ) : null}
 
-            <section className="chat-pane">
+            {!configFullscreenActive ? <section className="chat-pane">
               <div className="chat-thread" ref={chatThreadRef} onScroll={handleChatScroll}>
                 {displayedMessages.length === 0 ? <p className="chat-empty">No messages yet.</p> : null}
                 {displayedMessages.map((message) => (
@@ -1782,9 +2160,9 @@ export default function HomePage() {
                   </button>
                 </div>
               </div>
-            </section>
+            </section> : null}
 
-            {rightSidebarMode !== 'closed' || mobileInsightsOpen ? (
+            {!configFullscreenActive && (rightSidebarMode !== 'closed' || mobileInsightsOpen) ? (
               <aside className={`insights-pane ${mobileInsightsOpen ? 'mobile-open' : `mode-${rightSidebarMode}`}`}>
                 <div className="mobile-sidebar-head mobile-sidebar-head-right">
                   <button type="button" className="icon-button" onClick={() => closeRightSidebar()} aria-label="Close insights">
@@ -1903,11 +2281,27 @@ async function apiRequest<T>(
   });
 
   const text = await response.text();
-  const jsonPayload = text ? (JSON.parse(text) as unknown) : null;
-  if (!response.ok) {
-    throw new Error(extractApiMessage(jsonPayload, `Request failed (${response.status})`));
+  const contentType = response.headers.get('content-type') ?? '';
+  let jsonPayload: unknown = null;
+  if (text) {
+    const looksLikeJson = contentType.includes('application/json') || /^[\[{]/.test(text.trim());
+    if (looksLikeJson) {
+      try {
+        jsonPayload = JSON.parse(text) as unknown;
+      } catch {
+        jsonPayload = null;
+      }
+    }
   }
-  return jsonPayload as T;
+  if (!response.ok) {
+    if (jsonPayload) {
+      throw new Error(extractApiMessage(jsonPayload, `Request failed (${response.status})`));
+    }
+    const compactText = text.trim().replace(/\s+/g, ' ');
+    const detail = compactText ? `: ${compactText.slice(0, 180)}` : '';
+    throw new Error(`Request failed (${response.status})${detail}`);
+  }
+  return (jsonPayload ?? ({} as T)) as T;
 }
 
 function extractApiMessage(payload: unknown, fallback: string): string {
