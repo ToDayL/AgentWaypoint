@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
+  AccountRateLimits,
   AvailableModel,
   CancelTurnInput,
   CloseThreadInput,
@@ -177,6 +178,21 @@ export class HttpRunnerAdapter implements RunnerAdapter {
     });
   }
 
+  async readAccountRateLimits(): Promise<AccountRateLimits> {
+    const response = await this.request({
+      method: 'GET',
+      path: '/runner/account/rate-limits',
+    });
+    if (!response || typeof response !== 'object') {
+      throw new Error('Runner account rate limits response is invalid');
+    }
+    const record = response as Record<string, unknown>;
+    return {
+      rateLimits: parseRateLimitSnapshot(record.rateLimits),
+      rateLimitsByLimitId: parseRateLimitsByLimitId(record.rateLimitsByLimitId),
+    };
+  }
+
   async listModels(): Promise<AvailableModel[]> {
     const response = await this.request({
       method: 'GET',
@@ -321,4 +337,68 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       clearTimeout(timeout);
     }
   }
+}
+
+function parseRateLimitWindow(value: unknown): { usedPercent: number | null; resetsAt: number | null; windowDurationMins: number | null } | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    usedPercent: toFiniteNumber(record.usedPercent),
+    resetsAt: toFiniteNumber(record.resetsAt),
+    windowDurationMins: toFiniteNumber(record.windowDurationMins),
+  };
+}
+
+function parseRateLimitSnapshot(value: unknown): {
+  limitId: string | null;
+  limitName: string | null;
+  planType: string | null;
+  credits: { balance: string | null; hasCredits: boolean; unlimited: boolean } | null;
+  primary: { usedPercent: number | null; resetsAt: number | null; windowDurationMins: number | null } | null;
+  secondary: { usedPercent: number | null; resetsAt: number | null; windowDurationMins: number | null } | null;
+} | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const creditsRaw = record.credits;
+  const credits =
+    creditsRaw && typeof creditsRaw === 'object'
+      ? {
+          balance: typeof (creditsRaw as Record<string, unknown>).balance === 'string'
+            ? (creditsRaw as Record<string, unknown>).balance as string
+            : null,
+          hasCredits: (creditsRaw as Record<string, unknown>).hasCredits === true,
+          unlimited: (creditsRaw as Record<string, unknown>).unlimited === true,
+        }
+      : null;
+
+  return {
+    limitId: typeof record.limitId === 'string' ? record.limitId : null,
+    limitName: typeof record.limitName === 'string' ? record.limitName : null,
+    planType: typeof record.planType === 'string' ? record.planType : null,
+    credits,
+    primary: parseRateLimitWindow(record.primary),
+    secondary: parseRateLimitWindow(record.secondary),
+  };
+}
+
+function parseRateLimitsByLimitId(value: unknown): Record<string, ReturnType<typeof parseRateLimitSnapshot> extends infer T ? Exclude<T, null> : never> | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const output: Record<string, Exclude<ReturnType<typeof parseRateLimitSnapshot>, null>> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    const parsed = parseRateLimitSnapshot(entry);
+    if (parsed) {
+      output[key] = parsed;
+    }
+  }
+  return output;
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }

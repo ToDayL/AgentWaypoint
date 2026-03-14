@@ -93,6 +93,16 @@ export class CodexBackend {
     return items;
   }
 
+  async readAccountRateLimits(): Promise<Record<string, unknown>> {
+    const worker = await this.ensureCodexWorker();
+    await worker.readyPromise;
+    const result = await this.sendWorkerRequest(worker, 'account/rateLimits/read', null);
+    if (!result || typeof result !== 'object') {
+      throw new Error('account/rateLimits/read returned invalid response');
+    }
+    return result as Record<string, unknown>;
+  }
+
   async startTurn(input: StartTurnBody): Promise<void> {
     let completionResolve: (() => void) | null = null;
     let completionReject: ((error: Error) => void) | null = null;

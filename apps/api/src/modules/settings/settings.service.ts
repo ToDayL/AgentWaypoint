@@ -1,11 +1,17 @@
-import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { hashPassword } from '../auth/auth.service';
+import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
 import { AdminCreateUserBody, AdminUpdateUserBody, UpdateAppSettingsBody } from './settings.schemas';
 
 @Injectable()
 export class SettingsService {
-  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(SettingsService.name);
+
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(RUNNER_ADAPTER) private readonly runnerAdapter: RunnerAdapter,
+  ) {}
 
   async getAppSettings(userId: string) {
     return this.prisma.user.findUniqueOrThrow({
@@ -37,6 +43,19 @@ export class SettingsService {
         defaultWorkspaceRoot: true,
       },
     });
+  }
+
+  async getAccountRateLimits() {
+    try {
+      return await this.runnerAdapter.readAccountRateLimits();
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'unknown runner error';
+      this.logger.warn(`Failed to read account rate limits from runner: ${message}`);
+      return {
+        rateLimits: null,
+        rateLimitsByLimitId: null,
+      };
+    }
   }
 
   async listUsersForAdmin() {

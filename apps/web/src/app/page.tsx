@@ -138,6 +138,26 @@ type AppSettings = {
   defaultWorkspaceRoot: string | null;
 };
 
+type RateLimitWindow = {
+  usedPercent: number | null;
+  resetsAt: number | null;
+  windowDurationMins: number | null;
+};
+
+type AccountRateLimitsResponse = {
+  rateLimits: {
+    primary: RateLimitWindow | null;
+    secondary: RateLimitWindow | null;
+  } | null;
+  rateLimitsByLimitId: Record<
+    string,
+    {
+      primary: RateLimitWindow | null;
+      secondary: RateLimitWindow | null;
+    }
+  > | null;
+};
+
 type AdminManagedUser = {
   id: string;
   email: string;
@@ -270,6 +290,14 @@ export default function HomePage() {
     turnSteerEnabled: false,
     defaultWorkspaceRoot: null,
   });
+  const [accountRateLimits, setAccountRateLimits] = useState<{
+    fiveHour: RateLimitWindow | null;
+    weekly: RateLimitWindow | null;
+  }>({
+    fiveHour: null,
+    weekly: null,
+  });
+  const [accountRateLimitsBusy, setAccountRateLimitsBusy] = useState(false);
   const [turnSteerDraft, setTurnSteerDraft] = useState(false);
   const [defaultWorkspaceRootInput, setDefaultWorkspaceRootInput] = useState('');
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
@@ -523,6 +551,14 @@ export default function HomePage() {
   }, [mounted, newSessionCwdOverride, authenticated]);
 
   useEffect(() => {
+    if (!mounted || !authenticated || leftSidebarTab !== 'config') {
+      return;
+    }
+    void loadAccountRateLimits();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mounted, authenticated, leftSidebarTab]);
+
+  useEffect(() => {
     const container = chatThreadRef.current;
     if (!container || !chatAtBottomRef.current) {
       return;
@@ -765,6 +801,24 @@ export default function HomePage() {
       setDefaultWorkspaceRootInput(normalizedWorkspaceRoot ?? '');
     } catch (requestError) {
       setError(extractMessage(requestError));
+    }
+  }
+
+  async function loadAccountRateLimits(): Promise<void> {
+    setAccountRateLimitsBusy(true);
+    try {
+      const response = await apiRequest<AccountRateLimitsResponse>('/api/sim/settings/account/rate-limits', {
+        method: 'GET',
+      });
+      setAccountRateLimits(extract5hAndWeeklyLimits(response));
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+      setAccountRateLimits({
+        fiveHour: null,
+        weekly: null,
+      });
+    } finally {
+      setAccountRateLimitsBusy(false);
     }
   }
 
@@ -2234,6 +2288,36 @@ export default function HomePage() {
                       <div className="left-config-panel">
                         <h2>Config</h2>
                         <p>Signed in as: <strong>{currentUserEmail}</strong></p>
+                        <h3>Rate Limits</h3>
+                        {accountRateLimitsBusy ? <p>Loading account limits…</p> : null}
+                        {!accountRateLimitsBusy ? (
+                          <div className="rate-limit-list">
+                            <div className="rate-limit-item">
+                              <div className="rate-limit-head">
+                                <strong>5h</strong>
+                                <span>{formatRateLimitReset(accountRateLimits.fiveHour)}</span>
+                              </div>
+                              <div className="rate-limit-track">
+                                <div
+                                  className={`rate-limit-fill ${rateLimitFillClass(accountRateLimits.fiveHour)}`}
+                                  style={{ width: `${formatRateLimitRemainingPercent(accountRateLimits.fiveHour)}%` }}
+                                />
+                              </div>
+                            </div>
+                            <div className="rate-limit-item">
+                              <div className="rate-limit-head">
+                                <strong>Week</strong>
+                                <span>{formatRateLimitReset(accountRateLimits.weekly)}</span>
+                              </div>
+                              <div className="rate-limit-track">
+                                <div
+                                  className={`rate-limit-fill ${rateLimitFillClass(accountRateLimits.weekly)}`}
+                                  style={{ width: `${formatRateLimitRemainingPercent(accountRateLimits.weekly)}%` }}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        ) : null}
                         <label className="inline-checkbox">
                           <span>Turn Steering</span>
                           <input
@@ -2743,6 +2827,87 @@ function clamp01(value: number): number {
 
 function readFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function extract5hAndWeeklyLimits(response: AccountRateLimitsResponse): {
+  fiveHour: RateLimitWindow | null;
+  weekly: RateLimitWindow | null;
+} {
+  const windows: RateLimitWindow[] = [];
+  if (response.rateLimits?.primary) {
+    windows.push(response.rateLimits.primary);
+  }
+  if (response.rateLimits?.secondary) {
+    windows.push(response.rateLimits.secondary);
+  }
+  if (response.rateLimitsByLimitId) {
+    Object.values(response.rateLimitsByLimitId).forEach((snapshot) => {
+      if (snapshot.primary) {
+        windows.push(snapshot.primary);
+      }
+      if (snapshot.secondary) {
+        windows.push(snapshot.secondary);
+      }
+    });
+  }
+
+  return {
+    fiveHour: findRateLimitWindowByMinutes(windows, 300),
+    weekly: findRateLimitWindowByMinutes(windows, 10080),
+  };
+}
+
+function findRateLimitWindowByMinutes(windows: RateLimitWindow[], minutes: number): RateLimitWindow | null {
+  for (const window of windows) {
+    if (window.windowDurationMins === minutes) {
+      return window;
+    }
+  }
+  return null;
+}
+
+function formatRateLimitWindow(window: RateLimitWindow | null): string {
+  if (!window || window.usedPercent === null) {
+    return 'unavailable';
+  }
+  const percent = `${Math.max(0, Math.round(window.usedPercent))}% used`;
+  if (window.resetsAt === null) {
+    return percent;
+  }
+  const resetTimestamp = window.resetsAt > 1e12 ? window.resetsAt : window.resetsAt * 1000;
+  return `${percent}, resets ${new Date(resetTimestamp).toLocaleString()}`;
+}
+
+function formatRateLimitRemainingPercent(window: RateLimitWindow | null): number {
+  if (!window || window.usedPercent === null) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, Math.round(100 - window.usedPercent)));
+}
+
+function formatRateLimitReset(window: RateLimitWindow | null): string {
+  if (!window) {
+    return 'Unavailable';
+  }
+  if (window.resetsAt === null) {
+    return `${formatRateLimitRemainingPercent(window)}% left`;
+  }
+  const resetTimestamp = window.resetsAt > 1e12 ? window.resetsAt : window.resetsAt * 1000;
+  return `${formatRateLimitRemainingPercent(window)}% left (Reset at ${new Date(resetTimestamp).toLocaleString()})`;
+}
+
+function rateLimitFillClass(window: RateLimitWindow | null): string {
+  const remaining = formatRateLimitRemainingPercent(window);
+  if (remaining < 10) {
+    return 'rate-limit-fill-red';
+  }
+  if (remaining < 20) {
+    return 'rate-limit-fill-yellow';
+  }
+  if (remaining > 50) {
+    return 'rate-limit-fill-green';
+  }
+  return 'rate-limit-fill-blue';
 }
 
 function readApprovalCommand(payload: Record<string, unknown>): string | null {

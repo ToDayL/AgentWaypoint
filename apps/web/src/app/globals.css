@@ -505,6 +505,62 @@ body {
   font-size: 0.8rem;
 }
 
+.rate-limit-list {
+  margin: 0.25rem 0 0.55rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.rate-limit-item {
+  border: 1px solid color-mix(in srgb, var(--line) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-subtle) 28%, transparent);
+  padding: 0.4rem 0.45rem;
+}
+
+.rate-limit-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: 0.32rem;
+}
+
+.rate-limit-head strong {
+  color: var(--text-main);
+  font-size: 0.78rem;
+}
+
+.rate-limit-track {
+  height: 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 45%, transparent);
+  overflow: hidden;
+}
+
+.rate-limit-fill {
+  height: 100%;
+  border-radius: inherit;
+}
+
+.rate-limit-fill-green {
+  background: linear-gradient(90deg, #2ea36a 0%, #27bf78 100%);
+}
+
+.rate-limit-fill-blue {
+  background: linear-gradient(90deg, #2f7fdc 0%, #48a3ff 100%);
+}
+
+.rate-limit-fill-yellow {
+  background: linear-gradient(90deg, #c49519 0%, #f0b429 100%);
+}
+
+.rate-limit-fill-red {
+  background: linear-gradient(90deg, #c43c3c 0%, #ef5350 100%);
+}
+
 .admin-user-list {
   margin-top: 0.55rem;
 }

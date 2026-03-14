@@ -22,6 +22,11 @@ export class SettingsController {
     return this.settingsService.updateAppSettings(user.id, input);
   }
 
+  @Get('/account/rate-limits')
+  async getAccountRateLimits() {
+    return this.settingsService.getAccountRateLimits();
+  }
+
   @Get('/users')
   async listUsers(@CurrentUserDecorator() user: CurrentUser) {
     assertAdmin(user);

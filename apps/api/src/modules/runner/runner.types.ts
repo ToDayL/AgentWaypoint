@@ -57,6 +57,30 @@ export type WorkspaceSuggestionInput = {
   limit?: number;
 };
 
+export type RateLimitWindow = {
+  usedPercent: number | null;
+  resetsAt: number | null;
+  windowDurationMins: number | null;
+};
+
+export type RateLimitSnapshot = {
+  limitId: string | null;
+  limitName: string | null;
+  planType: string | null;
+  credits: {
+    balance: string | null;
+    hasCredits: boolean;
+    unlimited: boolean;
+  } | null;
+  primary: RateLimitWindow | null;
+  secondary: RateLimitWindow | null;
+};
+
+export type AccountRateLimits = {
+  rateLimits: RateLimitSnapshot | null;
+  rateLimitsByLimitId: Record<string, RateLimitSnapshot> | null;
+};
+
 export type ApprovalDecisionInput =
   | 'accept'
   | 'acceptForSession'
@@ -113,6 +137,7 @@ export interface RunnerAdapter {
   steerTurn(input: SteerTurnInput): Promise<void>;
   cancelTurn(input: CancelTurnInput): Promise<void>;
   resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void>;
+  readAccountRateLimits(): Promise<AccountRateLimits>;
   listModels(): Promise<AvailableModel[]>;
   forkThread(input: ForkThreadInput): Promise<ForkThreadResult>;
   closeThread(input: CloseThreadInput): Promise<void>;
