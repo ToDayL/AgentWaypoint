@@ -743,6 +743,10 @@ describe('API e2e', () => {
         kind: 'command_execution',
         status: 'pending',
         decision: null,
+        payload: {
+          command: 'git status',
+          cwd: TEST_REPO_PATH,
+        },
       },
     });
 

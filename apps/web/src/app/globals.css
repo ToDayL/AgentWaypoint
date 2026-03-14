@@ -869,6 +869,24 @@ button:disabled {
   padding: 0.75rem;
 }
 
+.sim-approval-command {
+  margin: 0.5rem 0;
+  border-radius: 8px;
+  border: 1px solid #7a6032;
+  background: #1f1a11;
+  padding: 0.5rem 0.6rem;
+  white-space: pre-wrap;
+  line-height: 1.35;
+  font-family: 'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace;
+  font-size: 0.8rem;
+}
+
+.sim-approval-meta {
+  margin: 0.3rem 0 0;
+  font-size: 0.8rem;
+  color: var(--fg-muted);
+}
+
 .sim-output,
 .sim-events {
   margin-top: 0.75rem;

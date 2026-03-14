@@ -2398,6 +2398,18 @@ export default function HomePage() {
                       ? `: ${pendingApproval.payload.reason}`
                       : ''}
                   </p>
+                  {pendingApproval.kind === 'command_execution' ? (
+                    <>
+                      {readApprovalCommand(pendingApproval.payload) ? (
+                        <pre className="sim-approval-command">{readApprovalCommand(pendingApproval.payload)}</pre>
+                      ) : null}
+                      {typeof pendingApproval.payload.cwd === 'string' && pendingApproval.payload.cwd.length > 0 ? (
+                        <p className="sim-approval-meta">
+                          CWD: <code>{pendingApproval.payload.cwd}</code>
+                        </p>
+                      ) : null}
+                    </>
+                  ) : null}
                   <div className="sim-actions sim-actions-approval">
                     {getApprovalActionOptions(pendingApproval).map((option) => (
                       <button
@@ -2731,6 +2743,37 @@ function clamp01(value: number): number {
 
 function readFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function readApprovalCommand(payload: Record<string, unknown>): string | null {
+  const command = payload.command;
+  if (typeof command === 'string') {
+    const trimmed = command.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (Array.isArray(command)) {
+    const joined = command
+      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+      .filter((entry) => entry.length > 0)
+      .join(' ');
+    return joined.length > 0 ? joined : null;
+  }
+  if (command && typeof command === 'object') {
+    const record = command as Record<string, unknown>;
+    if (Array.isArray(record.argv)) {
+      const joined = record.argv
+        .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+        .filter((entry) => entry.length > 0)
+        .join(' ');
+      if (joined.length > 0) {
+        return joined;
+      }
+    }
+    if (typeof record.command === 'string' && record.command.trim().length > 0) {
+      return record.command.trim();
+    }
+  }
+  return null;
 }
 
 function formatPlanPayload(payload: Record<string, unknown>): string {

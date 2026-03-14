@@ -857,6 +857,30 @@ function readOptionalPayloadString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }
 
+function readCommandForDisplay(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (Array.isArray(value)) {
+    const command = value
+      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+      .filter((entry) => entry.length > 0)
+      .join(' ');
+    return command.length > 0 ? command : null;
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return (
+      readCommandForDisplay(record.command) ??
+      readCommandForDisplay(record.argv) ??
+      readCommandForDisplay(record.args) ??
+      null
+    );
+  }
+  return null;
+}
+
 function readOptionalObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
@@ -871,7 +895,7 @@ function buildApprovalRequestedPayload(
       requestId,
       kind: 'command_execution',
       reason: readOptionalPayloadString(params.reason),
-      command: readOptionalPayloadString(params.command),
+      command: readCommandForDisplay(params.command),
       cwd: readOptionalPayloadString(params.cwd),
       itemId: readOptionalPayloadString(params.itemId),
       approvalId: readOptionalPayloadString(params.approvalId),
