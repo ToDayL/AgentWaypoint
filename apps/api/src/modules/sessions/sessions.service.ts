@@ -108,6 +108,10 @@ export class SessionsService {
             effectiveApprovalPolicy: true,
             failureCode: true,
             failureMessage: true,
+            contextRemainingRatio: true,
+            contextRemainingTokens: true,
+            contextWindowTokens: true,
+            contextUpdatedAt: true,
             userMessageId: true,
             assistantMessageId: true,
             createdAt: true,
@@ -137,7 +141,11 @@ export class SessionsService {
         updatedAt: session.updatedAt,
       },
       messages: session.messages,
-      turns: session.turns,
+      turns: session.turns.map((turn) => ({
+        ...turn,
+        contextRemainingRatio:
+          turn.contextRemainingRatio === null ? null : Number(turn.contextRemainingRatio),
+      })),
       activeTurnId: activeTurn?.id ?? null,
       activeTurnStatus: activeTurn?.status ?? null,
     };

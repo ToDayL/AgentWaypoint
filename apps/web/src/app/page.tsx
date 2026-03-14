@@ -72,6 +72,10 @@ type TurnSummary = {
   effectiveApprovalPolicy: string | null;
   failureCode: string | null;
   failureMessage: string | null;
+  contextRemainingRatio: number | null;
+  contextRemainingTokens: number | null;
+  contextWindowTokens: number | null;
+  contextUpdatedAt: string | null;
   createdAt: string;
   startedAt: string | null;
   endedAt: string | null;
@@ -109,6 +113,10 @@ type TurnStatusResponse = {
   effectiveApprovalPolicy: string | null;
   failureCode: string | null;
   failureMessage: string | null;
+  contextRemainingRatio: number | null;
+  contextRemainingTokens: number | null;
+  contextWindowTokens: number | null;
+  contextUpdatedAt: string | null;
   createdAt: string;
   startedAt: string | null;
   endedAt: string | null;
@@ -204,6 +212,7 @@ const STREAM_EVENTS = [
   'assistant.delta',
   'turn.approval.requested',
   'turn.approval.resolved',
+  'thread.token_usage.updated',
   'plan.updated',
   'reasoning.delta',
   'diff.updated',
@@ -296,6 +305,7 @@ export default function HomePage() {
   const [activeTurnId, setActiveTurnId] = useState('');
   const [resumedTurnHint, setResumedTurnHint] = useState('');
   const [turnStatus, setTurnStatus] = useState('idle');
+  const [contextRemainingRatio, setContextRemainingRatio] = useState<number | null>(null);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [streamBubbleTurnId, setStreamBubbleTurnId] = useState('');
   const [streamActive, setStreamActive] = useState(false);
@@ -1018,6 +1028,7 @@ export default function HomePage() {
       setDiffSummaries([]);
       setResumedTurnHint('');
       setTurnStatus('queued');
+      setContextRemainingRatio(null);
       setStreamActive(true);
 
       const result = await apiRequest<{ turnId: string; status: string }>(`/api/sim/sessions/${selectedSessionId}/turns`, {
@@ -1108,6 +1119,7 @@ export default function HomePage() {
       setActiveTurnId('');
       setResumedTurnHint('');
       setTurnStatus('idle');
+      setContextRemainingRatio(null);
       setPendingApproval(null);
       setStreamBubbleTurnId('');
       setStreamActive(false);
@@ -1128,6 +1140,8 @@ export default function HomePage() {
       setMessages(history.messages);
       setTurns(history.turns);
       setTurnStatus(history.activeTurnStatus ?? 'idle');
+      const latestTurn = history.turns[history.turns.length - 1] ?? null;
+      setContextRemainingRatio(latestTurn?.contextRemainingRatio ?? null);
       setActiveTurnId(history.activeTurnId ?? '');
       setPendingApproval(null);
       if (history.activeTurnId) {
@@ -1166,6 +1180,7 @@ export default function HomePage() {
       method: 'GET',
     });
     setTurnStatus(status.status);
+    setContextRemainingRatio((current) => status.contextRemainingRatio ?? current);
     setPendingApproval(status.pendingApproval);
     if (status.status === 'failed' && status.failureMessage) {
       setError(status.failureMessage);
@@ -1204,6 +1219,13 @@ export default function HomePage() {
 
         if (envelope.type === 'plan.updated') {
           setLatestPlan(formatPlanPayload(envelope.payload));
+        }
+
+        if (envelope.type === 'thread.token_usage.updated') {
+          const ratio = resolveRemainingContextRatio(envelope.payload);
+          if (ratio !== null) {
+            setContextRemainingRatio(ratio);
+          }
         }
 
         if (envelope.type === 'tool.output') {
@@ -1288,6 +1310,7 @@ export default function HomePage() {
             method: 'GET',
           });
           setTurnStatus(status.status);
+          setContextRemainingRatio((current) => status.contextRemainingRatio ?? current);
           setPendingApproval(status.pendingApproval);
           if (status.status === 'failed' && status.failureMessage) {
             setError(status.failureMessage);
@@ -1561,6 +1584,9 @@ export default function HomePage() {
                 ? `${(selectedProject?.name ?? 'No Project').trim()} - ${(selectedSession?.title ?? 'No Session').trim()}`
                 : 'AgentWaypoint'}
               {authenticated ? <span className="status-pill">{turnStatus}</span> : null}
+              {authenticated && contextRemainingRatio !== null ? (
+                <span className="status-pill">{`context left ${formatPercent(contextRemainingRatio)}`}</span>
+              ) : null}
             </h1>
           </div>
           {authenticated ? (
@@ -2635,6 +2661,12 @@ function formatApprovalKind(kind: string): string {
 }
 
 function describeStreamEvent(envelope: StreamEnvelope): string {
+  if (envelope.type === 'thread.token_usage.updated') {
+    const ratio = resolveRemainingContextRatio(envelope.payload);
+    const suffix = ratio === null ? '' : `: ${formatPercent(ratio)} left`;
+    return `#${envelope.seq} token usage updated${suffix}`;
+  }
+
   if (envelope.type === 'plan.updated') {
     return `#${envelope.seq} plan updated`;
   }
@@ -2673,6 +2705,32 @@ function describeStreamEvent(envelope: StreamEnvelope): string {
   }
 
   return `#${envelope.seq} ${envelope.type}`;
+}
+
+function resolveRemainingContextRatio(payload: Record<string, unknown>): number | null {
+  const directRatio = readFiniteNumber(payload.remainingRatio);
+  if (directRatio !== null) {
+    return clamp01(directRatio);
+  }
+
+  const modelContextWindow = readFiniteNumber(payload.modelContextWindow);
+  const totalTokens = readFiniteNumber(payload.totalTokens);
+  if (modelContextWindow === null || totalTokens === null || modelContextWindow <= 0) {
+    return null;
+  }
+  return clamp01((modelContextWindow - totalTokens) / modelContextWindow);
+}
+
+function formatPercent(value: number): string {
+  return `${Math.round(clamp01(value) * 100)}%`;
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function readFiniteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function formatPlanPayload(payload: Record<string, unknown>): string {

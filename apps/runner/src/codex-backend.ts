@@ -33,11 +33,20 @@ type CodexBackendDeps = {
 export class CodexBackend {
   private codexWorkerPromise: Promise<CodexWorker> | null = null;
   private readonly pendingApprovalRequests = new Map<string, PendingApprovalRequest>();
+  private readonly rawNotificationLogMode: 'off' | 'all' | 'usage';
 
   constructor(
     private readonly config: CodexBackendConfig,
     private readonly deps: CodexBackendDeps,
-  ) {}
+  ) {
+    const mode = (process.env.RUNNER_LOG_RAW_NOTIFICATIONS ?? '').trim().toLowerCase();
+    this.rawNotificationLogMode =
+      mode === '1' || mode === 'true' || mode === 'all'
+        ? 'all'
+        : mode === 'usage'
+          ? 'usage'
+          : 'off';
+  }
 
   async listModels(): Promise<ModelListItem[]> {
     const worker = await this.ensureCodexWorker();
@@ -461,6 +470,8 @@ export class CodexBackend {
   }
 
   private async handleCodexNotification(method: string, params: Record<string, unknown>): Promise<void> {
+    this.logRawNotification(method, params);
+
     if (method === 'turn/started') {
       const threadId = readNestedString(params, ['threadId']);
       const codexTurnId = readNestedString(params, ['turn', 'id']);
@@ -569,6 +580,37 @@ export class CodexBackend {
       return;
     }
 
+    if (method === 'thread/tokenUsage/updated') {
+      const threadId = readNestedString(params, ['threadId']);
+      const codexTurnId = readNestedString(params, ['turnId']);
+      if (!threadId) {
+        return;
+      }
+      const turn = this.findTurnByThread(threadId, codexTurnId);
+      if (!turn) {
+        return;
+      }
+
+      const modelContextWindow = readNestedNumber(params, ['tokenUsage', 'modelContextWindow']);
+      const totalTokens = readNestedNumber(params, ['tokenUsage', 'last', 'inputTokens']);
+      const remainingTokens =
+        modelContextWindow !== null && totalTokens !== null ? Math.max(modelContextWindow - totalTokens, 0) : null;
+      const remainingRatio =
+        modelContextWindow !== null && modelContextWindow > 0 && remainingTokens !== null
+          ? remainingTokens / modelContextWindow
+          : null;
+
+      await this.deps.appendTurnEvent(turn.turnId, 'thread.token_usage.updated', {
+        threadId,
+        turnId: codexTurnId,
+        modelContextWindow,
+        totalTokens,
+        remainingTokens,
+        remainingRatio,
+      });
+      return;
+    }
+
     if (
       method === 'item/reasoning/textDelta' ||
       method === 'item/reasoning/summaryTextDelta' ||
@@ -651,6 +693,22 @@ export class CodexBackend {
 
       const message = readNestedString(params, ['error', 'message']) || 'Codex runner error';
       await this.deps.finalizeTurn(turn.turnId, 'turn.failed', { message });
+    }
+  }
+
+  private logRawNotification(method: string, params: Record<string, unknown>): void {
+    if (this.rawNotificationLogMode === 'off') {
+      return;
+    }
+    if (this.rawNotificationLogMode === 'usage' && method !== 'thread/tokenUsage/updated') {
+      return;
+    }
+
+    try {
+      console.log(`[agentwaypoint-runner] raw notification ${method}: ${JSON.stringify(params)}`);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'serialize failed';
+      console.error(`[agentwaypoint-runner] raw notification ${method}: <unserializable: ${message}>`);
     }
   }
 
@@ -771,6 +829,17 @@ function readNestedString(record: Record<string, unknown>, path: string[]): stri
     value = (value as Record<string, unknown>)[key];
   }
   return typeof value === 'string' ? value : null;
+}
+
+function readNestedNumber(record: Record<string, unknown>, path: string[]): number | null {
+  let value: unknown = record;
+  for (const key of path) {
+    if (!value || typeof value !== 'object') {
+      return null;
+    }
+    value = (value as Record<string, unknown>)[key];
+  }
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function readOptionalString(value: unknown): string | null {

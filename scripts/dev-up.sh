@@ -47,7 +47,7 @@ start_bg() {
 }
 
 echo "[dev-up] Starting host runner..."
-start_bg runner bash -lc "cd '$ROOT_DIR'; set -a; source .env; set +a; RUNNER_WATCH_MODE=${RUNNER_WATCH_MODE:-0} exec bash scripts/dev-runner-host.sh"
+start_bg runner bash -lc "cd '$ROOT_DIR'; set -a; source .env; set +a; RUNNER_WATCH_MODE=${RUNNER_WATCH_MODE:-0} RUNNER_PORT=\${RUNNER_PORT:-4700} ENV_FILE='$ROOT_DIR/.env' exec bash scripts/dev-runner-host.sh"
 
 wait_health() {
   local name="$1"

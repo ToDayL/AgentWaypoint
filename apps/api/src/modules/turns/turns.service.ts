@@ -14,6 +14,7 @@ export type RunnerEventType =
   | 'assistant.delta'
   | 'turn.approval.requested'
   | 'turn.approval.resolved'
+  | 'thread.token_usage.updated'
   | 'plan.updated'
   | 'reasoning.delta'
   | 'diff.updated'
@@ -259,6 +260,10 @@ export class TurnsService implements OnModuleInit {
       effectiveModel: turn.effectiveModel,
       effectiveSandbox: turn.effectiveSandbox,
       effectiveApprovalPolicy: turn.effectiveApprovalPolicy,
+      contextRemainingRatio: turn.contextRemainingRatio === null ? null : Number(turn.contextRemainingRatio),
+      contextRemainingTokens: turn.contextRemainingTokens,
+      contextWindowTokens: turn.contextWindowTokens,
+      contextUpdatedAt: turn.contextUpdatedAt,
       pendingApproval,
     };
   }
@@ -408,6 +413,22 @@ export class TurnsService implements OnModuleInit {
         if (TERMINAL_STATUSES.includes(turn.status)) {
           return;
         }
+        await this.appendEvent(turnId, type, this.normalizePayload(payload));
+        return;
+      }
+      case 'thread.token_usage.updated': {
+        const ratio = readFiniteNumber(payload.remainingRatio);
+        const remainingTokens = readFiniteNumber(payload.remainingTokens);
+        const windowTokens = readFiniteNumber(payload.modelContextWindow);
+        await this.prisma.turn.update({
+          where: { id: turnId },
+          data: {
+            contextRemainingRatio: ratio,
+            contextRemainingTokens: remainingTokens === null ? null : Math.max(0, Math.round(remainingTokens)),
+            contextWindowTokens: windowTokens === null ? null : Math.max(0, Math.round(windowTokens)),
+            contextUpdatedAt: new Date(),
+          },
+        });
         await this.appendEvent(turnId, type, this.normalizePayload(payload));
         return;
       }
@@ -639,4 +660,8 @@ function normalizeApprovalDecisionInput(decision: ResolveTurnApprovalBody['decis
     return 'decline' as const;
   }
   return decision;
+}
+
+function readFiniteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }

@@ -101,6 +101,10 @@ model Turn {
   effectiveApprovalPolicy String?
   failureCode        String?
   failureMessage     String?
+  contextRemainingRatio Decimal? @db.Decimal(5, 4)
+  contextRemainingTokens Int?
+  contextWindowTokens Int?
+  contextUpdatedAt    DateTime?
   startedAt          DateTime?
   endedAt            DateTime?
   createdAt          DateTime  @default(now())

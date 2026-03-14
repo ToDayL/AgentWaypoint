@@ -90,6 +90,7 @@ export type RunnerStreamEvent = {
     | 'assistant.delta'
     | 'turn.approval.requested'
     | 'turn.approval.resolved'
+    | 'thread.token_usage.updated'
     | 'plan.updated'
     | 'reasoning.delta'
     | 'diff.updated'
