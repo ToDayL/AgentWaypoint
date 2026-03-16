@@ -248,6 +248,8 @@ const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const CHAT_MARKDOWN_REMARK_PLUGINS = [remarkGfm];
 const WORKSPACE_SUGGESTIONS_LIST_ID = 'workspace-path-suggestions';
 const SESSION_CWD_SUGGESTIONS_LIST_ID = 'session-cwd-path-suggestions';
+const LAST_PROJECT_STORAGE_KEY_PREFIX = 'agentwaypoint:last-project:';
+const LAST_SESSION_STORAGE_KEY_PREFIX = 'agentwaypoint:last-session:';
 type LeftSidebarTab = 'explorer' | 'config';
 type InsightsTab = 'diff' | 'tools' | 'reasoning' | 'events';
 type SidebarMode = 'closed' | 'pop' | 'pin';
@@ -286,6 +288,8 @@ export default function HomePage() {
   const [currentUserRole, setCurrentUserRole] = useState<'admin' | 'user'>('user');
   const [projects, setProjects] = useState<Project[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [sessionsByProject, setSessionsByProject] = useState<Record<string, Session[]>>({});
+  const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>([]);
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
   const [appSettings, setAppSettings] = useState<AppSettings>({
     turnSteerEnabled: false,
@@ -357,6 +361,8 @@ export default function HomePage() {
   const turnPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const chatThreadRef = useRef<HTMLDivElement | null>(null);
   const chatAtBottomRef = useRef(true);
+  const chatScrollTopRef = useRef(0);
+  const wasConfigFullscreenActiveRef = useRef(false);
 
   const canStartTurn = !!selectedSessionId && prompt.trim().length > 0 && activeTurnId === '';
   const canSteerTurn =
@@ -560,6 +566,23 @@ export default function HomePage() {
   }, [mounted, authenticated, leftSidebarTab]);
 
   useEffect(() => {
+    if (typeof window === 'undefined' || !authenticated || !currentUserEmail || !selectedProjectId) {
+      return;
+    }
+    writeLastProjectId(currentUserEmail, selectedProjectId);
+  }, [authenticated, currentUserEmail, selectedProjectId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !authenticated || !currentUserEmail || !selectedProjectId || !selectedSessionId) {
+      return;
+    }
+    if (!sessions.some((session) => session.id === selectedSessionId)) {
+      return;
+    }
+    writeLastSessionId(currentUserEmail, selectedProjectId, selectedSessionId);
+  }, [authenticated, currentUserEmail, selectedProjectId, selectedSessionId, sessions]);
+
+  useEffect(() => {
     const container = chatThreadRef.current;
     if (!container || !chatAtBottomRef.current) {
       return;
@@ -584,11 +607,52 @@ export default function HomePage() {
     return () => window.cancelAnimationFrame(rafId);
   }, [leftSidebarMode, rightSidebarMode]);
 
+  useEffect(() => {
+    const wasConfigFullscreenActive = wasConfigFullscreenActiveRef.current;
+    if (configFullscreenActive && !wasConfigFullscreenActive) {
+      const container = chatThreadRef.current;
+      if (container) {
+        chatScrollTopRef.current = container.scrollTop;
+      }
+    }
+    if (!configFullscreenActive && wasConfigFullscreenActive) {
+      if (typeof window === 'undefined') {
+        return;
+      }
+      const rafId = window.requestAnimationFrame(() => {
+        const container = chatThreadRef.current;
+        if (!container) {
+          return;
+        }
+        if (chatAtBottomRef.current) {
+          container.scrollTop = container.scrollHeight;
+          return;
+        }
+        const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+        container.scrollTop = Math.min(chatScrollTopRef.current, maxScrollTop);
+      });
+      wasConfigFullscreenActiveRef.current = configFullscreenActive;
+      return () => window.cancelAnimationFrame(rafId);
+    }
+    wasConfigFullscreenActiveRef.current = configFullscreenActive;
+  }, [configFullscreenActive]);
+
   function handleChatScroll(): void {
     const container = chatThreadRef.current;
     if (!container) {
       return;
     }
+    chatScrollTopRef.current = container.scrollTop;
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    chatAtBottomRef.current = distanceFromBottom <= 24;
+  }
+
+  function snapshotChatScrollState(): void {
+    const container = chatThreadRef.current;
+    if (!container) {
+      return;
+    }
+    chatScrollTopRef.current = container.scrollTop;
     const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
     chatAtBottomRef.current = distanceFromBottom <= 24;
   }
@@ -599,8 +663,9 @@ export default function HomePage() {
         method: 'GET',
       });
       if (response.authenticated) {
+        const userEmail = response.principal.email;
         setAuthenticated(true);
-        setCurrentUserEmail(response.principal.email);
+        setCurrentUserEmail(userEmail);
         setCurrentUserRole(response.principal.role);
         await loadAppSettings();
         if (response.principal.role === 'admin') {
@@ -609,7 +674,12 @@ export default function HomePage() {
           setAdminUsers([]);
         }
         await loadAvailableModels();
-        await loadProjects();
+        const preferredProjectId = readLastProjectId(userEmail) ?? undefined;
+        await loadProjects({
+          preferredProjectId,
+          preferredSessionId: preferredProjectId ? readLastSessionId(userEmail, preferredProjectId) ?? undefined : undefined,
+          hydrateAllSessions: true,
+        });
         return;
       }
       setAuthenticated(false);
@@ -660,6 +730,8 @@ export default function HomePage() {
       setCurrentUserEmail('');
       setProjects([]);
       setSessions([]);
+      setSessionsByProject({});
+      setExpandedProjectIds([]);
       setSelectedProjectId('');
       setSelectedSessionId('');
       setMessages([]);
@@ -848,7 +920,12 @@ export default function HomePage() {
     );
   }
 
-  async function loadProjects(options?: { forceSelectFirst?: boolean }): Promise<void> {
+  async function loadProjects(options?: {
+    forceSelectFirst?: boolean;
+    preferredProjectId?: string;
+    preferredSessionId?: string;
+    hydrateAllSessions?: boolean;
+  }): Promise<void> {
     setBusy(true);
     setError('');
     try {
@@ -856,16 +933,91 @@ export default function HomePage() {
         method: 'GET',
       })) as Project[];
       setProjects(items);
-      const hasSelectedProject = items.some((item) => item.id === selectedProjectId);
-      const shouldSelectFirst =
-        options?.forceSelectFirst === true || !selectedProjectId || !hasSelectedProject;
-
-      if (shouldSelectFirst && items[0]) {
-        setSelectedProjectId(items[0].id);
-        await loadSessions(items[0].id);
-      } else if (shouldSelectFirst) {
+      setSessionsByProject((current) => {
+        const next: Record<string, Session[]> = {};
+        items.forEach((project) => {
+          const cachedSessions = current[project.id];
+          if (cachedSessions !== undefined) {
+            next[project.id] = cachedSessions;
+          }
+        });
+        return next;
+      });
+      setExpandedProjectIds((current) => current.filter((projectId) => items.some((project) => project.id === projectId)));
+      if (items.length === 0) {
         setSessions([]);
         setSelectedSessionId('');
+        return;
+      }
+
+      const hasSelectedProject = items.some((item) => item.id === selectedProjectId);
+      const preferredProjectId = options?.preferredProjectId?.trim() ?? '';
+      const preferredProject = preferredProjectId.length > 0 ? items.find((item) => item.id === preferredProjectId) : undefined;
+      const firstProjectId = items[0]?.id ?? '';
+      const nextProjectId =
+        options?.forceSelectFirst === true
+          ? firstProjectId
+          : preferredProject?.id ?? (hasSelectedProject ? selectedProjectId : firstProjectId);
+
+      if (options?.hydrateAllSessions) {
+        const allProjectSessions = await Promise.all(
+          items.map(async (project) => {
+            const projectSessions = (await apiRequest<Session[]>(`/api/projects/${project.id}/sessions`, {
+              method: 'GET',
+            })) as Session[];
+            return { projectId: project.id, sessions: projectSessions };
+          }),
+        );
+        const sessionsMap: Record<string, Session[]> = {};
+        allProjectSessions.forEach((entry) => {
+          sessionsMap[entry.projectId] = entry.sessions;
+        });
+        setSessionsByProject(sessionsMap);
+        setExpandedProjectIds((current) => {
+          const next = current.filter((projectId) => items.some((project) => project.id === projectId));
+          return next.includes(nextProjectId) ? next : [...next, nextProjectId];
+        });
+        const selectedProjectSessions =
+          sessionsMap[nextProjectId] ?? [];
+        setSelectedProjectId(nextProjectId);
+        setSessions(selectedProjectSessions);
+
+        const preferredSessionId = options?.preferredSessionId?.trim() ?? '';
+        const preferredSession =
+          preferredSessionId.length > 0 ? selectedProjectSessions.find((item) => item.id === preferredSessionId) : undefined;
+        const currentlySelectedSession = selectedProjectSessions.find((item) => item.id === selectedSessionId);
+        const nextSession = preferredSession ?? currentlySelectedSession ?? selectedProjectSessions[0];
+        if (nextSession) {
+          setSelectedSessionId(nextSession.id);
+          await loadSessionHistory(nextSession.id, {
+            resumeStream: true,
+            resetEventLog: true,
+            resetInspectPanel: true,
+          });
+        } else {
+          setSelectedSessionId('');
+          setMessages([]);
+          setAssistantText('');
+          setReasoningText('');
+          setLatestPlan('');
+          setToolOutput('');
+          setDiffSummaries([]);
+          setActiveTurnId('');
+          setResumedTurnHint('');
+          setTurnStatus('idle');
+          setPendingApproval(null);
+          setEventLog([]);
+          setStreamBubbleTurnId('');
+          setStreamActive(false);
+        }
+        return;
+      }
+
+      if (nextProjectId !== selectedProjectId || options?.forceSelectFirst === true) {
+        setSelectedProjectId(nextProjectId);
+        await loadSessions(nextProjectId, {
+          preferredSessionId: options?.preferredSessionId,
+        });
       }
     } catch (requestError) {
       setError(extractMessage(requestError));
@@ -899,7 +1051,7 @@ export default function HomePage() {
     }
   }
 
-  async function loadSessions(projectId: string): Promise<void> {
+  async function loadSessions(projectId: string, options?: { preferredSessionId?: string }): Promise<void> {
     if (!projectId) {
       setSessions([]);
       setSelectedSessionId('');
@@ -913,9 +1065,15 @@ export default function HomePage() {
         method: 'GET',
       })) as Session[];
       setSessions(items);
-      if (items[0]) {
-        setSelectedSessionId(items[0].id);
-        await loadSessionHistory(items[0].id, {
+      setSessionsByProject((current) => ({ ...current, [projectId]: items }));
+      setExpandedProjectIds((current) => (current.includes(projectId) ? current : [...current, projectId]));
+      const preferredSessionId = options?.preferredSessionId?.trim() ?? '';
+      const preferredSession = preferredSessionId.length > 0 ? items.find((item) => item.id === preferredSessionId) : undefined;
+      const currentlySelectedSession = items.find((item) => item.id === selectedSessionId);
+      const nextSession = preferredSession ?? currentlySelectedSession ?? items[0];
+      if (nextSession) {
+        setSelectedSessionId(nextSession.id);
+        await loadSessionHistory(nextSession.id, {
           resumeStream: true,
           resetEventLog: true,
           resetInspectPanel: true,
@@ -1492,6 +1650,7 @@ export default function HomePage() {
   function closeLeftSidebar(): void {
     if (mobileLeftSidebarOpen) {
       setMobileLeftSidebarOpen(false);
+      setLeftSidebarMode('closed');
       return;
     }
     setLeftSidebarMode('closed');
@@ -1503,6 +1662,31 @@ export default function HomePage() {
       return;
     }
     setRightSidebarMode('closed');
+  }
+
+  async function toggleProjectExpansion(projectId: string): Promise<void> {
+    const normalizedProjectId = projectId.trim();
+    if (!normalizedProjectId) {
+      return;
+    }
+    const isExpanded = expandedProjectIds.includes(normalizedProjectId);
+    setExpandedProjectIds((current) =>
+      isExpanded ? current.filter((item) => item !== normalizedProjectId) : [...current, normalizedProjectId],
+    );
+    if (isExpanded || sessionsByProject[normalizedProjectId]) {
+      return;
+    }
+    try {
+      const items = (await apiRequest<Session[]>(`/api/projects/${normalizedProjectId}/sessions`, {
+        method: 'GET',
+      })) as Session[];
+      setSessionsByProject((current) => ({ ...current, [normalizedProjectId]: items }));
+      if (selectedProjectId === normalizedProjectId) {
+        setSessions(items);
+      }
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    }
   }
 
   function requestProjectDelete(project: Project): void {
@@ -2145,7 +2329,10 @@ export default function HomePage() {
                       className={`icon-button ${leftSidebarTab === 'config' ? 'tab-active' : ''}`}
                       aria-label="Config"
                       title="Config"
-                      onClick={() => setLeftSidebarTab('config')}
+                      onClick={() => {
+                        snapshotChatScrollState();
+                        setLeftSidebarTab('config');
+                      }}
                     >
                       <SlidersHorizontal />
                     </button>
@@ -2178,16 +2365,28 @@ export default function HomePage() {
                           </div>
                         </div>
                         <ul className="tree-root">
-                          {projects.map((project) => (
-                            <li key={project.id}>
+                          {projects.map((project) => {
+                            const sessionsForProject = sessionsByProject[project.id] ?? [];
+                            const projectExpanded = expandedProjectIds.includes(project.id);
+                            return <li key={project.id}>
                               <div
                                 className={`tree-row ${selectedProjectId === project.id ? 'active' : ''}`}
-                                onClick={() => {
-                                  setSelectedProjectId(project.id);
-                                  void loadSessions(project.id);
-                                  setMobileLeftSidebarOpen(false);
+                                onDoubleClick={() => {
+                                  void toggleProjectExpansion(project.id);
                                 }}
                               >
+                                <button
+                                  type="button"
+                                  className="icon-button"
+                                  title={projectExpanded ? 'Collapse Sessions' : 'Expand Sessions'}
+                                  aria-label={projectExpanded ? 'Collapse Sessions' : 'Expand Sessions'}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void toggleProjectExpansion(project.id);
+                                  }}
+                                >
+                                  {projectExpanded ? '-' : '+'}
+                                </button>
                                 <span className="tree-label">{project.name}</span>
                                 <div className="row-actions">
                                   <button
@@ -2229,14 +2428,16 @@ export default function HomePage() {
                                   </button>
                                 </div>
                               </div>
-                              {selectedProjectId === project.id ? (
+                              {projectExpanded ? (
                                 <ul className="tree-children">
-                                  {sessions.length === 0 ? <li className="tree-empty">No sessions</li> : null}
-                                  {sessions.map((session) => (
+                                  {sessionsForProject.length === 0 ? <li className="tree-empty">No sessions</li> : null}
+                                  {sessionsForProject.map((session) => (
                                     <li key={session.id}>
                                       <div
                                         className={`tree-row session-row ${selectedSessionId === session.id ? 'active' : ''}`}
                                         onClick={() => {
+                                          setSelectedProjectId(project.id);
+                                          setSessions(sessionsForProject);
                                           setSelectedSessionId(session.id);
                                           void loadSessionHistory(session.id, {
                                             resumeStream: true,
@@ -2244,6 +2445,9 @@ export default function HomePage() {
                                             resetInspectPanel: true,
                                           });
                                           setMobileLeftSidebarOpen(false);
+                                        }}
+                                        onDoubleClick={() => {
+                                          void toggleProjectExpansion(project.id);
                                         }}
                                       >
                                         <span className="tree-label">{session.title}</span>
@@ -2280,7 +2484,7 @@ export default function HomePage() {
                                 </ul>
                               ) : null}
                             </li>
-                          ))}
+                          })}
                         </ul>
                       </div>
                     ) : null}
@@ -2729,6 +2933,69 @@ function extractMessage(error: unknown): string {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
+}
+
+function readLastProjectId(userEmail: string): string | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    const projectId = window.localStorage.getItem(lastProjectStorageKey(userEmail))?.trim() ?? '';
+    return projectId.length > 0 ? projectId : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastProjectId(userEmail: string, projectId: string): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const normalizedProjectId = projectId.trim();
+  if (!normalizedProjectId) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(lastProjectStorageKey(userEmail), normalizedProjectId);
+  } catch {
+    // Ignore storage errors so project selection still works without persistence.
+  }
+}
+
+function lastProjectStorageKey(userEmail: string): string {
+  return `${LAST_PROJECT_STORAGE_KEY_PREFIX}${userEmail.trim().toLowerCase()}`;
+}
+
+function readLastSessionId(userEmail: string, projectId: string): string | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    const sessionId = window.localStorage.getItem(lastSessionStorageKey(userEmail, projectId))?.trim() ?? '';
+    return sessionId.length > 0 ? sessionId : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastSessionId(userEmail: string, projectId: string, sessionId: string): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const normalizedProjectId = projectId.trim();
+  const normalizedSessionId = sessionId.trim();
+  if (!normalizedProjectId || !normalizedSessionId) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(lastSessionStorageKey(userEmail, normalizedProjectId), normalizedSessionId);
+  } catch {
+    // Ignore storage errors so session selection still works without persistence.
+  }
+}
+
+function lastSessionStorageKey(userEmail: string, projectId: string): string {
+  return `${LAST_SESSION_STORAGE_KEY_PREFIX}${userEmail.trim().toLowerCase()}:${projectId.trim()}`;
 }
 
 function applyDirectorySuggestionSelection(value: string, suggestions: string[]): string {
