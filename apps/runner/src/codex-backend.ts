@@ -654,10 +654,11 @@ export class CodexBackend {
       if (!turn || turn.finalized) {
         return;
       }
+      const diffText = readOptionalPayloadString(params.diff) ?? readOptionalPayloadString(params.unifiedDiff);
       await this.deps.appendTurnEvent(turn.turnId, 'diff.updated', {
         diffStat: readOptionalObject(params.diffStat),
-        diffAvailable: params.diff !== undefined || params.unifiedDiff !== undefined,
-        unifiedDiff: readOptionalPayloadString(params.unifiedDiff),
+        diffAvailable: !!diffText,
+        unifiedDiff: diffText,
         diff: readOptionalPayloadString(params.diff),
       });
       return;

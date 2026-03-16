@@ -98,6 +98,18 @@ type StreamEnvelope = {
   payload: Record<string, unknown>;
   createdAt: string;
 };
+type TimelineEvent = {
+  id: string;
+  kind: 'tool' | 'reasoning' | 'plan' | 'diff' | 'approval' | 'token' | 'assistant' | 'event' | 'system';
+  title: string;
+  seqStart: number;
+  seqEnd: number;
+  createdAt: string;
+  details: string[];
+  diffFiles?: string[];
+  status?: 'running' | 'completed';
+  toolKey?: string;
+};
 type ParsedDiffFile = ReturnType<typeof parseDiff>[number];
 
 type TurnStatusResponse = {
@@ -251,7 +263,7 @@ const SESSION_CWD_SUGGESTIONS_LIST_ID = 'session-cwd-path-suggestions';
 const LAST_PROJECT_STORAGE_KEY_PREFIX = 'agentwaypoint:last-project:';
 const LAST_SESSION_STORAGE_KEY_PREFIX = 'agentwaypoint:last-session:';
 type LeftSidebarTab = 'explorer' | 'config';
-type InsightsTab = 'diff' | 'tools' | 'reasoning' | 'events';
+type InsightsTab = 'diff' | 'events';
 type SidebarMode = 'closed' | 'pop' | 'pin';
 type ActionPanelMode =
   | 'closed'
@@ -327,14 +339,14 @@ export default function HomePage() {
   const [newSessionSandboxOverride, setNewSessionSandboxOverride] = useState('');
   const [newSessionApprovalPolicyOverride, setNewSessionApprovalPolicyOverride] = useState('');
   const [prompt, setPrompt] = useState('');
-  const [eventLog, setEventLog] = useState<string[]>([]);
+  const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [turns, setTurns] = useState<TurnSummary[]>([]);
   const [assistantText, setAssistantText] = useState('');
   const [reasoningText, setReasoningText] = useState('');
   const [latestPlan, setLatestPlan] = useState('');
   const [toolOutput, setToolOutput] = useState('');
-  const [diffSummaries, setDiffSummaries] = useState<string[]>([]);
+  const [latestDiffSummary, setLatestDiffSummary] = useState('');
   const [activeTurnId, setActiveTurnId] = useState('');
   const [resumedTurnHint, setResumedTurnHint] = useState('');
   const [turnStatus, setTurnStatus] = useState('idle');
@@ -345,7 +357,7 @@ export default function HomePage() {
   const [leftSidebarTab, setLeftSidebarTab] = useState<LeftSidebarTab>('explorer');
   const [leftSidebarMode, setLeftSidebarMode] = useState<SidebarMode>('pin');
   const [rightSidebarMode, setRightSidebarMode] = useState<SidebarMode>('closed');
-  const [insightsTab, setInsightsTab] = useState<InsightsTab>('diff');
+  const [insightsTab, setInsightsTab] = useState<InsightsTab>('events');
   const [sessionInfoOpen, setSessionInfoOpen] = useState(true);
   const [mobileLeftSidebarOpen, setMobileLeftSidebarOpen] = useState(false);
   const [mobileInsightsOpen, setMobileInsightsOpen] = useState(false);
@@ -431,13 +443,16 @@ export default function HomePage() {
   ]
     .filter(Boolean)
     .join(' ');
-  const renderedDiffs = useMemo(() => {
-    return diffSummaries.map((rawDiff, index) => ({
-      id: `${index}-${rawDiff.length}`,
-      files: parseDiff(rawDiff),
-      rawDiff,
-    }));
-  }, [diffSummaries]);
+  const renderedDiff = useMemo(() => {
+    if (!latestDiffSummary) {
+      return null;
+    }
+    return {
+      id: `latest-${latestDiffSummary.length}`,
+      files: parseDiff(latestDiffSummary),
+      rawDiff: latestDiffSummary,
+    };
+  }, [latestDiffSummary]);
 
   useEffect(() => {
     return () => {
@@ -736,12 +751,12 @@ export default function HomePage() {
       setSelectedSessionId('');
       setMessages([]);
       setTurns([]);
-      setEventLog([]);
+      setTimelineEvents([]);
       setAssistantText('');
       setReasoningText('');
       setLatestPlan('');
       setToolOutput('');
-      setDiffSummaries([]);
+      setLatestDiffSummary('');
       setActiveTurnId('');
       setResumedTurnHint('');
       setTurnStatus('idle');
@@ -1001,12 +1016,12 @@ export default function HomePage() {
           setReasoningText('');
           setLatestPlan('');
           setToolOutput('');
-          setDiffSummaries([]);
+          setLatestDiffSummary('');
           setActiveTurnId('');
           setResumedTurnHint('');
           setTurnStatus('idle');
           setPendingApproval(null);
-          setEventLog([]);
+          setTimelineEvents([]);
           setStreamBubbleTurnId('');
           setStreamActive(false);
         }
@@ -1085,12 +1100,12 @@ export default function HomePage() {
         setReasoningText('');
         setLatestPlan('');
         setToolOutput('');
-        setDiffSummaries([]);
+        setLatestDiffSummary('');
         setActiveTurnId('');
         setResumedTurnHint('');
         setTurnStatus('idle');
         setPendingApproval(null);
-        setEventLog([]);
+        setTimelineEvents([]);
         setStreamBubbleTurnId('');
         setStreamActive(false);
       }
@@ -1233,12 +1248,12 @@ export default function HomePage() {
         return;
       }
 
-      setEventLog([]);
+      setTimelineEvents([]);
       setAssistantText('');
       setReasoningText('');
       setLatestPlan('');
       setToolOutput('');
-      setDiffSummaries([]);
+      setLatestDiffSummary('');
       setResumedTurnHint('');
       setTurnStatus('queued');
       setContextRemainingRatio(null);
@@ -1328,7 +1343,7 @@ export default function HomePage() {
       setReasoningText('');
       setLatestPlan('');
       setToolOutput('');
-      setDiffSummaries([]);
+      setLatestDiffSummary('');
       setActiveTurnId('');
       setResumedTurnHint('');
       setTurnStatus('idle');
@@ -1337,7 +1352,7 @@ export default function HomePage() {
       setStreamBubbleTurnId('');
       setStreamActive(false);
       if (options.resetEventLog) {
-        setEventLog([]);
+        setTimelineEvents([]);
       }
       return;
     }
@@ -1369,10 +1384,10 @@ export default function HomePage() {
         setReasoningText('');
         setLatestPlan('');
         setToolOutput('');
-        setDiffSummaries([]);
+        setLatestDiffSummary('');
       }
       if (options.resetEventLog) {
-        setEventLog([]);
+        setTimelineEvents([]);
       }
       if (history.activeTurnId) {
         await syncTurnState(history.activeTurnId);
@@ -1406,15 +1421,29 @@ export default function HomePage() {
     const source = new EventSource(streamUrl);
     eventSourceRef.current = source;
 
-    const appendEvent = (entry: string) => {
-      setEventLog((current) => [...current, entry]);
+    const appendTimelineEvent = (envelope: StreamEnvelope): void => {
+      setTimelineEvents((current) => mergeTimelineEvent(current, envelope));
+    };
+    const appendSystemTimelineEvent = (title: string): void => {
+      setTimelineEvents((current) => [
+        ...current,
+        {
+          id: `system-${Date.now()}-${current.length}`,
+          kind: 'system',
+          title,
+          seqStart: -1,
+          seqEnd: -1,
+          createdAt: new Date().toISOString(),
+          details: [],
+        },
+      ]);
     };
 
     STREAM_EVENTS.forEach((eventType) => {
       source.addEventListener(eventType, (evt) => {
         const message = evt as MessageEvent<string>;
         const envelope = JSON.parse(message.data) as StreamEnvelope;
-        appendEvent(describeStreamEvent(envelope));
+        appendTimelineEvent(envelope);
 
         if (envelope.type === 'assistant.delta') {
           const delta = envelope.payload.text;
@@ -1451,7 +1480,7 @@ export default function HomePage() {
         if (envelope.type === 'diff.updated') {
           const summary = formatDiffPayload(envelope.payload);
           if (summary) {
-            setDiffSummaries((current) => mergeDiffSummaryHistory(current, summary));
+            setLatestDiffSummary(summary);
           }
         }
 
@@ -1497,11 +1526,11 @@ export default function HomePage() {
     });
 
     source.onerror = () => {
-      appendEvent('stream disconnected');
+      appendSystemTimelineEvent('Stream disconnected');
       source.close();
       eventSourceRef.current = null;
       if (turnId) {
-        appendEvent('switching to turn status polling');
+        appendSystemTimelineEvent('Switched to turn status polling');
         startTurnStatusPolling(turnId, sessionId);
       }
     };
@@ -1633,10 +1662,17 @@ export default function HomePage() {
 
   function handleInsightsButtonClick(): void {
     if (typeof window !== 'undefined' && window.matchMedia('(max-width: 860px)').matches) {
+      setInsightsTab('events');
       setMobileInsightsOpen(true);
       return;
     }
-    setRightSidebarMode((current) => (current === 'closed' ? 'pop' : 'closed'));
+    setRightSidebarMode((current) => {
+      const next = current === 'closed' ? 'pop' : 'closed';
+      if (next !== 'closed') {
+        setInsightsTab('events');
+      }
+      return next;
+    });
   }
 
   function toggleLeftSidebarPinMode(): void {
@@ -2749,86 +2785,78 @@ export default function HomePage() {
                   <button type="button" className={insightsTab === 'diff' ? 'tab-active' : ''} onClick={() => setInsightsTab('diff')}>
                     Diff
                   </button>
-                  <button type="button" className={insightsTab === 'tools' ? 'tab-active' : ''} onClick={() => setInsightsTab('tools')}>
-                    Tools
-                  </button>
-                  <button type="button" className={insightsTab === 'reasoning' ? 'tab-active' : ''} onClick={() => setInsightsTab('reasoning')}>
-                    Reasoning
-                  </button>
                   <button type="button" className={insightsTab === 'events' ? 'tab-active' : ''} onClick={() => setInsightsTab('events')}>
-                    Events
+                    Timeline
                   </button>
                 </div>
                 <div className="insights-content">
                   {insightsTab === 'diff' ? (
                     <article className="sim-output">
                       <h3>Diff Summary</h3>
-                      {diffSummaries.length === 0 ? <pre>No diff updates yet.</pre> : null}
-                      {renderedDiffs.length > 0 ? (
+                      {!renderedDiff ? <pre>No diff updates yet.</pre> : null}
+                      {renderedDiff ? (
                         <div className="diff-list">
-                          {renderedDiffs.map((diff, diffIndex) => (
-                            <section key={diff.id} className="diff-block">
-                              <div className="diff-block-head">Diff #{diffIndex + 1}</div>
-                              {diff.files.length === 0 ? <pre>{diff.rawDiff}</pre> : null}
-                              {diff.files.length > 0 ? (
-                                <div className="diff-rdv-shell">
-                                  {diff.files.map((file, fileIndex) => (
-                                    <div key={`diff-${diff.id}-file-${fileIndex}`} className="diff-file-block">
-                                      <div className="diff-file-head">{formatDiffFileLabel(file)}</div>
-                                      <Diff viewType="unified" diffType={file.type} hunks={file.hunks}>
-                                        {(hunks) => hunks.map((hunk, hunkIndex) => <Hunk key={hunkIndex} hunk={hunk} />)}
-                                      </Diff>
-                                    </div>
-                                  ))}
-                                </div>
-                              ) : null}
+                          {renderedDiff.files.length === 0 ? (
+                            <section key={renderedDiff.id} className="diff-block">
+                              <div className="diff-block-head">Latest Diff</div>
+                              <pre>{renderedDiff.rawDiff}</pre>
+                            </section>
+                          ) : null}
+                          {renderedDiff.files.map((file, fileIndex) => (
+                            <section key={`diff-${renderedDiff.id}-file-${fileIndex}`} className="diff-block">
+                              <div className="diff-block-head">{formatDiffFileLabel(file)}</div>
+                              <div className="diff-rdv-shell">
+                                <Diff viewType="unified" diffType={file.type} hunks={file.hunks}>
+                                  {(hunks) => hunks.map((hunk, hunkIndex) => <Hunk key={hunkIndex} hunk={hunk} />)}
+                                </Diff>
+                              </div>
                             </section>
                           ))}
                         </div>
                       ) : null}
                     </article>
                   ) : null}
-                  {insightsTab === 'tools' ? (
-                    <article className="sim-output">
-                      <h3>Tool Output</h3>
-                      <pre>{toolOutput || 'No tool output yet.'}</pre>
-                    </article>
-                  ) : null}
-                  {insightsTab === 'reasoning' ? (
-                    <>
-                      <article className="sim-output">
-                        <h3>Reasoning</h3>
-                        <pre>{reasoningText || 'No reasoning deltas yet.'}</pre>
-                      </article>
-                      <article className="sim-output">
-                        <h3>Latest Plan</h3>
-                        <pre>{latestPlan || 'No plan updates yet.'}</pre>
-                      </article>
-                    </>
-                  ) : null}
                   {insightsTab === 'events' ? (
-                    <>
-                      <article className="sim-events">
-                        <h3>Event Timeline</h3>
-                        <ul>
-                          {eventLog.length === 0 ? <li>No events yet.</li> : null}
-                          {eventLog.map((entry, index) => (
-                            <li key={`${entry}-${index}`}>{entry}</li>
-                          ))}
-                        </ul>
-                      </article>
-                      <article className="sim-events">
-                        <h3>Turn History</h3>
-                        <ul>
-                          {turns.length === 0 ? <li>No turns yet.</li> : null}
-                          {turns.map((turn) => (
-                            <li key={turn.id}>
-                              <strong>{turn.status}</strong> {turn.id}
-                            </li>
-                          ))}
-                        </ul>
-                      </article>
-                    </>
+                    <div className="timeline-list">
+                      {timelineEvents.length === 0 ? <p className="timeline-empty">No events yet.</p> : null}
+                      {timelineEvents.map((event) => (
+                        <article key={event.id} className="timeline-event">
+                          <header className="timeline-event-head">
+                            <span className="timeline-event-title">{event.title}</span>
+                            {event.status ? <span className="status-pill">{event.status}</span> : null}
+                            {event.kind === 'diff' ? (
+                              <button
+                                type="button"
+                                className="timeline-inline-button"
+                                onClick={() => setInsightsTab('diff')}
+                              >
+                                View Diff
+                              </button>
+                            ) : null}
+                            <span className="timeline-event-seq">
+                              {event.seqStart >= 0
+                                ? event.seqStart === event.seqEnd
+                                  ? `#${event.seqStart}`
+                                  : `#${event.seqStart}-#${event.seqEnd}`
+                                : 'system'}
+                            </span>
+                          </header>
+                          {event.details.length > 0 || (event.kind === 'diff' && Array.isArray(event.diffFiles) && event.diffFiles.length > 0) ? (
+                            <div className="timeline-event-details">
+                              {event.kind === 'diff' && Array.isArray(event.diffFiles) && event.diffFiles.length > 0
+                                ? (
+                                    <article className="timeline-diff-file">
+                                      <header className="timeline-diff-file-title">{event.diffFiles.join('\n')}</header>
+                                    </article>
+                                  )
+                                : event.details.map((detail, index) => (
+                                    <pre key={`${event.id}-${index}`}>{detail}</pre>
+                                  ))}
+                            </div>
+                          ) : null}
+                        </article>
+                      ))}
+                    </div>
                   ) : null}
                 </div>
                 <div className={`session-info-wrap ${sessionInfoOpen ? 'open' : 'closed'}`}>
@@ -3022,51 +3050,376 @@ function formatApprovalKind(kind: string): string {
   return kind;
 }
 
-function describeStreamEvent(envelope: StreamEnvelope): string {
-  if (envelope.type === 'thread.token_usage.updated') {
-    const ratio = resolveRemainingContextRatio(envelope.payload);
-    const suffix = ratio === null ? '' : `: ${formatPercent(ratio)} left`;
-    return `#${envelope.seq} token usage updated${suffix}`;
+function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope): TimelineEvent[] {
+  // Omit top-level wrapper events so the timeline focuses on the useful payload events.
+  if (
+    envelope.type === 'turn.started' ||
+    envelope.type === 'turn.failed' ||
+    envelope.type === 'turn.cancelled'
+  ) {
+    return current;
   }
 
-  if (envelope.type === 'plan.updated') {
-    return `#${envelope.seq} plan updated`;
+  if (envelope.type === 'turn.completed') {
+    const content = typeof envelope.payload.content === 'string' ? envelope.payload.content.trim() : '';
+    const next: TimelineEvent[] = [...current];
+    if (content.length > 0) {
+      next.push({
+        id: `assistant-final-${envelope.seq}`,
+        kind: 'assistant',
+        title: 'Assistant Message',
+        seqStart: envelope.seq,
+        seqEnd: envelope.seq,
+        createdAt: envelope.createdAt,
+        details: [content],
+      });
+    }
+    next.push({
+      id: `turn-completed-${envelope.seq}`,
+      kind: 'event',
+      title: 'Turn Completed',
+      seqStart: envelope.seq,
+      seqEnd: envelope.seq,
+      createdAt: envelope.createdAt,
+      details: [],
+    });
+    return next;
+  }
+
+  if (envelope.type === 'tool.started') {
+    const toolKey = resolveToolKey(envelope);
+    const title = resolveToolTitle(envelope.payload);
+    return [
+      ...current,
+      {
+        id: `tool-${toolKey}-${envelope.seq}`,
+        kind: 'tool',
+        title,
+        seqStart: envelope.seq,
+        seqEnd: envelope.seq,
+        createdAt: envelope.createdAt,
+        details: [],
+        status: 'running',
+        toolKey,
+      },
+    ];
+  }
+
+  if (envelope.type === 'tool.output') {
+    const toolKey = resolveToolKey(envelope);
+    const output = resolveToolOutputText(envelope.payload);
+    if (!output) {
+      return current;
+    }
+    const toolIndex = findTargetToolTimelineIndex(current, toolKey);
+    if (toolIndex >= 0) {
+      return current.map((item, index) => {
+        if (index !== toolIndex) {
+          return item;
+        }
+        return {
+          ...item,
+          seqEnd: Math.max(item.seqEnd, envelope.seq),
+          details: appendOrMergeDetail(item.details, output),
+        };
+      });
+    }
+    return [
+      ...current,
+      {
+        id: `tool-${toolKey}-${envelope.seq}`,
+        kind: 'tool',
+        title: resolveToolTitle(envelope.payload),
+        seqStart: envelope.seq,
+        seqEnd: envelope.seq,
+        createdAt: envelope.createdAt,
+        details: [output],
+        status: 'running',
+        toolKey,
+      },
+    ];
+  }
+
+  if (envelope.type === 'tool.completed') {
+    const toolKey = resolveToolKey(envelope);
+    const toolIndex = findTargetToolTimelineIndex(current, toolKey);
+    if (toolIndex >= 0) {
+      return current.map((item, index) => {
+        if (index !== toolIndex) {
+          return item;
+        }
+        const completedNote = resolveToolCompletedNote(envelope.payload);
+        return {
+          ...item,
+          seqEnd: Math.max(item.seqEnd, envelope.seq),
+          status: 'completed',
+          details: completedNote ? appendOrMergeDetail(item.details, completedNote) : item.details,
+        };
+      });
+    }
+    return [
+      ...current,
+      {
+        id: `tool-${toolKey}-${envelope.seq}`,
+        kind: 'tool',
+        title: resolveToolTitle(envelope.payload),
+        seqStart: envelope.seq,
+        seqEnd: envelope.seq,
+        createdAt: envelope.createdAt,
+        details: resolveToolCompletedNote(envelope.payload) ? [resolveToolCompletedNote(envelope.payload) as string] : [],
+        status: 'completed',
+        toolKey,
+      },
+    ];
   }
 
   if (envelope.type === 'reasoning.delta') {
-    return `#${envelope.seq} reasoning ${String(envelope.payload.kind ?? 'delta')}`;
+    const delta = typeof envelope.payload.delta === 'string' ? envelope.payload.delta : '';
+    if (!delta) {
+      return current;
+    }
+    return appendOrMergeByKind(current, 'reasoning', 'Reasoning', envelope, delta);
+  }
+
+  if (envelope.type === 'assistant.delta') {
+    return current;
+  }
+
+  if (envelope.type === 'plan.updated') {
+    return [
+      ...current,
+      {
+        id: `plan-${envelope.seq}`,
+        kind: 'plan',
+        title: 'Plan Updated',
+        seqStart: envelope.seq,
+        seqEnd: envelope.seq,
+        createdAt: envelope.createdAt,
+        details: [formatPlanPayload(envelope.payload)],
+      },
+    ];
   }
 
   if (envelope.type === 'diff.updated') {
-    return `#${envelope.seq} diff updated`;
+    const files = extractDiffFilesFromPayload(envelope.payload);
+    const details = files.length > 0 ? [files.join('\n')] : ['Diff updated'];
+    return [
+      ...current,
+      {
+        id: `diff-${envelope.seq}`,
+        kind: 'diff',
+        title: 'Diff Updated',
+        seqStart: envelope.seq,
+        seqEnd: envelope.seq,
+        createdAt: envelope.createdAt,
+        details,
+        diffFiles: files,
+      },
+    ];
+  }
+
+  if (envelope.type === 'thread.token_usage.updated') {
+    const ratio = resolveRemainingContextRatio(envelope.payload);
+    const detail = ratio === null ? '' : `${formatPercent(ratio)} left`;
+    return [
+      ...current,
+      {
+        id: `token-${envelope.seq}`,
+        kind: 'token',
+        title: 'Context Usage Updated',
+        seqStart: envelope.seq,
+        seqEnd: envelope.seq,
+        createdAt: envelope.createdAt,
+        details: detail ? [detail] : [],
+      },
+    ];
   }
 
   if (envelope.type === 'turn.approval.requested') {
     const kind = typeof envelope.payload.kind === 'string' ? envelope.payload.kind : 'approval';
-    const reason =
-      typeof envelope.payload.reason === 'string' && envelope.payload.reason.length > 0
-        ? `: ${envelope.payload.reason}`
-        : '';
-    return `#${envelope.seq} ${formatApprovalKind(kind)} requested${reason}`;
+    const reason = typeof envelope.payload.reason === 'string' ? envelope.payload.reason.trim() : '';
+    return [
+      ...current,
+      {
+        id: `approval-${envelope.seq}`,
+        kind: 'approval',
+        title: `${formatApprovalKind(kind)} Requested`,
+        seqStart: envelope.seq,
+        seqEnd: envelope.seq,
+        createdAt: envelope.createdAt,
+        details: reason ? [reason] : [],
+      },
+    ];
   }
 
   if (envelope.type === 'turn.approval.resolved') {
-    return `#${envelope.seq} approval ${String(envelope.payload.decision ?? 'resolved')}`;
+    const decision = typeof envelope.payload.decision === 'string' ? envelope.payload.decision : 'resolved';
+    return [
+      ...current,
+      {
+        id: `approval-${envelope.seq}`,
+        kind: 'approval',
+        title: 'Approval Resolved',
+        seqStart: envelope.seq,
+        seqEnd: envelope.seq,
+        createdAt: envelope.createdAt,
+        details: [decision],
+      },
+    ];
   }
 
-  if (envelope.type === 'tool.started' || envelope.type === 'tool.completed') {
-    const title =
-      typeof envelope.payload.title === 'string' && envelope.payload.title.length > 0
-        ? envelope.payload.title
-        : String(envelope.payload.kind ?? 'tool');
-    return `#${envelope.seq} ${envelope.type.replace('tool.', 'tool ')}: ${title}`;
+  return [
+    ...current,
+    {
+      id: `event-${envelope.seq}-${envelope.type}`,
+      kind: 'event',
+      title: envelope.type,
+      seqStart: envelope.seq,
+      seqEnd: envelope.seq,
+      createdAt: envelope.createdAt,
+      details: [],
+    },
+  ];
+}
+
+function appendOrMergeByKind(
+  current: TimelineEvent[],
+  kind: TimelineEvent['kind'],
+  title: string,
+  envelope: StreamEnvelope,
+  text: string,
+): TimelineEvent[] {
+  const last = current[current.length - 1];
+  if (last && last.kind === kind) {
+    const updatedLast: TimelineEvent = {
+      ...last,
+      seqEnd: Math.max(last.seqEnd, envelope.seq),
+      details: appendOrMergeDetail(last.details, text),
+    };
+    return [...current.slice(0, -1), updatedLast];
+  }
+  return [
+    ...current,
+    {
+      id: `${kind}-${envelope.seq}`,
+      kind,
+      title,
+      seqStart: envelope.seq,
+      seqEnd: envelope.seq,
+      createdAt: envelope.createdAt,
+      details: [text],
+    },
+  ];
+}
+
+function appendOrMergeDetail(details: string[], text: string): string[] {
+  if (details.length === 0) {
+    return [text];
+  }
+  const last = details[details.length - 1];
+  const merged = `${last}${text}`;
+  return [...details.slice(0, -1), merged];
+}
+
+function resolveToolKey(envelope: StreamEnvelope): string {
+  const payload = envelope.payload;
+  const keyCandidate =
+    payload.toolCallId ?? payload.tool_call_id ?? payload.toolId ?? payload.callId ?? payload.id ?? payload.title ?? payload.kind;
+  if (typeof keyCandidate === 'string' && keyCandidate.trim().length > 0) {
+    return keyCandidate.trim();
+  }
+  return `seq-${envelope.seq}`;
+}
+
+function resolveToolTitle(payload: Record<string, unknown>): string {
+  return (
+    typeof payload.title === 'string' && payload.title.trim().length > 0
+      ? payload.title.trim()
+      : typeof payload.kind === 'string' && payload.kind.trim().length > 0
+        ? payload.kind.trim()
+        : 'tool'
+  );
+}
+
+function resolveToolOutputText(payload: Record<string, unknown>): string {
+  if (typeof payload.text === 'string' && payload.text.length > 0) {
+    return payload.text;
+  }
+  if (typeof payload.output === 'string' && payload.output.length > 0) {
+    return payload.output;
+  }
+  return '';
+}
+
+function resolveToolCompletedNote(payload: Record<string, unknown>): string {
+  if (typeof payload.summary === 'string' && payload.summary.trim().length > 0) {
+    return payload.summary.trim();
+  }
+  if (typeof payload.result === 'string' && payload.result.trim().length > 0) {
+    return payload.result.trim();
+  }
+  return '';
+}
+
+function extractDiffFilesFromPayload(payload: Record<string, unknown>): string[] {
+  const fromFiles = payload.files;
+  if (Array.isArray(fromFiles)) {
+    const resolved = fromFiles
+      .map((entry) => {
+        if (typeof entry === 'string' && entry.trim().length > 0) {
+          return entry.trim();
+        }
+        if (!entry || typeof entry !== 'object') {
+          return '';
+        }
+        const record = entry as Record<string, unknown>;
+        const pathCandidate =
+          (typeof record.path === 'string' && record.path.trim()) ||
+          (typeof record.newPath === 'string' && record.newPath.trim()) ||
+          (typeof record.oldPath === 'string' && record.oldPath.trim()) ||
+          '';
+        return pathCandidate;
+      })
+      .filter((item) => item.length > 0);
+    if (resolved.length > 0) {
+      return Array.from(new Set(resolved));
+    }
   }
 
-  if (envelope.type === 'tool.output') {
-    return `#${envelope.seq} tool output`;
+  const diffText =
+    (typeof payload.unifiedDiff === 'string' && payload.unifiedDiff) ||
+    (typeof payload.diff === 'string' && payload.diff) ||
+    '';
+  if (!diffText) {
+    return [];
   }
+  const files: string[] = [];
+  diffText.split('\n').forEach((line) => {
+    const match = line.match(/^\+\+\+\s+b\/(.+)$/);
+    if (match?.[1]) {
+      files.push(match[1].trim());
+    }
+  });
+  return Array.from(new Set(files));
+}
 
-  return `#${envelope.seq} ${envelope.type}`;
+function findTargetToolTimelineIndex(events: TimelineEvent[], toolKey: string): number {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (!event) {
+      continue;
+    }
+    if (event.kind !== 'tool') {
+      continue;
+    }
+    if (event.toolKey === toolKey) {
+      return index;
+    }
+    if (event.status === 'running') {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function resolveRemainingContextRatio(payload: Record<string, unknown>): number | null {
@@ -3242,28 +3595,6 @@ function formatDiffPayload(payload: Record<string, unknown>): string {
     return 'Diff update available.';
   }
   return '';
-}
-
-function mergeDiffSummaryHistory(current: string[], nextSummary: string): string[] {
-  const next = nextSummary.trim();
-  if (next.length === 0) {
-    return current;
-  }
-  if (current.length === 0) {
-    return [next];
-  }
-
-  const last = current[current.length - 1]?.trim() ?? '';
-  if (last === next) {
-    return current;
-  }
-
-  // Codex often emits cumulative snapshots; replace the prior entry rather than stacking near-duplicates.
-  if ((last.length > 0 && next.includes(last)) || last.includes(next)) {
-    return [...current.slice(0, -1), next];
-  }
-
-  return [...current, next];
 }
 
 function formatDiffFileLabel(file: ParsedDiffFile): string {
