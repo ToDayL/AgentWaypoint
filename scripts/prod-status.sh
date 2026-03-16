@@ -17,6 +17,15 @@ if [[ -f "$ENV_FILE_PATH" ]]; then
   set +a
 fi
 
+detect_docker_gateway_ip() {
+  local container_name="$1"
+  local gateway
+  gateway="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{println $v.Gateway}}{{end}}' "$container_name" 2>/dev/null | awk 'NF {print $1; exit}')"
+  if [[ -n "$gateway" ]]; then
+    printf '%s\n' "$gateway"
+  fi
+}
+
 status_bg() {
   local name="$1"
   local pid_file="$STATE_DIR/${name}.pid"
@@ -40,6 +49,22 @@ docker compose -f "$COMPOSE_FILE" ps || true
 echo
 echo "[prod-status] Host services:"
 status_bg runner
+
+effective_runner_host="${RUNNER_HOST:-}"
+if [[ -z "$effective_runner_host" ]]; then
+  effective_runner_host="$(detect_docker_gateway_ip agentwaypoint-prod-postgres)"
+fi
+effective_runner_base_url="${PROD_API_RUNNER_BASE_URL:-}"
+if [[ -z "$effective_runner_base_url" || "$effective_runner_base_url" == "http://host.docker.internal:5700" ]]; then
+  if [[ -n "$effective_runner_host" ]]; then
+    effective_runner_base_url="http://${effective_runner_host}:${PROD_RUNNER_PORT:-5700}"
+  fi
+fi
+
+echo
+echo "[prod-status] Effective runner endpoint config:"
+echo "RUNNER_HOST=${effective_runner_host:-<unknown>}"
+echo "PROD_API_RUNNER_BASE_URL=${effective_runner_base_url:-<unknown>}"
 
 echo
 echo "[prod-status] Health checks:"

@@ -24,6 +24,36 @@ echo "[prod-up] Using env file: ${ENV_FILE_PATH}"
 echo "[prod-up] Starting Docker services (postgres/redis)..."
 docker compose -f "$COMPOSE_FILE" up --build -d postgres redis
 
+detect_docker_gateway_ip() {
+  local container_name="$1"
+  local gateway
+  gateway="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{println $v.Gateway}}{{end}}' "$container_name" 2>/dev/null | awk 'NF {print $1; exit}')"
+  if [[ -n "$gateway" ]]; then
+    printf '%s\n' "$gateway"
+  fi
+}
+
+if [[ -z "${RUNNER_HOST:-}" ]]; then
+  RUNNER_HOST="$(detect_docker_gateway_ip agentwaypoint-prod-postgres)"
+  if [[ -z "${RUNNER_HOST:-}" ]]; then
+    echo "[prod-up] Failed to auto-detect Docker gateway IP for RUNNER_HOST."
+    echo "[prod-up] Set RUNNER_HOST explicitly in ${ENV_FILE_PATH} and retry."
+    exit 1
+  fi
+  export RUNNER_HOST
+  echo "[prod-up] Auto-detected RUNNER_HOST=${RUNNER_HOST}"
+else
+  echo "[prod-up] Using RUNNER_HOST from env: ${RUNNER_HOST}"
+fi
+
+if [[ -z "${PROD_API_RUNNER_BASE_URL:-}" || "${PROD_API_RUNNER_BASE_URL}" == "http://host.docker.internal:5700" ]]; then
+  PROD_API_RUNNER_BASE_URL="http://${RUNNER_HOST}:${PROD_RUNNER_PORT:-5700}"
+  export PROD_API_RUNNER_BASE_URL
+  echo "[prod-up] Auto-configured PROD_API_RUNNER_BASE_URL=${PROD_API_RUNNER_BASE_URL}"
+else
+  echo "[prod-up] Using PROD_API_RUNNER_BASE_URL from env: ${PROD_API_RUNNER_BASE_URL}"
+fi
+
 if [[ "${SKIP_MIGRATE:-0}" != "1" ]]; then
   echo "[prod-up] Running API migration deploy..."
   docker compose -f "$COMPOSE_FILE" run --rm api sh -lc "
@@ -66,7 +96,7 @@ start_bg() {
 }
 
 echo "[prod-up] Starting host runner..."
-start_bg runner bash -lc "cd '$ROOT_DIR'; set -a; source '$ENV_FILE_PATH'; set +a; RUNNER_WATCH_MODE=0 RUNNER_PORT=\${PROD_RUNNER_PORT:-5700} ENV_FILE='$ENV_FILE_PATH' exec bash scripts/dev-runner-host.sh"
+start_bg runner bash -lc "cd '$ROOT_DIR'; set -a; source '$ENV_FILE_PATH'; set +a; RUNNER_WATCH_MODE=0 RUNNER_HOST='${RUNNER_HOST}' RUNNER_PORT=\${PROD_RUNNER_PORT:-5700} ENV_FILE='$ENV_FILE_PATH' exec bash scripts/dev-runner-host.sh"
 
 wait_health() {
   local name="$1"
