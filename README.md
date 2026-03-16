@@ -27,6 +27,7 @@ Set admin bootstrap values for first startup:
 - `BOOTSTRAP_ADMIN_EMAIL`
 - `BOOTSTRAP_ADMIN_PASSWORD`
 - `BOOTSTRAP_ADMIN_DISPLAY_NAME` (optional)
+
 Set a strong runner token (required for production security):
 - `RUNNER_AUTH_TOKEN` (same value is used by API -> runner and runner auth check)
 - Generate one on host: `openssl rand -hex 32`
@@ -35,9 +36,11 @@ Security note:
 - `prod-up` bootstraps admin only when no admin exists.
 - After first successful login, immediately change the admin password in Settings.
 - Then clear `BOOTSTRAP_ADMIN_PASSWORD` from `.env.production`.
+
 2. Put TLS files in `infra/docker/nginx/certs/` (matching `.env.production`):
 - `NGINX_SSL_CERT_FILE`
 - `NGINX_SSL_KEY_FILE`
+
 3. Start serving:
 ```bash
 ./scripts/prod-up.sh
