@@ -27,6 +27,9 @@ Set admin bootstrap values for first startup:
 - `BOOTSTRAP_ADMIN_EMAIL`
 - `BOOTSTRAP_ADMIN_PASSWORD`
 - `BOOTSTRAP_ADMIN_DISPLAY_NAME` (optional)
+Set a strong runner token (required for production security):
+- `RUNNER_AUTH_TOKEN` (same value is used by API -> runner and runner auth check)
+- Generate one on host: `openssl rand -hex 32`
 
 Security note:
 - `prod-up` bootstraps admin only when no admin exists.
