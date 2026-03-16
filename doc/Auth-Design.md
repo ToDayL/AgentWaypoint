@@ -466,14 +466,14 @@ Suggested behavior:
 Current web behavior:
 
 - manually collects `x-user-email`
-- forwards that header through `/api/sim/*`
+- forwards that header through `/api/*`
 
 Target behavior:
 
 - web login/logout pages talk to `/api/auth/*`
 - browser stores only secure session cookie
 - Next.js route handlers forward cookies automatically
-- `/api/sim/*` no longer forwards `x-user-email`
+- `/api/*` no longer forwards `x-user-email`
 
 Recommended web changes:
 

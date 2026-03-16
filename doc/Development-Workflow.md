@@ -47,7 +47,7 @@ Use this when debugging startup/runtime drift or verifying from scratch.
 3. Open web:
    - `https://localhost:3000`
 4. Verify web proxy -> API (from web container):
-   - `docker compose -f infra/docker/docker-compose.yml exec -T web sh -lc "node -e \"fetch('http://localhost:3000/api/sim/projects',{headers:{'x-user-email':'demo@example.com'}}).then(async r=>{console.log(r.status);console.log(await r.text());})\""`
+   - `docker compose -f infra/docker/docker-compose.yml exec -T web sh -lc "node -e \"fetch('http://localhost:3000/api/projects',{headers:{'x-user-email':'demo@example.com'}}).then(async r=>{console.log(r.status);console.log(await r.text());})\""`
    - Expected: status `200` and JSON array (for a fresh DB: `[]`)
 
 ## 5. Stop

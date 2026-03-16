@@ -184,7 +184,7 @@ Controls:
 
 1. User lands on sign-in screen.
 2. Password login sets secure session cookie.
-3. App shell loads after `GET /api/sim/auth/session` confirms authenticated state.
+3. App shell loads after `GET /api/auth/session` confirms authenticated state.
 
 ## 4.2 Standard Chat Turn
 

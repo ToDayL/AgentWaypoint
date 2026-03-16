@@ -479,7 +479,7 @@ export default function HomePage() {
     const timer = setTimeout(() => {
       setWorkspaceSuggestionBusy(true);
       void apiRequest<{ data: string[] }>(
-        `/api/sim/fs/suggestions?${new URLSearchParams({ prefix, limit: '8' }).toString()}`,
+        `/api/fs/suggestions?${new URLSearchParams({ prefix, limit: '8' }).toString()}`,
         {
           method: 'GET',
           signal: controller.signal,
@@ -523,7 +523,7 @@ export default function HomePage() {
     const timer = setTimeout(() => {
       setSessionCwdSuggestionBusy(true);
       void apiRequest<{ data: string[] }>(
-        `/api/sim/fs/suggestions?${new URLSearchParams({ prefix, limit: '8' }).toString()}`,
+        `/api/fs/suggestions?${new URLSearchParams({ prefix, limit: '8' }).toString()}`,
         {
           method: 'GET',
           signal: controller.signal,
@@ -595,7 +595,7 @@ export default function HomePage() {
 
   async function loadAuthSession(): Promise<void> {
     try {
-      const response = await apiRequest<AuthSessionResponse>('/api/sim/auth/session', {
+      const response = await apiRequest<AuthSessionResponse>('/api/auth/session', {
         method: 'GET',
       });
       if (response.authenticated) {
@@ -629,7 +629,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      await apiRequest<{ user: { email: string } }>('/api/sim/auth/login/password', {
+      await apiRequest<{ user: { email: string } }>('/api/auth/login/password', {
         method: 'POST',
         body: {
           email: authEmail.trim(),
@@ -652,7 +652,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      await apiRequest<{ success: boolean }>('/api/sim/auth/logout', {
+      await apiRequest<{ success: boolean }>('/api/auth/logout', {
         method: 'POST',
         body: {},
       });
@@ -704,7 +704,7 @@ export default function HomePage() {
     setError('');
     setPasswordChangeNotice('');
     try {
-      await apiRequest<{ success: boolean }>('/api/sim/auth/password/change', {
+      await apiRequest<{ success: boolean }>('/api/auth/password/change', {
         method: 'POST',
         body: {
           currentPassword: currentPasswordInput,
@@ -725,7 +725,7 @@ export default function HomePage() {
 
   async function loadAdminUsers(): Promise<void> {
     try {
-      const users = (await apiRequest<AdminManagedUser[]>('/api/sim/settings/users', {
+      const users = (await apiRequest<AdminManagedUser[]>('/api/settings/users', {
         method: 'GET',
       })) as AdminManagedUser[];
       setAdminUsers(users);
@@ -742,7 +742,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      await apiRequest<AdminManagedUser>('/api/sim/settings/users', {
+      await apiRequest<AdminManagedUser>('/api/settings/users', {
         method: 'POST',
         body: {
           email: newManagedUserEmail.trim(),
@@ -776,7 +776,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      await apiRequest<AdminManagedUser>(`/api/sim/settings/users/${userId}`, {
+      await apiRequest<AdminManagedUser>(`/api/settings/users/${userId}`, {
         method: 'PATCH',
         body: patch as Record<string, unknown>,
       });
@@ -790,7 +790,7 @@ export default function HomePage() {
 
   async function loadAppSettings(): Promise<void> {
     try {
-      const response = await apiRequest<AppSettings>('/api/sim/settings', {
+      const response = await apiRequest<AppSettings>('/api/settings', {
         method: 'GET',
       });
       const normalizedWorkspaceRoot = response.defaultWorkspaceRoot?.trim() || null;
@@ -808,7 +808,7 @@ export default function HomePage() {
   async function loadAccountRateLimits(): Promise<void> {
     setAccountRateLimitsBusy(true);
     try {
-      const response = await apiRequest<AccountRateLimitsResponse>('/api/sim/settings/account/rate-limits', {
+      const response = await apiRequest<AccountRateLimitsResponse>('/api/settings/account/rate-limits', {
         method: 'GET',
       });
       setAccountRateLimits(extract5hAndWeeklyLimits(response));
@@ -825,7 +825,7 @@ export default function HomePage() {
 
   async function loadAvailableModels(): Promise<void> {
     try {
-      const response = await apiRequest<{ data: AvailableModel[] }>('/api/sim/models', {
+      const response = await apiRequest<{ data: AvailableModel[] }>('/api/models', {
         method: 'GET',
       });
       setAvailableModels(response.data ?? []);
@@ -852,7 +852,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      const items = (await apiRequest<Project[]>('/api/sim/projects', {
+      const items = (await apiRequest<Project[]>('/api/projects', {
         method: 'GET',
       })) as Project[];
       setProjects(items);
@@ -878,7 +878,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      const response = await apiRequest<AppSettings>('/api/sim/settings', {
+      const response = await apiRequest<AppSettings>('/api/settings', {
         method: 'POST',
         body: {
           turnSteerEnabled: turnSteerDraft,
@@ -909,7 +909,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      const items = (await apiRequest<Session[]>(`/api/sim/projects/${projectId}/sessions`, {
+      const items = (await apiRequest<Session[]>(`/api/projects/${projectId}/sessions`, {
         method: 'GET',
       })) as Session[];
       setSessions(items);
@@ -951,7 +951,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      const created = await apiRequest<Project>('/api/sim/projects', {
+      const created = await apiRequest<Project>('/api/projects', {
         method: 'POST',
         body: {
           name: newProjectName.trim(),
@@ -983,7 +983,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      const created = await apiRequest<Session>(`/api/sim/projects/${selectedProjectId}/sessions`, {
+      const created = await apiRequest<Session>(`/api/projects/${selectedProjectId}/sessions`, {
         method: 'POST',
         body: {
           title: newSessionTitle.trim(),
@@ -1021,7 +1021,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      const forked = await apiRequest<Session>(`/api/sim/sessions/${sourceSessionId}/fork`, {
+      const forked = await apiRequest<Session>(`/api/sessions/${sourceSessionId}/fork`, {
         method: 'POST',
         body: {},
       });
@@ -1063,7 +1063,7 @@ export default function HomePage() {
         ]);
         setPrompt('');
         try {
-          await apiRequest<TurnStatusResponse>(`/api/sim/turns/${activeTurnId}/steer`, {
+          await apiRequest<TurnStatusResponse>(`/api/turns/${activeTurnId}/steer`, {
             method: 'POST',
             body: { content: steerContent },
           });
@@ -1086,7 +1086,7 @@ export default function HomePage() {
       setContextRemainingRatio(null);
       setStreamActive(true);
 
-      const result = await apiRequest<{ turnId: string; status: string }>(`/api/sim/sessions/${selectedSessionId}/turns`, {
+      const result = await apiRequest<{ turnId: string; status: string }>(`/api/sessions/${selectedSessionId}/turns`, {
         method: 'POST',
         body: { content: prompt.trim() },
       });
@@ -1117,7 +1117,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      const cancelled = await apiRequest<{ status: string }>(`/api/sim/turns/${activeTurnId}/cancel`, {
+      const cancelled = await apiRequest<{ status: string }>(`/api/turns/${activeTurnId}/cancel`, {
         method: 'POST',
       });
       setTurnStatus(cancelled.status);
@@ -1141,7 +1141,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      await apiRequest<TurnStatusResponse>(`/api/sim/turns/${activeTurnId}/approval`, {
+      await apiRequest<TurnStatusResponse>(`/api/turns/${activeTurnId}/approval`, {
         method: 'POST',
         body: {
           approvalId: pendingApproval.id,
@@ -1189,7 +1189,7 @@ export default function HomePage() {
     stopTurnStatusPolling();
     setError('');
     try {
-      const history = await apiRequest<SessionHistory>(`/api/sim/sessions/${sessionId}/history`, {
+      const history = await apiRequest<SessionHistory>(`/api/sessions/${sessionId}/history`, {
         method: 'GET',
       });
       setMessages(history.messages);
@@ -1231,7 +1231,7 @@ export default function HomePage() {
   }
 
   async function syncTurnState(turnId: string): Promise<void> {
-    const status = await apiRequest<TurnStatusResponse>(`/api/sim/turns/${turnId}`, {
+    const status = await apiRequest<TurnStatusResponse>(`/api/turns/${turnId}`, {
       method: 'GET',
     });
     setTurnStatus(status.status);
@@ -1244,7 +1244,7 @@ export default function HomePage() {
 
   function openStream(turnId: string, sessionId: string): void {
     eventSourceRef.current?.close();
-    const streamUrl = `/api/sim/turns/${turnId}/stream`;
+    const streamUrl = `/api/turns/${turnId}/stream`;
     const source = new EventSource(streamUrl);
     eventSourceRef.current = source;
 
@@ -1361,7 +1361,7 @@ export default function HomePage() {
     turnPollTimerRef.current = setInterval(() => {
       void (async () => {
         try {
-          const status = await apiRequest<TurnStatusResponse>(`/api/sim/turns/${turnId}`, {
+          const status = await apiRequest<TurnStatusResponse>(`/api/turns/${turnId}`, {
             method: 'GET',
           });
           setTurnStatus(status.status);
@@ -1413,7 +1413,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      await apiRequest<Project>(`/api/sim/projects/${selectedProjectId}`, {
+      await apiRequest<Project>(`/api/projects/${selectedProjectId}`, {
         method: 'PATCH',
         body: {
           name: projectConfigName.trim(),
@@ -1562,7 +1562,7 @@ export default function HomePage() {
     try {
       if (actionPanelMode === 'confirmDeleteProject' && projectDeleteTarget) {
         const deletingSelectedProject = selectedProjectId === projectDeleteTarget.id;
-        await apiRequest(`/api/sim/projects/${projectDeleteTarget.id}`, {
+        await apiRequest(`/api/projects/${projectDeleteTarget.id}`, {
           method: 'DELETE',
         });
         if (deletingSelectedProject) {
@@ -1576,7 +1576,7 @@ export default function HomePage() {
           throw new Error('No project selected');
         }
         const deletingSelectedSession = selectedSessionId === sessionDeleteTarget.id;
-        await apiRequest(`/api/sim/sessions/${sessionDeleteTarget.id}`, {
+        await apiRequest(`/api/sessions/${sessionDeleteTarget.id}`, {
           method: 'DELETE',
         });
         if (deletingSelectedSession) {

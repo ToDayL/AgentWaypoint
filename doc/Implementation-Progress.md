@@ -86,14 +86,14 @@ Last updated: 2026-03-12
 1. Session history read path implemented:
    - API endpoint: `GET /api/sessions/:id/history`
    - Returns ordered `messages`, ordered `turns`, `activeTurnId`, and `activeTurnStatus`.
-   - Web proxy route added at `/api/sim/sessions/:sessionId/history`.
+   - Web proxy route added at `/api/sessions/:sessionId/history`.
 2. Durable turn failure metadata added:
    - Prisma fields on `Turn`: `failureCode`, `failureMessage`.
    - Migration added: `20260310152000_add_turn_failure_fields`.
 3. Turn status API added:
    - API endpoint: `GET /api/turns/:id`.
    - Includes status, timestamps, and failure metadata.
-   - Web proxy route added at `/api/sim/turns/:turnId`.
+   - Web proxy route added at `/api/turns/:turnId`.
 4. Startup reconciliation for in-flight turns implemented:
    - On API startup, stale `queued/running` turns are marked `failed`.
    - Reconciliation reason:
@@ -103,7 +103,7 @@ Last updated: 2026-03-12
 5. Web resilience improvements delivered:
    - Session selection restores persisted history.
    - Resumed in-flight turns are explicitly indicated in UI.
-   - SSE disconnect falls back to polling `GET /api/sim/turns/:id` until terminal status.
+   - SSE disconnect falls back to polling `GET /api/turns/:id` until terminal status.
 6. Validation completed:
    - `@agentwaypoint/api` typecheck passes.
    - `@agentwaypoint/web` typecheck passes.
@@ -154,7 +154,7 @@ Last updated: 2026-03-12
    - API ingests streamed runner events for `turn.approval.requested` and `turn.approval.resolved`.
    - Turn status now exposes `pendingApproval` details while a turn is blocked on approval.
    - User action endpoint added: `POST /api/turns/:id/approval`.
-   - Web proxy route added at `/api/sim/turns/:turnId/approval`.
+   - Web proxy route added at `/api/turns/:turnId/approval`.
 2. Approval persistence added to the data model:
    - New Prisma model: `TurnApproval`.
    - Migration added: `20260310164000_add_turn_approvals`.
