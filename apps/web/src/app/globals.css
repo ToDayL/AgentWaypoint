@@ -1325,6 +1325,53 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .sim-approval {
+    height: auto;
+    max-height: 50dvh;
+    min-height: 0;
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    overflow: hidden;
+    padding: 0.6rem;
+    font-size: 0.82rem;
+  }
+
+  .sim-approval h3 {
+    margin: 0;
+  }
+
+  .sim-approval > p {
+    margin: 0;
+  }
+
+  .sim-actions-approval {
+    margin: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.35rem;
+    flex: 0 0 auto;
+  }
+
+  .sim-approval-command {
+    min-height: 0;
+    max-height: clamp(90px, 22dvh, 220px);
+    overflow: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    margin: 0;
+    font-size: 0.74rem;
+    line-height: 1.25;
+  }
+
+  .sim-actions-approval button {
+    margin-top: 0;
+    padding: 0.36rem 0.44rem;
+    font-size: 0.74rem;
+    line-height: 1.15;
+    border-radius: 8px;
+  }
+
   .chat-composer-row {
     grid-template-columns: minmax(0, 1fr) auto;
   }
