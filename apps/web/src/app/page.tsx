@@ -262,6 +262,8 @@ const WORKSPACE_SUGGESTIONS_LIST_ID = 'workspace-path-suggestions';
 const SESSION_CWD_SUGGESTIONS_LIST_ID = 'session-cwd-path-suggestions';
 const LAST_PROJECT_STORAGE_KEY_PREFIX = 'agentwaypoint:last-project:';
 const LAST_SESSION_STORAGE_KEY_PREFIX = 'agentwaypoint:last-session:';
+const CHAT_VISIBLE_MESSAGE_STEP = 10;
+const CHAT_SCROLL_IDLE_MS = 220;
 type LeftSidebarTab = 'explorer' | 'config';
 type InsightsTab = 'diff' | 'events';
 type SidebarMode = 'closed' | 'pop' | 'pin';
@@ -358,6 +360,7 @@ export default function HomePage() {
   const [leftSidebarMode, setLeftSidebarMode] = useState<SidebarMode>('pin');
   const [rightSidebarMode, setRightSidebarMode] = useState<SidebarMode>('closed');
   const [insightsTab, setInsightsTab] = useState<InsightsTab>('events');
+  const [visibleMessageCount, setVisibleMessageCount] = useState(CHAT_VISIBLE_MESSAGE_STEP);
   const [sessionInfoOpen, setSessionInfoOpen] = useState(true);
   const [mobileLeftSidebarOpen, setMobileLeftSidebarOpen] = useState(false);
   const [mobileInsightsOpen, setMobileInsightsOpen] = useState(false);
@@ -371,8 +374,12 @@ export default function HomePage() {
   const [error, setError] = useState('');
   const eventSourceRef = useRef<EventSource | null>(null);
   const turnPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pendingTurnCreateAbortRef = useRef<AbortController | null>(null);
   const chatThreadRef = useRef<HTMLDivElement | null>(null);
   const chatAtBottomRef = useRef(true);
+  const chatScrollIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chatScrollSettleRafRef = useRef<number | null>(null);
+  const previousDisplayedMessageCountRef = useRef(0);
   const chatScrollTopRef = useRef(0);
   const wasConfigFullscreenActiveRef = useRef(false);
 
@@ -417,7 +424,7 @@ export default function HomePage() {
   }, [sessionInfoTurn, selectedSession, selectedProject]);
   const displayedMessages = useMemo(() => {
     const base = messages.map((message) => ({ ...message, streaming: false }));
-    if (assistantText.length === 0 || !streamBubbleTurnId) {
+    if (!streamBubbleTurnId) {
       return base;
     }
 
@@ -426,12 +433,19 @@ export default function HomePage() {
       {
         id: `stream-${streamBubbleTurnId}`,
         role: 'assistant' as const,
-        content: assistantText,
+        content: assistantText.length > 0 ? assistantText : streamActive ? '_Thinking..._' : '',
         createdAt: new Date().toISOString(),
         streaming: streamActive,
       },
     ];
   }, [messages, assistantText, streamBubbleTurnId, streamActive]);
+  const hiddenMessageCount = Math.max(0, displayedMessages.length - visibleMessageCount);
+  const visibleMessages = useMemo(() => {
+    if (hiddenMessageCount === 0) {
+      return displayedMessages;
+    }
+    return displayedMessages.slice(hiddenMessageCount);
+  }, [displayedMessages, hiddenMessageCount]);
   const isAdmin = currentUserRole === 'admin';
   const configFullscreenActive =
     leftSidebarTab === 'config' && (leftSidebarMode !== 'closed' || mobileLeftSidebarOpen);
@@ -459,6 +473,16 @@ export default function HomePage() {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
       stopTurnStatusPolling();
+      pendingTurnCreateAbortRef.current?.abort();
+      pendingTurnCreateAbortRef.current = null;
+      if (chatScrollIdleTimerRef.current) {
+        clearTimeout(chatScrollIdleTimerRef.current);
+        chatScrollIdleTimerRef.current = null;
+      }
+      if (typeof window !== 'undefined' && chatScrollSettleRafRef.current !== null) {
+        window.cancelAnimationFrame(chatScrollSettleRafRef.current);
+        chatScrollSettleRafRef.current = null;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -603,7 +627,19 @@ export default function HomePage() {
       return;
     }
     container.scrollTop = container.scrollHeight;
-  }, [displayedMessages]);
+  }, [visibleMessages]);
+
+  useEffect(() => {
+    const previousCount = previousDisplayedMessageCountRef.current;
+    if (displayedMessages.length > previousCount && visibleMessageCount !== CHAT_VISIBLE_MESSAGE_STEP) {
+      setVisibleMessageCount(CHAT_VISIBLE_MESSAGE_STEP);
+    }
+    previousDisplayedMessageCountRef.current = displayedMessages.length;
+  }, [displayedMessages.length, visibleMessageCount]);
+
+  useEffect(() => {
+    setVisibleMessageCount(CHAT_VISIBLE_MESSAGE_STEP);
+  }, [selectedSessionId]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -660,6 +696,38 @@ export default function HomePage() {
     chatScrollTopRef.current = container.scrollTop;
     const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
     chatAtBottomRef.current = distanceFromBottom <= 24;
+    if (chatScrollIdleTimerRef.current) {
+      clearTimeout(chatScrollIdleTimerRef.current);
+      chatScrollIdleTimerRef.current = null;
+    }
+    if (typeof window !== 'undefined' && chatScrollSettleRafRef.current !== null) {
+      window.cancelAnimationFrame(chatScrollSettleRafRef.current);
+      chatScrollSettleRafRef.current = null;
+    }
+    const scheduledTop = container.scrollTop;
+    chatScrollIdleTimerRef.current = setTimeout(() => {
+      chatScrollIdleTimerRef.current = null;
+      const currentContainer = chatThreadRef.current;
+      if (!currentContainer || !chatAtBottomRef.current) {
+        return;
+      }
+      if (typeof window === 'undefined') {
+        setVisibleMessageCount((current) => (current === CHAT_VISIBLE_MESSAGE_STEP ? current : CHAT_VISIBLE_MESSAGE_STEP));
+        return;
+      }
+      chatScrollSettleRafRef.current = window.requestAnimationFrame(() => {
+        chatScrollSettleRafRef.current = null;
+        const latestContainer = chatThreadRef.current;
+        if (!latestContainer || !chatAtBottomRef.current) {
+          return;
+        }
+        const settled = Math.abs(latestContainer.scrollTop - scheduledTop) <= 1;
+        if (!settled) {
+          return;
+        }
+        setVisibleMessageCount((current) => (current === CHAT_VISIBLE_MESSAGE_STEP ? current : CHAT_VISIBLE_MESSAGE_STEP));
+      });
+    }, CHAT_SCROLL_IDLE_MS);
   }
 
   function snapshotChatScrollState(): void {
@@ -1258,11 +1326,19 @@ export default function HomePage() {
       setTurnStatus('queued');
       setContextRemainingRatio(null);
       setStreamActive(true);
+      const pendingBubbleId = `pending-${Date.now()}`;
+      setStreamBubbleTurnId(pendingBubbleId);
+      const createTurnController = new AbortController();
+      pendingTurnCreateAbortRef.current = createTurnController;
 
       const result = await apiRequest<{ turnId: string; status: string }>(`/api/sessions/${selectedSessionId}/turns`, {
         method: 'POST',
         body: { content: prompt.trim() },
+        signal: createTurnController.signal,
       });
+      if (pendingTurnCreateAbortRef.current === createTurnController) {
+        pendingTurnCreateAbortRef.current = null;
+      }
 
       setActiveTurnId(result.turnId);
       setStreamBubbleTurnId(result.turnId);
@@ -1275,15 +1351,33 @@ export default function HomePage() {
       openStream(result.turnId, selectedSessionId);
       setPrompt('');
     } catch (requestError) {
+      if (isAbortError(requestError)) {
+        setTurnStatus('idle');
+        setStreamActive(false);
+        setStreamBubbleTurnId('');
+        return;
+      }
       setError(extractMessage(requestError));
       setTurnStatus('idle');
+      setStreamActive(false);
+      setStreamBubbleTurnId('');
     } finally {
+      pendingTurnCreateAbortRef.current = null;
       setBusy(false);
     }
   }
 
   async function handleCancelTurn(): Promise<void> {
     if (!activeTurnId) {
+      const pendingCreateController = pendingTurnCreateAbortRef.current;
+      if (!pendingCreateController) {
+        return;
+      }
+      pendingCreateController.abort();
+      pendingTurnCreateAbortRef.current = null;
+      setTurnStatus('idle');
+      setStreamActive(false);
+      setStreamBubbleTurnId('');
       return;
     }
 
@@ -1860,7 +1954,9 @@ export default function HomePage() {
                 : 'AgentWaypoint'}
               {authenticated ? <span className="status-pill">{turnStatus}</span> : null}
               {authenticated && contextRemainingRatio !== null ? (
-                <span className="status-pill">{`context left ${formatPercent(contextRemainingRatio)}`}</span>
+                <span className={`status-pill ${contextRemainingRatio < 0.3 ? 'status-pill-critical' : ''}`}>
+                  {`context left ${formatPercent(contextRemainingRatio)}`}
+                </span>
               ) : null}
             </h1>
           </div>
@@ -2686,7 +2782,18 @@ export default function HomePage() {
             {!configFullscreenActive ? <section className="chat-pane">
               <div className="chat-thread" ref={chatThreadRef} onScroll={handleChatScroll}>
                 {displayedMessages.length === 0 ? <p className="chat-empty">No messages yet.</p> : null}
-                {displayedMessages.map((message) => (
+                {hiddenMessageCount > 0 ? (
+                  <button
+                    type="button"
+                    className="button-secondary chat-show-more"
+                    onClick={() =>
+                      setVisibleMessageCount((current) => Math.min(current + CHAT_VISIBLE_MESSAGE_STEP, displayedMessages.length))
+                    }
+                  >
+                    Show More
+                  </button>
+                ) : null}
+                {visibleMessages.map((message) => (
                   <article
                     key={message.id}
                     className={`chat-message ${message.role === 'user' ? 'chat-message-user' : 'chat-message-assistant'}`}
