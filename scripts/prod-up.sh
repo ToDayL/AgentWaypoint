@@ -134,7 +134,11 @@ wait_compose_http() {
 }
 
 wait_compose_http api "http://127.0.0.1:4000/api/health"
-wait_health runner "http://127.0.0.1:${PROD_RUNNER_PORT:-5700}/runner/health"
+runner_health_host="${RUNNER_HOST}"
+if [[ "$runner_health_host" == "0.0.0.0" || "$runner_health_host" == "::" ]]; then
+  runner_health_host="127.0.0.1"
+fi
+wait_health runner "http://${runner_health_host}:${PROD_RUNNER_PORT:-5700}/runner/health"
 wait_health web "https://127.0.0.1:${PROD_NGINX_HTTPS_PORT:-3443}" insecure
 
 echo "[prod-up] All production services are up."
