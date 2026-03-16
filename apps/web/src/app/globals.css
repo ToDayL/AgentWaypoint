@@ -1048,6 +1048,18 @@ button:disabled {
   margin: 0;
 }
 
+.diff-file-block + .diff-file-block {
+  margin-top: 0.65rem;
+}
+
+.diff-file-head {
+  font-family: 'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  margin-bottom: 0.2rem;
+  word-break: break-all;
+}
+
 .diff-rdv-shell .diff-code {
   background: #161b23;
   font-size: 12px;

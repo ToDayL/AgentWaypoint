@@ -98,6 +98,7 @@ type StreamEnvelope = {
   payload: Record<string, unknown>;
   createdAt: string;
 };
+type ParsedDiffFile = ReturnType<typeof parseDiff>[number];
 
 type TurnStatusResponse = {
   id: string;
@@ -1292,7 +1293,7 @@ export default function HomePage() {
         if (envelope.type === 'diff.updated') {
           const summary = formatDiffPayload(envelope.payload);
           if (summary) {
-            setDiffSummaries((current) => [...current, summary]);
+            setDiffSummaries((current) => mergeDiffSummaryHistory(current, summary));
           }
         }
 
@@ -2568,14 +2569,12 @@ export default function HomePage() {
                               {diff.files.length > 0 ? (
                                 <div className="diff-rdv-shell">
                                   {diff.files.map((file, fileIndex) => (
-                                    <Diff
-                                      key={`diff-${diff.id}-file-${fileIndex}`}
-                                      viewType="unified"
-                                      diffType={file.type}
-                                      hunks={file.hunks}
-                                    >
-                                      {(hunks) => hunks.map((hunk, hunkIndex) => <Hunk key={hunkIndex} hunk={hunk} />)}
-                                    </Diff>
+                                    <div key={`diff-${diff.id}-file-${fileIndex}`} className="diff-file-block">
+                                      <div className="diff-file-head">{formatDiffFileLabel(file)}</div>
+                                      <Diff viewType="unified" diffType={file.type} hunks={file.hunks}>
+                                        {(hunks) => hunks.map((hunk, hunkIndex) => <Hunk key={hunkIndex} hunk={hunk} />)}
+                                      </Diff>
+                                    </div>
                                   ))}
                                 </div>
                               ) : null}
@@ -2976,6 +2975,53 @@ function formatDiffPayload(payload: Record<string, unknown>): string {
     return 'Diff update available.';
   }
   return '';
+}
+
+function mergeDiffSummaryHistory(current: string[], nextSummary: string): string[] {
+  const next = nextSummary.trim();
+  if (next.length === 0) {
+    return current;
+  }
+  if (current.length === 0) {
+    return [next];
+  }
+
+  const last = current[current.length - 1]?.trim() ?? '';
+  if (last === next) {
+    return current;
+  }
+
+  // Codex often emits cumulative snapshots; replace the prior entry rather than stacking near-duplicates.
+  if ((last.length > 0 && next.includes(last)) || last.includes(next)) {
+    return [...current.slice(0, -1), next];
+  }
+
+  return [...current, next];
+}
+
+function formatDiffFileLabel(file: ParsedDiffFile): string {
+  const oldPath = readDiffPath(file, 'oldPath');
+  const newPath = readDiffPath(file, 'newPath');
+
+  if (oldPath && newPath && oldPath !== newPath) {
+    return `${oldPath} -> ${newPath}`;
+  }
+  if (newPath) {
+    return newPath;
+  }
+  if (oldPath) {
+    return oldPath;
+  }
+  return '(unknown file)';
+}
+
+function readDiffPath(file: ParsedDiffFile, key: 'oldPath' | 'newPath'): string | null {
+  const value = (file as unknown as Record<string, unknown>)[key];
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function getApprovalActionOptions(approval: PendingApproval): ApprovalActionOption[] {
