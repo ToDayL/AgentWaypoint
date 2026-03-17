@@ -282,6 +282,7 @@ const LAST_PROJECT_STORAGE_KEY_PREFIX = 'agentwaypoint:last-project:';
 const LAST_SESSION_STORAGE_KEY_PREFIX = 'agentwaypoint:last-session:';
 const CHAT_VISIBLE_MESSAGE_STEP = 10;
 const CHAT_SCROLL_IDLE_MS = 220;
+const FILE_NODE_LONG_PRESS_MS = 500;
 type LeftSidebarTab = 'explorer' | 'fileBrowser' | 'config';
 type InsightsTab = 'preview' | 'diff' | 'events';
 type SidebarMode = 'closed' | 'pop' | 'pin';
@@ -404,6 +405,7 @@ export default function HomePage() {
   const turnPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pendingTurnCreateAbortRef = useRef<AbortController | null>(null);
   const chatThreadRef = useRef<HTMLDivElement | null>(null);
+  const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const chatAtBottomRef = useRef(true);
   const chatScrollIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const chatScrollSettleRafRef = useRef<number | null>(null);
@@ -411,6 +413,8 @@ export default function HomePage() {
   const chatScrollTopRef = useRef(0);
   const wasConfigFullscreenActiveRef = useRef(false);
   const previewLoadSeqRef = useRef(0);
+  const fileNodeLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fileNodeLongPressTriggeredRef = useRef(false);
 
   const canStartTurn = !!selectedSessionId && prompt.trim().length > 0 && activeTurnId === '';
   const canSteerTurn =
@@ -529,6 +533,7 @@ export default function HomePage() {
         window.cancelAnimationFrame(chatScrollSettleRafRef.current);
         chatScrollSettleRafRef.current = null;
       }
+      clearFileNodeLongPressTimer();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1352,6 +1357,54 @@ export default function HomePage() {
     }
   }
 
+  function appendWorkspacePathMention(targetPath: string): void {
+    const workspaceRoot = activeWorkspacePath.trim();
+    const normalizedTargetPath = targetPath.trim();
+    if (!workspaceRoot || !normalizedTargetPath) {
+      return;
+    }
+    const relativePath = resolveWorkspaceRelativePath(normalizedTargetPath, workspaceRoot);
+    const mention = `@${relativePath}`;
+    setPrompt((current) => {
+      const base = current.trimEnd();
+      if (!base) {
+        return mention;
+      }
+      return `${base} ${mention}`;
+    });
+    if (typeof window !== 'undefined') {
+      window.requestAnimationFrame(() => {
+        const input = promptInputRef.current;
+        if (!input) {
+          return;
+        }
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      });
+    }
+  }
+
+  function clearFileNodeLongPressTimer(): void {
+    if (fileNodeLongPressTimerRef.current) {
+      clearTimeout(fileNodeLongPressTimerRef.current);
+      fileNodeLongPressTimerRef.current = null;
+    }
+  }
+
+  function startFileNodeLongPress(targetPath: string): void {
+    clearFileNodeLongPressTimer();
+    fileNodeLongPressTriggeredRef.current = false;
+    fileNodeLongPressTimerRef.current = setTimeout(() => {
+      fileNodeLongPressTriggeredRef.current = true;
+      appendWorkspacePathMention(targetPath);
+      fileNodeLongPressTimerRef.current = null;
+    }, FILE_NODE_LONG_PRESS_MS);
+  }
+
+  function handleFileNodePressEnd(): void {
+    clearFileNodeLongPressTimer();
+  }
+
   async function handleCreateProject(): Promise<boolean> {
     if (!newProjectName.trim()) {
       return false;
@@ -2129,15 +2182,27 @@ export default function HomePage() {
                 type="button"
                 className={`file-node-row ${entry.isDirectory ? 'directory' : 'file'}`}
                 onClick={() => {
+                  if (fileNodeLongPressTriggeredRef.current) {
+                    fileNodeLongPressTriggeredRef.current = false;
+                    return;
+                  }
                   if (entry.isDirectory) {
                     toggleFileBrowserDirectory(entry.path);
                   }
                 }}
                 onDoubleClick={() => {
+                  if (fileNodeLongPressTriggeredRef.current) {
+                    fileNodeLongPressTriggeredRef.current = false;
+                    return;
+                  }
                   if (!entry.isDirectory) {
                     void openFilePreview(entry.path);
                   }
                 }}
+                onPointerDown={() => startFileNodeLongPress(entry.path)}
+                onPointerUp={() => handleFileNodePressEnd()}
+                onPointerLeave={() => handleFileNodePressEnd()}
+                onPointerCancel={() => handleFileNodePressEnd()}
                 title={entry.path}
               >
                 {entry.isDirectory ? (
@@ -2924,7 +2989,17 @@ export default function HomePage() {
                             <button
                               type="button"
                               className="file-node-row directory file-node-root"
-                              onClick={() => toggleFileBrowserDirectory(activeWorkspacePath)}
+                              onClick={() => {
+                                if (fileNodeLongPressTriggeredRef.current) {
+                                  fileNodeLongPressTriggeredRef.current = false;
+                                  return;
+                                }
+                                toggleFileBrowserDirectory(activeWorkspacePath);
+                              }}
+                              onPointerDown={() => startFileNodeLongPress(activeWorkspacePath)}
+                              onPointerUp={() => handleFileNodePressEnd()}
+                              onPointerLeave={() => handleFileNodePressEnd()}
+                              onPointerCancel={() => handleFileNodePressEnd()}
                               title={activeWorkspacePath}
                             >
                               {fileBrowserExpandedPaths.includes(activeWorkspacePath) ? <ChevronDown /> : <ChevronRight />}
@@ -3185,6 +3260,7 @@ export default function HomePage() {
               <div className="chat-composer">
                 <div className="chat-composer-row">
                   <textarea
+                    ref={promptInputRef}
                     value={prompt}
                     onChange={(event) => setPrompt(event.target.value)}
                     onKeyDown={handlePromptKeyDown}
@@ -3575,6 +3651,23 @@ function detectCodeLanguage(filePath: string): string {
     return 'toml';
   }
   return 'text';
+}
+
+function resolveWorkspaceRelativePath(targetPath: string, workspaceRoot: string): string {
+  const normalize = (value: string) => value.replace(/\\/g, '/').replace(/\/+$/, '');
+  const normalizedRoot = normalize(workspaceRoot.trim());
+  const normalizedTarget = normalize(targetPath.trim());
+  if (!normalizedRoot || !normalizedTarget) {
+    return '.';
+  }
+  if (normalizedTarget === normalizedRoot) {
+    return '.';
+  }
+  const rootPrefix = `${normalizedRoot}/`;
+  if (normalizedTarget.startsWith(rootPrefix)) {
+    return normalizedTarget.slice(rootPrefix.length);
+  }
+  return normalizedTarget;
 }
 
 function formatApprovalKind(kind: string): string {
