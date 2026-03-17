@@ -1120,10 +1120,25 @@ button:disabled {
   border-radius: 0;
   background: #2e2618;
   padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-height: 0;
+  max-height: 50vh;
+  overflow: hidden;
+}
+
+.sim-approval-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  gap: 0.35rem;
+  padding-right: 0.1rem;
 }
 
 .sim-approval-command {
-  margin: 0.5rem 0;
+  margin: 0;
   border-radius: 8px;
   border: 1px solid #7a6032;
   background: #1f1a11;
@@ -1132,12 +1147,35 @@ button:disabled {
   line-height: 1.35;
   font-family: 'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace;
   font-size: 0.8rem;
+  min-height: 0;
+  max-height: none;
+  overflow: visible;
 }
 
 .sim-approval-meta {
-  margin: 0.3rem 0 0;
+  margin: 0;
   font-size: 0.8rem;
   color: var(--fg-muted);
+}
+
+.sim-approval > h3,
+.sim-actions-approval {
+  flex: 0 0 auto;
+}
+
+.sim-actions-approval {
+  margin-top: 0.45rem;
+  padding-top: 0.2rem;
+  position: relative;
+  z-index: 0;
+}
+
+.sim-actions-approval button {
+  margin-top: 0;
+  padding: 0.38rem 0.5rem;
+  font-size: 0.76rem;
+  line-height: 1.15;
+  border-radius: 8px;
 }
 
 .sim-output,
@@ -1725,12 +1763,12 @@ button:disabled {
     margin: 0;
   }
 
-  .sim-approval > p {
+  .sim-approval-body > p {
     margin: 0;
   }
 
   .sim-actions-approval {
-    margin: 0;
+    margin-top: 0.35rem;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.35rem;
     flex: 0 0 auto;
@@ -1749,8 +1787,8 @@ button:disabled {
 
   .sim-actions-approval button {
     margin-top: 0;
-    padding: 0.36rem 0.44rem;
-    font-size: 0.74rem;
+    padding: 0.34rem 0.42rem;
+    font-size: 0.72rem;
     line-height: 1.15;
     border-radius: 8px;
   }

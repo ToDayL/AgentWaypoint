@@ -3581,24 +3581,26 @@ export default function HomePage() {
               {pendingApproval ? (
                 <article className="sim-approval">
                   <h3>Approval Required</h3>
-                  <p>
-                    <strong>{formatApprovalKind(pendingApproval.kind)}</strong>
-                    {typeof pendingApproval.payload.reason === 'string' && pendingApproval.payload.reason.length > 0
-                      ? `: ${pendingApproval.payload.reason}`
-                      : ''}
-                  </p>
-                  {pendingApproval.kind === 'command_execution' ? (
-                    <>
-                      {readApprovalCommand(pendingApproval.payload) ? (
-                        <pre className="sim-approval-command">{readApprovalCommand(pendingApproval.payload)}</pre>
-                      ) : null}
-                      {typeof pendingApproval.payload.cwd === 'string' && pendingApproval.payload.cwd.length > 0 ? (
-                        <p className="sim-approval-meta">
-                          CWD: <code>{pendingApproval.payload.cwd}</code>
-                        </p>
-                      ) : null}
-                    </>
-                  ) : null}
+                  <div className="sim-approval-body">
+                    <p>
+                      <strong>{formatApprovalKind(pendingApproval.kind)}</strong>
+                      {typeof pendingApproval.payload.reason === 'string' && pendingApproval.payload.reason.length > 0
+                        ? `: ${pendingApproval.payload.reason}`
+                        : ''}
+                    </p>
+                    {pendingApproval.kind === 'command_execution' ? (
+                      <>
+                        {readApprovalCommand(pendingApproval.payload) ? (
+                          <pre className="sim-approval-command">{readApprovalCommand(pendingApproval.payload)}</pre>
+                        ) : null}
+                        {typeof pendingApproval.payload.cwd === 'string' && pendingApproval.payload.cwd.length > 0 ? (
+                          <p className="sim-approval-meta">
+                            CWD: <code>{pendingApproval.payload.cwd}</code>
+                          </p>
+                        ) : null}
+                      </>
+                    ) : null}
+                  </div>
                   <div className="sim-actions sim-actions-approval">
                     {getApprovalActionOptions(pendingApproval).map((option) => (
                       <button
