@@ -637,6 +637,7 @@ describe('API e2e', () => {
     });
     expect(createTurnResponse.statusCode).toBe(201);
     const { turnId } = createTurnResponse.json() as { turnId: string };
+    await sleep(220);
 
     const cancelResponse = await app.inject({
       method: 'POST',
@@ -667,6 +668,15 @@ describe('API e2e', () => {
     });
     expect(streamResponse.statusCode).toBe(200);
     expect(streamResponse.payload).toContain('event: turn.cancelled');
+
+    const historyResponse = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${session.id}/history`,
+      headers: { 'x-user-email': email },
+    });
+    expect(historyResponse.statusCode).toBe(200);
+    const history = historyResponse.json() as { messages: Array<{ role: string; content: string }> };
+    expect(history.messages.some((message) => message.role === 'assistant' && message.content.length > 0)).toBe(true);
   });
 
   it('persists approval events and exposes pending approval in turn status', async () => {

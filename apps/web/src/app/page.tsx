@@ -315,6 +315,7 @@ type ActionPanelMode =
   | 'projectConfig'
   | 'createUser'
   | 'manageUser'
+  | 'confirmCompactSession'
   | 'confirmDeleteProject'
   | 'confirmDeleteSession';
 
@@ -443,6 +444,7 @@ export default function HomePage() {
   const chatAtBottomRef = useRef(true);
   const chatScrollIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const chatScrollSettleRafRef = useRef<number | null>(null);
+  const suppressBottomAutoCollapseRef = useRef(false);
   const previousDisplayedMessageCountRef = useRef(0);
   const chatScrollTopRef = useRef(0);
   const wasConfigFullscreenActiveRef = useRef(false);
@@ -797,11 +799,15 @@ export default function HomePage() {
     if (displayedMessages.length > previousCount && visibleMessageCount !== CHAT_VISIBLE_MESSAGE_STEP) {
       setVisibleMessageCount(CHAT_VISIBLE_MESSAGE_STEP);
     }
+    if (displayedMessages.length > previousCount) {
+      suppressBottomAutoCollapseRef.current = false;
+    }
     previousDisplayedMessageCountRef.current = displayedMessages.length;
   }, [displayedMessages.length, visibleMessageCount]);
 
   useEffect(() => {
     setVisibleMessageCount(CHAT_VISIBLE_MESSAGE_STEP);
+    suppressBottomAutoCollapseRef.current = false;
   }, [selectedSessionId]);
 
   useEffect(() => {
@@ -906,6 +912,9 @@ export default function HomePage() {
     chatScrollTopRef.current = container.scrollTop;
     const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
     chatAtBottomRef.current = distanceFromBottom <= 24;
+    if (!chatAtBottomRef.current) {
+      suppressBottomAutoCollapseRef.current = false;
+    }
     if (chatScrollIdleTimerRef.current) {
       clearTimeout(chatScrollIdleTimerRef.current);
       chatScrollIdleTimerRef.current = null;
@@ -919,6 +928,9 @@ export default function HomePage() {
       chatScrollIdleTimerRef.current = null;
       const currentContainer = chatThreadRef.current;
       if (!currentContainer || !chatAtBottomRef.current) {
+        return;
+      }
+      if (suppressBottomAutoCollapseRef.current) {
         return;
       }
       if (typeof window === 'undefined') {
@@ -1667,12 +1679,6 @@ export default function HomePage() {
       return;
     }
 
-    const sessionTitle = selectedSession?.title?.trim() || 'this session';
-    const confirmed = window.confirm(`Compact context for "${sessionTitle}" now?`);
-    if (!confirmed) {
-      return;
-    }
-
     setBusy(true);
     setCompactingContext(true);
     setError('');
@@ -1693,10 +1699,25 @@ export default function HomePage() {
     }
   }
 
+  function requestCompactSession(): void {
+    if (!canManualCompact) {
+      return;
+    }
+    openActionPanel('confirmCompactSession');
+  }
+
+  async function handleConfirmCompactFromPanel(): Promise<void> {
+    await handleManualCompact();
+    closeActionPanel();
+  }
+
   async function handleSendTurn(): Promise<void> {
     if (!canStartTurn && !canSteerTurn) {
       return;
     }
+
+    const userContent = prompt.trim();
+    let optimisticMessageId = '';
 
     setBusy(true);
     setError('');
@@ -1728,6 +1749,17 @@ export default function HomePage() {
         return;
       }
 
+      optimisticMessageId = `user-${Date.now()}`;
+      setMessages((current) => [
+        ...current,
+        {
+          id: optimisticMessageId,
+          role: 'user',
+          content: userContent,
+          createdAt: new Date().toISOString(),
+        },
+      ]);
+      setPrompt('');
       setTimelineEvents([]);
       setAssistantText('');
       setReasoningText('');
@@ -1745,7 +1777,7 @@ export default function HomePage() {
 
       const result = await apiRequest<{ turnId: string; status: string }>(`/api/sessions/${selectedSessionId}/turns`, {
         method: 'POST',
-        body: { content: prompt.trim() },
+        body: { content: userContent },
         signal: createTurnController.signal,
       });
       if (pendingTurnCreateAbortRef.current === createTurnController) {
@@ -1761,18 +1793,22 @@ export default function HomePage() {
         resetInspectPanel: false,
       });
       openStream(result.turnId, selectedSessionId);
-      setPrompt('');
     } catch (requestError) {
+      if (optimisticMessageId.length > 0) {
+        setMessages((current) => current.filter((message) => message.id !== optimisticMessageId));
+      }
       if (isAbortError(requestError)) {
         setTurnStatus('idle');
         setStreamActive(false);
         setStreamBubbleTurnId('');
+        setPrompt(userContent);
         return;
       }
       setError(extractMessage(requestError));
       setTurnStatus('idle');
       setStreamActive(false);
       setStreamBubbleTurnId('');
+      setPrompt(userContent);
     } finally {
       pendingTurnCreateAbortRef.current = null;
       setBusy(false);
@@ -1793,14 +1829,16 @@ export default function HomePage() {
       return;
     }
 
+    const cancellingTurnId = activeTurnId;
+    const cancellingSessionId = selectedSessionId;
     setBusy(true);
     setError('');
     try {
-      const cancelled = await apiRequest<{ status: string }>(`/api/turns/${activeTurnId}/cancel`, {
+      const cancelled = await apiRequest<{ status: string }>(`/api/turns/${cancellingTurnId}/cancel`, {
         method: 'POST',
       });
       setTurnStatus(cancelled.status);
-      await loadSessionHistory(selectedSessionId, {
+      await loadSessionHistory(cancellingSessionId, {
         resumeStream: false,
         resetEventLog: false,
         resetInspectPanel: false,
@@ -2473,7 +2511,7 @@ export default function HomePage() {
                         ? 'status-pill-critical'
                         : 'status-pill-good'
                   }`}
-                  onClick={() => void handleManualCompact()}
+                  onClick={() => requestCompactSession()}
                   disabled={!canManualCompact}
                   aria-label="Compact session context"
                   title={
@@ -2922,6 +2960,20 @@ export default function HomePage() {
                   <div className="sim-actions">
                     <button type="button" onClick={() => void handleConfirmDelete()} disabled={busy}>
                       Confirm Delete
+                    </button>
+                    <button type="button" className="button-secondary" onClick={() => closeActionPanel()}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {actionPanelMode === 'confirmCompactSession' ? (
+                <div className="action-panel-body">
+                  <h3>Compact Context</h3>
+                  <p>{`Compact context for "${selectedSession?.title?.trim() || 'this session'}" now?`}</p>
+                  <div className="sim-actions">
+                    <button type="button" onClick={() => void handleConfirmCompactFromPanel()} disabled={busy || compactingContext}>
+                      Confirm Compact
                     </button>
                     <button type="button" className="button-secondary" onClick={() => closeActionPanel()}>
                       Cancel
@@ -3396,9 +3448,10 @@ export default function HomePage() {
                   <button
                     type="button"
                     className="button-secondary chat-show-more"
-                    onClick={() =>
-                      setVisibleMessageCount((current) => Math.min(current + CHAT_VISIBLE_MESSAGE_STEP, displayedMessages.length))
-                    }
+                    onClick={() => {
+                      suppressBottomAutoCollapseRef.current = true;
+                      setVisibleMessageCount((current) => Math.min(current + CHAT_VISIBLE_MESSAGE_STEP, displayedMessages.length));
+                    }}
                   >
                     Show More
                   </button>

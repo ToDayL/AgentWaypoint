@@ -468,13 +468,28 @@ export class TurnsService implements OnModuleInit {
         if (TERMINAL_STATUSES.includes(turn.status)) {
           return;
         }
-        await this.prisma.turn.update({
-          where: { id: turnId },
-          data: {
-            status: 'cancelled',
-            endedAt: new Date(),
-            startedAt: turn.status === 'queued' ? new Date() : undefined,
-          },
+        await this.prisma.$transaction(async (tx) => {
+          const assistantContent = await this.collectAssistantDeltaContent(tx, turnId);
+          const assistantMessage =
+            assistantContent.length > 0
+              ? await tx.message.create({
+                  data: {
+                    sessionId: turn.sessionId,
+                    role: 'assistant',
+                    content: assistantContent,
+                  },
+                })
+              : null;
+
+          await tx.turn.update({
+            where: { id: turnId },
+            data: {
+              assistantMessageId: assistantMessage?.id,
+              status: 'cancelled',
+              endedAt: new Date(),
+              startedAt: turn.status === 'queued' ? new Date() : undefined,
+            },
+          });
         });
         await this.appendEvent(turnId, 'turn.cancelled', this.normalizePayload(payload));
         return;
@@ -515,6 +530,30 @@ export class TurnsService implements OnModuleInit {
 
   private normalizePayload(payload: Record<string, unknown>): Prisma.InputJsonValue {
     return JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue;
+  }
+
+  private async collectAssistantDeltaContent(tx: Prisma.TransactionClient, turnId: string): Promise<string> {
+    const deltaEvents = await tx.event.findMany({
+      where: {
+        turnId,
+        type: 'assistant.delta',
+      },
+      orderBy: { seq: 'asc' },
+      select: {
+        payload: true,
+      },
+    });
+    if (deltaEvents.length === 0) {
+      return '';
+    }
+    const chunks: string[] = [];
+    for (const event of deltaEvents) {
+      const text = extractAssistantDeltaText(event.payload);
+      if (text.length > 0) {
+        chunks.push(text);
+      }
+    }
+    return chunks.join('');
   }
 
   private async reconcileInFlightTurnsOnStartup(): Promise<void> {
@@ -664,4 +703,12 @@ function normalizeApprovalDecisionInput(decision: ResolveTurnApprovalBody['decis
 
 function readFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function extractAssistantDeltaText(payload: Prisma.JsonValue): string {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return '';
+  }
+  const text = (payload as Record<string, unknown>).text;
+  return typeof text === 'string' ? text : '';
 }

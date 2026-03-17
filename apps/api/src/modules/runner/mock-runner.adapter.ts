@@ -101,17 +101,34 @@ export class MockRunnerAdapter implements RunnerAdapter {
   async cancelTurn(input: CancelTurnInput): Promise<void> {
     const turn = await this.prisma.turn.findUnique({
       where: { id: input.turnId },
-      select: { status: true },
+      select: { status: true, sessionId: true },
     });
     if (!turn || TERMINAL_STATUSES.has(turn.status)) {
       return;
     }
 
     this.clearTurnTimers(input.turnId);
+    await this.prisma.$transaction(async (tx) => {
+      const assistantContent = await collectAssistantDeltaContent(tx, input.turnId);
+      const assistantMessage =
+        assistantContent.length > 0
+          ? await tx.message.create({
+              data: {
+                sessionId: turn.sessionId,
+                role: 'assistant',
+                content: assistantContent,
+              },
+            })
+          : null;
 
-    await this.prisma.turn.update({
-      where: { id: input.turnId },
-      data: { status: 'cancelled', endedAt: new Date() },
+      await tx.turn.update({
+        where: { id: input.turnId },
+        data: {
+          assistantMessageId: assistantMessage?.id,
+          status: 'cancelled',
+          endedAt: new Date(),
+        },
+      });
     });
     await this.appendEvent(input.turnId, 'turn.cancelled', {});
   }
@@ -395,4 +412,32 @@ function chunkText(text: string, size: number): string[] {
     chunks.push(text.slice(i, i + size));
   }
   return chunks;
+}
+
+async function collectAssistantDeltaContent(tx: Prisma.TransactionClient, turnId: string): Promise<string> {
+  const deltaEvents = await tx.event.findMany({
+    where: {
+      turnId,
+      type: 'assistant.delta',
+    },
+    orderBy: { seq: 'asc' },
+    select: {
+      payload: true,
+    },
+  });
+  if (deltaEvents.length === 0) {
+    return '';
+  }
+  return deltaEvents
+    .map((event) => extractAssistantDeltaText(event.payload))
+    .filter((text) => text.length > 0)
+    .join('');
+}
+
+function extractAssistantDeltaText(payload: Prisma.JsonValue): string {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return '';
+  }
+  const text = (payload as Record<string, unknown>).text;
+  return typeof text === 'string' ? text : '';
 }

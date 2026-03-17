@@ -949,6 +949,7 @@ describe.sequential('API e2e (http runner)', () => {
     });
     expect(turnResponse.status).toBe(201);
     const turn = (await turnResponse.json()) as { turnId: string };
+    await sleep(220);
 
     const cancelResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/cancel`, {
       method: 'POST',
@@ -971,6 +972,15 @@ describe.sequential('API e2e (http runner)', () => {
       await sleep(120);
     }
     expect(streamText).toContain('event: turn.cancelled');
+
+    const historyResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}/history`, {
+      headers: { 'x-user-email': email },
+    });
+    expect(historyResponse.status).toBe(200);
+    const history = (await historyResponse.json()) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(history.messages.some((message) => message.role === 'assistant' && message.content.length > 0)).toBe(true);
   });
 
   it('resolves approval requests through http runner adapter', async () => {
