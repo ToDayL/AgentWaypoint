@@ -1434,7 +1434,7 @@ button:disabled {
     z-index: 40;
     border-radius: 0;
     border: none;
-    padding: 0.4rem 0.55rem 0.75rem;
+    padding: 0;
     overflow: hidden;
     background: var(--bg-panel);
     box-shadow: none;
@@ -1448,7 +1448,7 @@ button:disabled {
     position: sticky;
     top: 0;
     z-index: 1;
-    padding-bottom: 0.35rem;
+    padding: 0.45rem 0.45rem 0.35rem;
     background: var(--bg-panel);
   }
 
@@ -1461,6 +1461,7 @@ button:disabled {
   }
 
   .insights-pane.mobile-open .insights-content {
+    padding: 0 0.45rem 0.75rem;
     overflow: auto;
   }
 
@@ -1469,11 +1470,22 @@ button:disabled {
     align-items: center;
     gap: 0.35rem;
     justify-content: space-between;
-    margin-bottom: 0.6rem;
+    margin: 0;
+    padding: 0.24rem 0.45rem;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .mobile-sidebar-head .icon-button {
+    width: 1.9rem;
+    min-width: 1.9rem;
+    height: 1.9rem;
   }
 
   .left-sidebar-body {
-    height: calc(100% - 2.4rem);
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
+    padding: 0.55rem 0.45rem 0.75rem;
   }
 
   .mobile-sidebar-head-left {
