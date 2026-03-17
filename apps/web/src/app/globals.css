@@ -360,9 +360,11 @@ body {
 }
 
 .insights-content {
+  display: flex;
+  flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .chat-pane-head h2 {
@@ -1140,11 +1142,16 @@ button:disabled {
 
 .sim-output,
 .sim-events {
-  margin-top: 0.75rem;
+  margin-top: 0;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--bg-panel);
   padding: 0.65rem;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .sim-output h3,
@@ -1155,8 +1162,9 @@ button:disabled {
 
 .sim-output pre {
   margin: 0;
-  min-height: 90px;
-  max-height: 300px;
+  min-height: 0;
+  max-height: none;
+  flex: 1 1 auto;
   overflow: auto;
   border-radius: 10px;
   border: 1px solid var(--line);
@@ -1171,6 +1179,10 @@ button:disabled {
 .diff-list {
   display: grid;
   gap: 0.6rem;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  align-content: start;
 }
 
 .diff-block {
@@ -1240,7 +1252,8 @@ button:disabled {
 }
 
 .diff-rdv-shell {
-  max-height: 260px;
+  max-height: none;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -1639,15 +1652,20 @@ button:disabled {
 
   .insights-pane.mobile-open .sim-output,
   .insights-pane.mobile-open .sim-events {
-    margin-top: 0.55rem;
+    margin-top: 0;
     flex: 1 1 auto;
+    height: 100%;
     min-height: 0;
-    overflow: auto;
+    overflow: hidden;
   }
 
   .insights-pane.mobile-open .insights-content {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
     padding: 0 0.45rem 0.75rem;
-    overflow: auto;
+    overflow: hidden;
   }
 
   .mobile-sidebar-head {

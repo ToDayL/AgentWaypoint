@@ -554,16 +554,110 @@ export default function HomePage() {
       }) as CSSProperties,
     [leftPaneWidth, rightPaneWidth, leftSidebarMode],
   );
+  const parsedDiffFiles = useMemo(() => {
+    if (insightsTab !== 'diff' || !latestDiffSummary) {
+      return [] as ParsedDiffFile[];
+    }
+    return parseDiff(latestDiffSummary);
+  }, [insightsTab, latestDiffSummary]);
   const renderedDiff = useMemo(() => {
     if (!latestDiffSummary) {
       return null;
     }
     return {
       id: `latest-${latestDiffSummary.length}`,
-      files: parseDiff(latestDiffSummary),
+      files: parsedDiffFiles,
       rawDiff: latestDiffSummary,
     };
-  }, [latestDiffSummary]);
+  }, [latestDiffSummary, parsedDiffFiles]);
+  const previewPanelView = useMemo(
+    () => (
+      <article className="sim-output">
+        <h3>File Preview</h3>
+        {!previewFilePath ? <pre>Select a file in File Browser and double click to preview.</pre> : null}
+        {previewFilePath ? (
+          <>
+            <div className="diff-block-head">{previewFilePath}</div>
+            {previewFileBusy ? <pre>Loading preview…</pre> : null}
+            {!previewFileBusy && previewFileError ? <pre>{previewFileError}</pre> : null}
+            {!previewFileBusy && !previewFileError ? (
+              previewFileIsMarkdown ? (
+                <div className="chat-markdown">
+                  <ReactMarkdown remarkPlugins={CHAT_MARKDOWN_REMARK_PLUGINS}>{previewFileContent}</ReactMarkdown>
+                </div>
+              ) : (
+                <SyntaxHighlighter
+                  language={detectCodeLanguage(previewFilePath)}
+                  style={oneDark}
+                  customStyle={{
+                    margin: 0,
+                    minHeight: '90px',
+                    maxHeight: 'none',
+                    flex: '1 1 auto',
+                    fontFamily: "'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace",
+                    fontSize: '0.81rem',
+                    lineHeight: 1.35,
+                  }}
+                  codeTagProps={{
+                    style: {
+                      fontFamily: "'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace",
+                      fontSize: '0.81rem',
+                      lineHeight: 1.35,
+                    },
+                  }}
+                  wrapLongLines
+                  showLineNumbers
+                  lineNumberStyle={{
+                    minWidth: '2.4em',
+                    marginRight: '0.75em',
+                    color: '#7c8aa2',
+                    fontFamily: "'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace",
+                    fontSize: '0.81rem',
+                    lineHeight: 1.35,
+                    textAlign: 'right',
+                    userSelect: 'none',
+                  }}
+                >
+                  {previewFileContent || '(empty file)'}
+                </SyntaxHighlighter>
+              )
+            ) : null}
+            {previewFileTruncated ? <p className="sim-input-hint">Preview truncated to 256 KB.</p> : null}
+          </>
+        ) : null}
+      </article>
+    ),
+    [previewFilePath, previewFileBusy, previewFileError, previewFileIsMarkdown, previewFileContent, previewFileTruncated],
+  );
+  const diffPanelView = useMemo(
+    () => (
+      <article className="sim-output">
+        <h3>Diff Summary</h3>
+        {!renderedDiff ? <pre>No diff updates yet.</pre> : null}
+        {renderedDiff ? (
+          <div className="diff-list">
+            {renderedDiff.files.length === 0 ? (
+              <section key={renderedDiff.id} className="diff-block">
+                <div className="diff-block-head">Latest Diff</div>
+                <pre>{renderedDiff.rawDiff}</pre>
+              </section>
+            ) : null}
+            {renderedDiff.files.map((file, fileIndex) => (
+              <section key={`diff-${renderedDiff.id}-file-${fileIndex}`} className="diff-block">
+                <div className="diff-block-head">{formatDiffFileLabel(file)}</div>
+                <div className="diff-rdv-shell">
+                  <Diff viewType="unified" diffType={file.type} hunks={file.hunks}>
+                    {(hunks) => hunks.map((hunk, hunkIndex) => <Hunk key={hunkIndex} hunk={hunk} />)}
+                  </Diff>
+                </div>
+              </section>
+            ))}
+          </div>
+        ) : null}
+      </article>
+    ),
+    [renderedDiff],
+  );
 
   useEffect(() => {
     return () => {
@@ -3576,87 +3670,8 @@ export default function HomePage() {
                   </button>
                 </div>
                 <div className="insights-content">
-                  {insightsTab === 'preview' ? (
-                    <article className="sim-output">
-                      <h3>File Preview</h3>
-                      {!previewFilePath ? <pre>Select a file in File Browser and double click to preview.</pre> : null}
-                      {previewFilePath ? (
-                        <>
-                          <div className="diff-block-head">{previewFilePath}</div>
-                          {previewFileBusy ? <pre>Loading preview…</pre> : null}
-                          {!previewFileBusy && previewFileError ? <pre>{previewFileError}</pre> : null}
-                          {!previewFileBusy && !previewFileError ? (
-                            previewFileIsMarkdown ? (
-                              <div className="chat-markdown">
-                                <ReactMarkdown remarkPlugins={CHAT_MARKDOWN_REMARK_PLUGINS}>{previewFileContent}</ReactMarkdown>
-                              </div>
-                            ) : (
-                              <SyntaxHighlighter
-                                language={detectCodeLanguage(previewFilePath)}
-                                style={oneDark}
-                                customStyle={{
-                                  margin: 0,
-                                  minHeight: '90px',
-                                  maxHeight: '320px',
-                                  fontFamily: "'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace",
-                                  fontSize: '0.81rem',
-                                  lineHeight: 1.35,
-                                }}
-                                codeTagProps={{
-                                  style: {
-                                    fontFamily: "'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace",
-                                    fontSize: '0.81rem',
-                                    lineHeight: 1.35,
-                                  },
-                                }}
-                                wrapLongLines
-                                showLineNumbers
-                                lineNumberStyle={{
-                                  minWidth: '2.4em',
-                                  marginRight: '0.75em',
-                                  color: '#7c8aa2',
-                                  fontFamily: "'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace",
-                                  fontSize: '0.81rem',
-                                  lineHeight: 1.35,
-                                  textAlign: 'right',
-                                  userSelect: 'none',
-                                }}
-                              >
-                                {previewFileContent || '(empty file)'}
-                              </SyntaxHighlighter>
-                            )
-                          ) : null}
-                          {previewFileTruncated ? <p className="sim-input-hint">Preview truncated to 256 KB.</p> : null}
-                        </>
-                      ) : null}
-                    </article>
-                  ) : null}
-                  {insightsTab === 'diff' ? (
-                    <article className="sim-output">
-                      <h3>Diff Summary</h3>
-                      {!renderedDiff ? <pre>No diff updates yet.</pre> : null}
-                      {renderedDiff ? (
-                        <div className="diff-list">
-                          {renderedDiff.files.length === 0 ? (
-                            <section key={renderedDiff.id} className="diff-block">
-                              <div className="diff-block-head">Latest Diff</div>
-                              <pre>{renderedDiff.rawDiff}</pre>
-                            </section>
-                          ) : null}
-                          {renderedDiff.files.map((file, fileIndex) => (
-                            <section key={`diff-${renderedDiff.id}-file-${fileIndex}`} className="diff-block">
-                              <div className="diff-block-head">{formatDiffFileLabel(file)}</div>
-                              <div className="diff-rdv-shell">
-                                <Diff viewType="unified" diffType={file.type} hunks={file.hunks}>
-                                  {(hunks) => hunks.map((hunk, hunkIndex) => <Hunk key={hunkIndex} hunk={hunk} />)}
-                                </Diff>
-                              </div>
-                            </section>
-                          ))}
-                        </div>
-                      ) : null}
-                    </article>
-                  ) : null}
+                  {insightsTab === 'preview' ? previewPanelView : null}
+                  {insightsTab === 'diff' ? diffPanelView : null}
                   {insightsTab === 'events' ? (
                     <div className="timeline-list">
                       {timelineEvents.length === 0 ? <p className="timeline-empty">No events yet.</p> : null}
