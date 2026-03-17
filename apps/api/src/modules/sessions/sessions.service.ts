@@ -291,4 +291,89 @@ export class SessionsService {
       },
     });
   }
+
+  async compactSessionForUser(userId: string, sessionId: string): Promise<{ accepted: true }> {
+    const session = await this.prisma.session.findFirst({
+      where: {
+        id: sessionId,
+        project: {
+          ownerUserId: userId,
+        },
+      },
+      select: {
+        id: true,
+        codexThreadId: true,
+        cwdOverride: true,
+        modelOverride: true,
+        sandboxOverride: true,
+        approvalPolicyOverride: true,
+      },
+    });
+
+    if (!session) {
+      throw new NotFoundException({ message: 'Session not found' });
+    }
+
+    const threadId = session.codexThreadId?.trim();
+    if (!threadId) {
+      throw new ConflictException({ message: 'Session cannot be compacted before the first turn starts' });
+    }
+    const cwd = session.cwdOverride?.trim() || null;
+    const model = session.modelOverride?.trim() || null;
+    const sandbox = session.sandboxOverride?.trim() || null;
+    const approvalPolicy = session.approvalPolicyOverride?.trim() || null;
+
+    const activeTurn = await this.prisma.turn.findFirst({
+      where: {
+        sessionId,
+        status: {
+          in: [...ACTIVE_TURN_STATUSES],
+        },
+      },
+      select: { id: true },
+    });
+
+    if (activeTurn) {
+      throw new ConflictException({ message: 'Cannot compact a session while a turn is active' });
+    }
+
+    try {
+      await this.runnerAdapter.compactThread({
+        threadId,
+        cwd,
+        model,
+        sandbox,
+        approvalPolicy,
+      });
+
+      const latestTurn = await this.prisma.turn.findFirst({
+        where: { sessionId },
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          contextWindowTokens: true,
+          contextRemainingTokens: true,
+        },
+      });
+      if (latestTurn) {
+        await this.prisma.turn.update({
+          where: { id: latestTurn.id },
+          data: {
+            contextRemainingRatio: 1,
+            contextRemainingTokens: latestTurn.contextWindowTokens ?? latestTurn.contextRemainingTokens ?? null,
+            contextUpdatedAt: new Date(),
+          },
+        });
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to compact session context';
+      if (message.toLowerCase().includes('thread not found')) {
+        throw new ConflictException({
+          message: 'Session context is no longer available in runner memory. Start a new turn to recreate it.',
+        });
+      }
+      throw new ConflictException({ message });
+    }
+    return { accepted: true };
+  }
 }

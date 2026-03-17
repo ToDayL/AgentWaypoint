@@ -4,6 +4,7 @@ import {
   AvailableModel,
   CancelTurnInput,
   CloseThreadInput,
+  CompactThreadInput,
   EnsureDirectoryInput,
   EnsureDirectoryResult,
   ForkThreadInput,
@@ -249,6 +250,20 @@ export class HttpRunnerAdapter implements RunnerAdapter {
     });
   }
 
+  async compactThread(input: CompactThreadInput): Promise<void> {
+    await this.request({
+      method: 'POST',
+      path: '/runner/threads/compact',
+      body: {
+        threadId: input.threadId,
+        cwd: input.cwd ?? null,
+        model: input.model ?? null,
+        sandbox: input.sandbox ?? null,
+        approvalPolicy: input.approvalPolicy ?? null,
+      },
+    });
+  }
+
   async ensureDirectory(input: EnsureDirectoryInput): Promise<EnsureDirectoryResult> {
     const response = await this.request({
       method: 'POST',
@@ -306,10 +321,11 @@ export class HttpRunnerAdapter implements RunnerAdapter {
 
       if (!response.ok) {
         const responseText = await response.text();
+        const runnerErrorMessage = extractRunnerErrorMessage(responseText, response.status);
         this.logger.error(
           `Runner request failed: ${options.path} -> ${response.status} ${response.statusText} ${responseText}`,
         );
-        throw new Error(`Runner request failed: ${response.status}`);
+        throw new Error(runnerErrorMessage);
       }
 
       if (response.status === 204) {
@@ -337,6 +353,34 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       clearTimeout(timeout);
     }
   }
+}
+
+function extractRunnerErrorMessage(responseText: string, status: number): string {
+  const fallback = `Runner request failed: ${status}`;
+  const trimmed = responseText.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed && typeof parsed === 'object') {
+      const record = parsed as Record<string, unknown>;
+      const error = record.error;
+      if (error && typeof error === 'object') {
+        const errorMessage = (error as Record<string, unknown>).message;
+        if (typeof errorMessage === 'string' && errorMessage.trim()) {
+          return errorMessage.trim();
+        }
+      }
+      const message = record.message;
+      if (typeof message === 'string' && message.trim()) {
+        return message.trim();
+      }
+    }
+  } catch {
+    // Ignore parse errors and fall back.
+  }
+  return fallback;
 }
 
 function parseRateLimitWindow(value: unknown): { usedPercent: number | null; resetsAt: number | null; windowDurationMins: number | null } | null {

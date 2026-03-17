@@ -1233,6 +1233,28 @@ button:disabled {
   text-transform: lowercase;
 }
 
+.status-pill.status-pill-action {
+  appearance: none;
+  cursor: pointer;
+}
+
+.status-pill.status-pill-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.status-pill.status-pill-good {
+  color: #d9ffe8;
+  background: color-mix(in srgb, #1f8a4c 48%, #1a231e);
+  border-color: color-mix(in srgb, #46c277 58%, #ffffff);
+}
+
+.status-pill.status-pill-pending {
+  color: #d7d7d7;
+  background: #3a3d41;
+  border-color: #4f555d;
+}
+
 .status-pill.status-pill-critical {
   color: #ffd4ca;
   background: color-mix(in srgb, var(--danger) 26%, #221717);

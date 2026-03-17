@@ -43,6 +43,14 @@ export type CloseThreadInput = {
   threadId: string;
 };
 
+export type CompactThreadInput = {
+  threadId: string;
+  cwd?: string | null;
+  model?: string | null;
+  sandbox?: string | null;
+  approvalPolicy?: string | null;
+};
+
 export type EnsureDirectoryInput = {
   path: string;
 };
@@ -141,6 +149,7 @@ export interface RunnerAdapter {
   listModels(): Promise<AvailableModel[]>;
   forkThread(input: ForkThreadInput): Promise<ForkThreadResult>;
   closeThread(input: CloseThreadInput): Promise<void>;
+  compactThread(input: CompactThreadInput): Promise<void>;
   ensureDirectory(input: EnsureDirectoryInput): Promise<EnsureDirectoryResult>;
   suggestWorkspaceDirectories(input: WorkspaceSuggestionInput): Promise<string[]>;
 }

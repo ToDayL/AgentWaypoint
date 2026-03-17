@@ -10,6 +10,7 @@ import {
   AvailableModel,
   CancelTurnInput,
   CloseThreadInput,
+  CompactThreadInput,
   EnsureDirectoryInput,
   EnsureDirectoryResult,
   ForkThreadInput,
@@ -155,6 +156,10 @@ export class MockRunnerAdapter implements RunnerAdapter {
   }
 
   async closeThread(_input: CloseThreadInput): Promise<void> {
+    return;
+  }
+
+  async compactThread(_input: CompactThreadInput): Promise<void> {
     return;
   }
 

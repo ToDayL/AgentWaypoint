@@ -8,6 +8,7 @@ import type {
   BufferedRunnerEvent,
   CancelTurnBody,
   CloseThreadBody,
+  CompactThreadBody,
   EnsureDirectoryBody,
   ForkThreadBody,
   ModelListItem,
@@ -240,6 +241,26 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (pathname === '/runner/threads/compact') {
+      const payload = parseCompactThreadBody(await readJsonBody(request));
+      const cwd = await filesystemBackend.resolveWorkspaceCwd(payload.cwd);
+
+      if (runnerBackend === 'mock') {
+        sendJson(response, 202, {
+          accepted: true,
+          runnerRequestId: randomUUID(),
+        });
+        return;
+      }
+
+      await codexBackend.compactThread({ ...payload, cwd });
+      sendJson(response, 202, {
+        accepted: true,
+        runnerRequestId: randomUUID(),
+      });
+      return;
+    }
+
     if (pathname === '/runner/turns/steer') {
       const payload = parseSteerTurnBody(await readJsonBody(request));
       const turn = activeTurns.get(payload.turnId);
@@ -390,6 +411,20 @@ function parseCloseThreadBody(input: unknown): CloseThreadBody {
   const record = input as Record<string, unknown>;
   return {
     threadId: readNonEmptyString(record.threadId, 'threadId'),
+  };
+}
+
+function parseCompactThreadBody(input: unknown): CompactThreadBody {
+  if (!input || typeof input !== 'object') {
+    throw new Error('Invalid compact-thread payload');
+  }
+  const record = input as Record<string, unknown>;
+  return {
+    threadId: readNonEmptyString(record.threadId, 'threadId'),
+    cwd: readOptionalString(record.cwd),
+    model: readOptionalString(record.model),
+    sandbox: readOptionalString(record.sandbox),
+    approvalPolicy: readOptionalString(record.approvalPolicy),
   };
 }
 

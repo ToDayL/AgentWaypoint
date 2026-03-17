@@ -34,4 +34,11 @@ export class SessionHistoryController {
     const input = parseWithZod(ForkSessionBodySchema, body);
     return this.sessionsService.forkSessionForUser(user.id, id, input);
   }
+
+  @Post('/:id/compact')
+  @HttpCode(202)
+  async compactSession(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown) {
+    const { id } = parseWithZod(SessionIdParamsSchema, params);
+    return this.sessionsService.compactSessionForUser(user.id, id);
+  }
 }

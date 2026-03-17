@@ -42,6 +42,14 @@ export type CloseThreadBody = {
   threadId: string;
 };
 
+export type CompactThreadBody = {
+  threadId: string;
+  cwd?: string | null;
+  model?: string | null;
+  sandbox?: string | null;
+  approvalPolicy?: string | null;
+};
+
 export type EnsureDirectoryBody = {
   path: string;
 };

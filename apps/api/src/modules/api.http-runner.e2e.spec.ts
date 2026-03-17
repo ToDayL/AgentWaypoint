@@ -25,6 +25,7 @@ type RunnerEventType =
 type TestRunnerServer = {
   baseUrl: string;
   getClosedThreadIds: () => string[];
+  getCompactedThreadIds: () => string[];
   close: () => Promise<void>;
 };
 
@@ -95,6 +96,7 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
   const activeTurns = new Map<string, ActiveTurnState>();
   const forkedThreadIds = new Map<string, string>();
   const closedThreadIds = new Set<string>();
+  const compactedThreadIds = new Set<string>();
   const bufferedTurns = new Map<string, BufferedTurnState>();
 
   const ensureBufferedTurn = (turnId: string): BufferedTurnState => {
@@ -311,6 +313,14 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
         return;
       }
 
+      if (request.url === '/runner/threads/compact') {
+        const payload = await readJsonBody(request);
+        const threadId = readRequiredString(payload, 'threadId');
+        compactedThreadIds.add(threadId);
+        sendJson(response, 202, { accepted: true });
+        return;
+      }
+
       if (request.url === '/runner/turns/steer') {
         const payload = await readJsonBody(request);
         const turnId = readRequiredString(payload, 'turnId');
@@ -392,6 +402,7 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
   return {
     baseUrl: `http://127.0.0.1:${addr.port}`,
     getClosedThreadIds: () => [...closedThreadIds],
+    getCompactedThreadIds: () => [...compactedThreadIds],
     close: () => {
       activeTurns.forEach((turn) => {
         if (turn.completionTimer) {
@@ -401,6 +412,7 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
       activeTurns.clear();
       bufferedTurns.clear();
       closedThreadIds.clear();
+      compactedThreadIds.clear();
       return new Promise<void>((resolve, reject) => {
         server.close((error) => {
           if (error) {
@@ -783,6 +795,42 @@ describe.sequential('API e2e (http runner)', () => {
     });
     expect(deleteSessionResponse.status).toBe(204);
     expect(runner.getClosedThreadIds()).toContain(`thread-${session.id}`);
+  });
+
+  it('manually compacts an idle session thread', async () => {
+    const email = randomEmail('http-compact-session');
+
+    const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ name: 'Compact Session Project', repoPath: TEST_REPO_PATH }),
+    });
+    expect(projectResponse.status).toBe(201);
+    const project = (await projectResponse.json()) as { id: string };
+
+    const sessionResponse = await fetch(`${apiBaseUrl}/api/projects/${project.id}/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ title: 'Compact Session' }),
+    });
+    expect(sessionResponse.status).toBe(201);
+    const session = (await sessionResponse.json()) as { id: string };
+
+    const turnResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}/turns`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'prepare thread before manual compact' }),
+    });
+    expect(turnResponse.status).toBe(201);
+
+    await sleep(1300);
+
+    const compactResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}/compact`, {
+      method: 'POST',
+      headers: { 'x-user-email': email },
+    });
+    expect(compactResponse.status).toBe(202);
+    expect(runner.getCompactedThreadIds()).toContain(`thread-${session.id}`);
   });
 
   it('steers an active turn through the http runner adapter when enabled', async () => {

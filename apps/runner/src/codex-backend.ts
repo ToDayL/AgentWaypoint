@@ -6,6 +6,7 @@ import type {
   ActiveTurn,
   CodexWorker,
   CloseThreadBody,
+  CompactThreadBody,
   ForkThreadBody,
   ModelListItem,
   PendingApprovalRequest,
@@ -183,6 +184,28 @@ export class CodexBackend {
     const worker = await this.ensureCodexWorker();
     await worker.readyPromise;
     await this.sendWorkerRequest(worker, 'thread/archive', {
+      threadId: input.threadId,
+    });
+  }
+
+  async compactThread(input: CompactThreadBody): Promise<void> {
+    const worker = await this.ensureCodexWorker();
+    await worker.readyPromise;
+    const cwd = input.cwd?.trim() || this.config.codexDefaultCwd;
+    const model = input.model?.trim() || this.config.codexDefaultModel;
+    const sandbox = input.sandbox?.trim() || this.config.codexSandboxMode;
+    const approvalPolicy = input.approvalPolicy?.trim() || this.config.codexApprovalPolicy;
+
+    await this.sendWorkerRequest(worker, 'thread/resume', {
+      threadId: input.threadId,
+      cwd,
+      model,
+      sandbox,
+      approvalPolicy,
+      persistExtendedHistory: false,
+    });
+
+    await this.sendWorkerRequest(worker, 'thread/compact/start', {
       threadId: input.threadId,
     });
   }

@@ -372,6 +372,7 @@ export default function HomePage() {
   const [sessionDeleteTarget, setSessionDeleteTarget] = useState<Session | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [compactingContext, setCompactingContext] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const turnPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pendingTurnCreateAbortRef = useRef<AbortController | null>(null);
@@ -386,6 +387,7 @@ export default function HomePage() {
   const canStartTurn = !!selectedSessionId && prompt.trim().length > 0 && activeTurnId === '';
   const canSteerTurn =
     appSettings.turnSteerEnabled && !!activeTurnId && prompt.trim().length > 0 && pendingApproval === null;
+  const canManualCompact = !!selectedSessionId && !activeTurnId && !busy && !compactingContext;
   const normalizedDefaultWorkspaceRootDraft = defaultWorkspaceRootInput.trim() || null;
   const appSettingsDirty =
     turnSteerDraft !== appSettings.turnSteerEnabled ||
@@ -1281,6 +1283,38 @@ export default function HomePage() {
     }
   }
 
+  async function handleManualCompact(): Promise<void> {
+    const sessionId = selectedSessionId.trim();
+    if (!sessionId || activeTurnId) {
+      return;
+    }
+
+    const sessionTitle = selectedSession?.title?.trim() || 'this session';
+    const confirmed = window.confirm(`Compact context for "${sessionTitle}" now?`);
+    if (!confirmed) {
+      return;
+    }
+
+    setBusy(true);
+    setCompactingContext(true);
+    setError('');
+    try {
+      await apiRequest<{ accepted: boolean }>(`/api/sessions/${sessionId}/compact`, {
+        method: 'POST',
+      });
+      await loadSessionHistory(sessionId, {
+        resumeStream: false,
+        resetEventLog: false,
+        resetInspectPanel: false,
+      });
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    } finally {
+      setBusy(false);
+      setCompactingContext(false);
+    }
+  }
+
   async function handleSendTurn(): Promise<void> {
     if (!canStartTurn && !canSteerTurn) {
       return;
@@ -1954,9 +1988,28 @@ export default function HomePage() {
                 : 'AgentWaypoint'}
               {authenticated ? <span className="status-pill">{turnStatus}</span> : null}
               {authenticated && contextRemainingRatio !== null ? (
-                <span className={`status-pill ${contextRemainingRatio < 0.3 ? 'status-pill-critical' : ''}`}>
-                  {`context left ${formatPercent(contextRemainingRatio)}`}
-                </span>
+                <button
+                  type="button"
+                  className={`status-pill status-pill-action ${
+                    compactingContext
+                      ? 'status-pill-pending'
+                      : contextRemainingRatio < 0.3
+                        ? 'status-pill-critical'
+                        : 'status-pill-good'
+                  }`}
+                  onClick={() => void handleManualCompact()}
+                  disabled={!canManualCompact}
+                  aria-label="Compact session context"
+                  title={
+                    !selectedSessionId
+                      ? 'Select a session before compacting'
+                      : activeTurnId
+                        ? 'Wait for the active turn to finish before compacting'
+                        : 'Compact context now'
+                  }
+                >
+                  {compactingContext ? 'compacting...' : `context left ${formatPercent(contextRemainingRatio)}`}
+                </button>
               ) : null}
             </h1>
           </div>
