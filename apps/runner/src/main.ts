@@ -111,6 +111,17 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === 'GET' && pathname === '/runner/fs/file') {
+      const filePath = (url.searchParams.get('path') ?? '').trim();
+      if (!filePath) {
+        throw new Error('path is required');
+      }
+      const maxBytes = Number.parseInt(url.searchParams.get('maxBytes') ?? String(256 * 1024), 10);
+      const result = await filesystemBackend.readWorkspaceFile(filePath, maxBytes);
+      sendJson(response, 200, result);
+      return;
+    }
+
     const turnStatusMatch = request.method === 'GET' ? pathname.match(/^\/runner\/turns\/([^/]+)$/) : null;
     if (turnStatusMatch) {
       const turnId = decodeURIComponent(turnStatusMatch[1] ?? '');

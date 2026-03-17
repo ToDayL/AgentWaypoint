@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readdir, stat } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import * as path from 'node:path';
 import { Inject, Injectable, Logger } from '@nestjs/common';
@@ -20,6 +20,8 @@ import {
   RunnerAdapter,
   SteerTurnInput,
   StartTurnInput,
+  WorkspaceFileInput,
+  WorkspaceFileResult,
   WorkspaceTreeEntry,
   WorkspaceTreeInput,
   WorkspaceSuggestionInput,
@@ -229,6 +231,28 @@ export class MockRunnerAdapter implements RunnerAdapter {
         return a.name.localeCompare(b.name);
       })
       .slice(0, limit);
+  }
+
+  async readWorkspaceFile(input: WorkspaceFileInput): Promise<WorkspaceFileResult> {
+    const absolutePath = path.resolve(expandHomeToken(input.path.trim()));
+    const info = await stat(absolutePath);
+    if (!info.isFile()) {
+      throw new Error(`Path is not a file: ${absolutePath}`);
+    }
+    const maxBytes = Number.isFinite(input.maxBytes)
+      ? Math.min(Math.max(Math.trunc(input.maxBytes ?? 256 * 1024), 1024), 1024 * 1024)
+      : 256 * 1024;
+    const contentBuffer = await readFile(absolutePath);
+    if (contentBuffer.includes(0)) {
+      throw new Error(`File appears to be binary and cannot be previewed: ${absolutePath}`);
+    }
+    const truncated = contentBuffer.length > maxBytes;
+    const text = (truncated ? contentBuffer.subarray(0, maxBytes) : contentBuffer).toString('utf8');
+    return {
+      path: absolutePath,
+      content: text,
+      truncated,
+    };
   }
 
   private async handleDelta(turnId: string, chunk: string): Promise<void> {

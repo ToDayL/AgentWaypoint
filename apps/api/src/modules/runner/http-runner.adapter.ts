@@ -10,6 +10,8 @@ import {
   ForkThreadInput,
   ForkThreadResult,
   ResolveTurnApprovalInput,
+  WorkspaceFileInput,
+  WorkspaceFileResult,
   WorkspaceTreeEntry,
   WorkspaceTreeInput,
   WorkspaceSuggestionInput,
@@ -327,6 +329,31 @@ export class HttpRunnerAdapter implements RunnerAdapter {
         isDirectory: item.isDirectory === true,
       }))
       .filter((item) => item.name.length > 0 && item.path.length > 0);
+  }
+
+  async readWorkspaceFile(input: WorkspaceFileInput): Promise<WorkspaceFileResult> {
+    const query = new URLSearchParams({
+      path: input.path,
+      maxBytes: String(input.maxBytes ?? 256 * 1024),
+    });
+    const response = await this.request({
+      method: 'GET',
+      path: `/runner/fs/file?${query.toString()}`,
+    });
+    if (!response || typeof response !== 'object') {
+      throw new Error('Runner workspace file response is invalid');
+    }
+    const record = response as Record<string, unknown>;
+    const pathValue = typeof record.path === 'string' ? record.path : '';
+    const contentValue = typeof record.content === 'string' ? record.content : '';
+    if (!pathValue) {
+      throw new Error('Runner workspace file response did not include path');
+    }
+    return {
+      path: pathValue,
+      content: contentValue,
+      truncated: record.truncated === true,
+    };
   }
 
   private async request(options: RunnerHttpRequestOptions): Promise<unknown> {

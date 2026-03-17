@@ -24,6 +24,8 @@ import {
 } from 'lucide-react';
 import { Diff, Hunk, parseDiff } from 'react-diff-view';
 import ReactMarkdown from 'react-markdown';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import remarkGfm from 'remark-gfm';
 
 type Project = {
@@ -161,6 +163,12 @@ type WorkspaceTreeEntry = {
   isDirectory: boolean;
 };
 
+type WorkspaceFileResponse = {
+  path: string;
+  content: string;
+  truncated: boolean;
+};
+
 type RateLimitWindow = {
   usedPercent: number | null;
   resetsAt: number | null;
@@ -275,7 +283,7 @@ const LAST_SESSION_STORAGE_KEY_PREFIX = 'agentwaypoint:last-session:';
 const CHAT_VISIBLE_MESSAGE_STEP = 10;
 const CHAT_SCROLL_IDLE_MS = 220;
 type LeftSidebarTab = 'explorer' | 'fileBrowser' | 'config';
-type InsightsTab = 'diff' | 'events';
+type InsightsTab = 'preview' | 'diff' | 'events';
 type SidebarMode = 'closed' | 'pop' | 'pin';
 type ActionPanelMode =
   | 'closed'
@@ -370,6 +378,12 @@ export default function HomePage() {
   const [leftSidebarMode, setLeftSidebarMode] = useState<SidebarMode>('pin');
   const [rightSidebarMode, setRightSidebarMode] = useState<SidebarMode>('closed');
   const [insightsTab, setInsightsTab] = useState<InsightsTab>('events');
+  const [previewFilePath, setPreviewFilePath] = useState('');
+  const [previewFileContent, setPreviewFileContent] = useState('');
+  const [previewFileIsMarkdown, setPreviewFileIsMarkdown] = useState(false);
+  const [previewFileTruncated, setPreviewFileTruncated] = useState(false);
+  const [previewFileBusy, setPreviewFileBusy] = useState(false);
+  const [previewFileError, setPreviewFileError] = useState('');
   const [visibleMessageCount, setVisibleMessageCount] = useState(CHAT_VISIBLE_MESSAGE_STEP);
   const [sessionInfoOpen, setSessionInfoOpen] = useState(true);
   const [mobileLeftSidebarOpen, setMobileLeftSidebarOpen] = useState(false);
@@ -396,6 +410,7 @@ export default function HomePage() {
   const previousDisplayedMessageCountRef = useRef(0);
   const chatScrollTopRef = useRef(0);
   const wasConfigFullscreenActiveRef = useRef(false);
+  const previewLoadSeqRef = useRef(0);
 
   const canStartTurn = !!selectedSessionId && prompt.trim().length > 0 && activeTurnId === '';
   const canSteerTurn =
@@ -670,6 +685,17 @@ export default function HomePage() {
   }, [mounted, authenticated, activeWorkspacePath]);
 
   useEffect(() => {
+    if (!activeWorkspacePath) {
+      setPreviewFilePath('');
+      setPreviewFileContent('');
+      setPreviewFileIsMarkdown(false);
+      setPreviewFileTruncated(false);
+      setPreviewFileBusy(false);
+      setPreviewFileError('');
+    }
+  }, [activeWorkspacePath]);
+
+  useEffect(() => {
     const container = chatThreadRef.current;
     if (!container || !chatAtBottomRef.current) {
       return;
@@ -889,6 +915,12 @@ export default function HomePage() {
       setFileBrowserNodes({});
       setFileBrowserExpandedPaths([]);
       setFileBrowserError('');
+      setPreviewFilePath('');
+      setPreviewFileContent('');
+      setPreviewFileIsMarkdown(false);
+      setPreviewFileTruncated(false);
+      setPreviewFileBusy(false);
+      setPreviewFileError('');
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
@@ -1267,6 +1299,56 @@ export default function HomePage() {
     setFileBrowserExpandedPaths((current) => [...current, normalizedPath]);
     if (!fileBrowserNodes[normalizedPath]) {
       void loadWorkspaceTree(normalizedPath);
+    }
+  }
+
+  async function openFilePreview(path: string): Promise<void> {
+    const normalizedPath = path.trim();
+    if (!normalizedPath) {
+      return;
+    }
+    const loadSeq = previewLoadSeqRef.current + 1;
+    previewLoadSeqRef.current = loadSeq;
+
+    setPreviewFilePath(normalizedPath);
+    setPreviewFileContent('');
+    setPreviewFileIsMarkdown(isMarkdownFilePath(normalizedPath));
+    setPreviewFileTruncated(false);
+    setPreviewFileError('');
+    setPreviewFileBusy(true);
+    setInsightsTab('preview');
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 860px)').matches) {
+      setMobileInsightsOpen(true);
+    } else {
+      setRightSidebarMode((current) => (current === 'closed' ? 'pop' : current));
+    }
+
+    try {
+      const response = await apiRequest<WorkspaceFileResponse>(
+        `/api/fs/file?${new URLSearchParams({ path: normalizedPath, maxBytes: String(256 * 1024) }).toString()}`,
+        {
+          method: 'GET',
+        },
+      );
+      if (previewLoadSeqRef.current !== loadSeq) {
+        return;
+      }
+      setPreviewFilePath(response.path);
+      setPreviewFileContent(response.content ?? '');
+      setPreviewFileTruncated(response.truncated === true);
+      setPreviewFileIsMarkdown(isMarkdownFilePath(response.path));
+      setPreviewFileError('');
+    } catch (requestError) {
+      if (previewLoadSeqRef.current !== loadSeq) {
+        return;
+      }
+      setPreviewFileError(extractMessage(requestError));
+      setPreviewFileContent('');
+      setPreviewFileTruncated(false);
+    } finally {
+      if (previewLoadSeqRef.current === loadSeq) {
+        setPreviewFileBusy(false);
+      }
     }
   }
 
@@ -2049,6 +2131,11 @@ export default function HomePage() {
                 onClick={() => {
                   if (entry.isDirectory) {
                     toggleFileBrowserDirectory(entry.path);
+                  }
+                }}
+                onDoubleClick={() => {
+                  if (!entry.isDirectory) {
+                    void openFilePreview(entry.path);
                   }
                 }}
                 title={entry.path}
@@ -3126,6 +3213,9 @@ export default function HomePage() {
                   </button>
                 </div>
                 <div className="insights-tabs">
+                  <button type="button" className={insightsTab === 'preview' ? 'tab-active' : ''} onClick={() => setInsightsTab('preview')}>
+                    Preview
+                  </button>
                   <button type="button" className={insightsTab === 'diff' ? 'tab-active' : ''} onClick={() => setInsightsTab('diff')}>
                     Diff
                   </button>
@@ -3134,6 +3224,61 @@ export default function HomePage() {
                   </button>
                 </div>
                 <div className="insights-content">
+                  {insightsTab === 'preview' ? (
+                    <article className="sim-output">
+                      <h3>File Preview</h3>
+                      {!previewFilePath ? <pre>Select a file in File Browser and double click to preview.</pre> : null}
+                      {previewFilePath ? (
+                        <>
+                          <div className="diff-block-head">{previewFilePath}</div>
+                          {previewFileBusy ? <pre>Loading preview…</pre> : null}
+                          {!previewFileBusy && previewFileError ? <pre>{previewFileError}</pre> : null}
+                          {!previewFileBusy && !previewFileError ? (
+                            previewFileIsMarkdown ? (
+                              <div className="chat-markdown">
+                                <ReactMarkdown remarkPlugins={CHAT_MARKDOWN_REMARK_PLUGINS}>{previewFileContent}</ReactMarkdown>
+                              </div>
+                            ) : (
+                              <SyntaxHighlighter
+                                language={detectCodeLanguage(previewFilePath)}
+                                style={oneDark}
+                                customStyle={{
+                                  margin: 0,
+                                  minHeight: '90px',
+                                  maxHeight: '320px',
+                                  fontFamily: "'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace",
+                                  fontSize: '0.81rem',
+                                  lineHeight: 1.35,
+                                }}
+                                codeTagProps={{
+                                  style: {
+                                    fontFamily: "'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace",
+                                    fontSize: '0.81rem',
+                                    lineHeight: 1.35,
+                                  },
+                                }}
+                                wrapLongLines
+                                showLineNumbers
+                                lineNumberStyle={{
+                                  minWidth: '2.4em',
+                                  marginRight: '0.75em',
+                                  color: '#7c8aa2',
+                                  fontFamily: "'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace",
+                                  fontSize: '0.81rem',
+                                  lineHeight: 1.35,
+                                  textAlign: 'right',
+                                  userSelect: 'none',
+                                }}
+                              >
+                                {previewFileContent || '(empty file)'}
+                              </SyntaxHighlighter>
+                            )
+                          ) : null}
+                          {previewFileTruncated ? <p className="sim-input-hint">Preview truncated to 256 KB.</p> : null}
+                        </>
+                      ) : null}
+                    </article>
+                  ) : null}
                   {insightsTab === 'diff' ? (
                     <article className="sim-output">
                       <h3>Diff Summary</h3>
@@ -3379,6 +3524,57 @@ function applyDirectorySuggestionSelection(value: string, suggestions: string[])
 
 function ensureTrailingSlash(value: string): string {
   return value.endsWith('/') ? value : `${value}/`;
+}
+
+function isMarkdownFilePath(filePath: string): boolean {
+  return /\.(md|mdx|markdown)$/i.test(filePath.trim());
+}
+
+function detectCodeLanguage(filePath: string): string {
+  const normalized = filePath.trim().toLowerCase();
+  if (normalized.endsWith('.ts') || normalized.endsWith('.tsx')) {
+    return 'typescript';
+  }
+  if (normalized.endsWith('.js') || normalized.endsWith('.jsx') || normalized.endsWith('.mjs') || normalized.endsWith('.cjs')) {
+    return 'javascript';
+  }
+  if (normalized.endsWith('.json')) {
+    return 'json';
+  }
+  if (normalized.endsWith('.css')) {
+    return 'css';
+  }
+  if (normalized.endsWith('.html') || normalized.endsWith('.htm')) {
+    return 'html';
+  }
+  if (normalized.endsWith('.sh') || normalized.endsWith('.bash') || normalized.endsWith('.zsh')) {
+    return 'bash';
+  }
+  if (normalized.endsWith('.yml') || normalized.endsWith('.yaml')) {
+    return 'yaml';
+  }
+  if (normalized.endsWith('.sql')) {
+    return 'sql';
+  }
+  if (normalized.endsWith('.py')) {
+    return 'python';
+  }
+  if (normalized.endsWith('.go')) {
+    return 'go';
+  }
+  if (normalized.endsWith('.rs')) {
+    return 'rust';
+  }
+  if (normalized.endsWith('.java')) {
+    return 'java';
+  }
+  if (normalized.endsWith('.xml')) {
+    return 'xml';
+  }
+  if (normalized.endsWith('.toml')) {
+    return 'toml';
+  }
+  return 'text';
 }
 
 function formatApprovalKind(kind: string): string {

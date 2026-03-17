@@ -1,7 +1,7 @@
 import { Controller, Get, Inject, Query, UseGuards } from '@nestjs/common';
 import { parseWithZod } from '../../common/validation/zod';
 import { AuthGuard } from '../auth/auth.guard';
-import { WorkspaceSuggestionQuerySchema, WorkspaceTreeQuerySchema } from './filesystem.schemas';
+import { WorkspaceFileQuerySchema, WorkspaceSuggestionQuerySchema, WorkspaceTreeQuerySchema } from './filesystem.schemas';
 import { RUNNER_ADAPTER, RunnerAdapter } from './runner.types';
 
 @Controller('/api/fs')
@@ -29,5 +29,14 @@ export class FilesystemController {
         limit: input.limit,
       }),
     };
+  }
+
+  @Get('/file')
+  async getWorkspaceFile(@Query() query: unknown) {
+    const input = parseWithZod(WorkspaceFileQuerySchema, query);
+    return await this.runnerAdapter.readWorkspaceFile({
+      path: input.path,
+      maxBytes: input.maxBytes,
+    });
   }
 }

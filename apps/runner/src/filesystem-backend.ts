@@ -1,4 +1,4 @@
-import { mkdir, readdir, stat } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import * as path from 'node:path';
 
@@ -86,6 +86,30 @@ export class FilesystemBackend {
         return a.name.localeCompare(b.name);
       })
       .slice(0, sanitizedLimit);
+  }
+
+  async readWorkspaceFile(inputPath: string, maxBytes = 256 * 1024): Promise<{ path: string; content: string; truncated: boolean }> {
+    const absolutePath = path.resolve(expandHomeToken(inputPath.trim()));
+    this.assertWorkspaceAllowed(absolutePath);
+    const info = await stat(absolutePath);
+    if (!info.isFile()) {
+      throw new Error(`Path is not a file: ${absolutePath}`);
+    }
+
+    const sanitizedMaxBytes = Number.isFinite(maxBytes)
+      ? Math.min(Math.max(Math.trunc(maxBytes), 1024), 1024 * 1024)
+      : 256 * 1024;
+    const contentBuffer = await readFile(absolutePath);
+    if (contentBuffer.includes(0)) {
+      throw new Error(`File appears to be binary and cannot be previewed: ${absolutePath}`);
+    }
+    const truncated = contentBuffer.length > sanitizedMaxBytes;
+    const content = (truncated ? contentBuffer.subarray(0, sanitizedMaxBytes) : contentBuffer).toString('utf8');
+    return {
+      path: absolutePath,
+      content,
+      truncated,
+    };
   }
 
   private async assertExistingWorkspaceDirectory(normalizedCwd: string): Promise<string> {
