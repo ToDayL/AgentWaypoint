@@ -1,4 +1,4 @@
-import { Controller, Get, Inject, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Inject, Query, UseGuards } from '@nestjs/common';
 import { parseWithZod } from '../../common/validation/zod';
 import { AuthGuard } from '../auth/auth.guard';
 import { WorkspaceFileQuerySchema, WorkspaceSuggestionQuerySchema, WorkspaceTreeQuerySchema } from './filesystem.schemas';
@@ -23,20 +23,28 @@ export class FilesystemController {
   @Get('/tree')
   async getWorkspaceTree(@Query() query: unknown) {
     const input = parseWithZod(WorkspaceTreeQuerySchema, query);
-    return {
-      data: await this.runnerAdapter.listWorkspaceTree({
-        path: input.path,
-        limit: input.limit,
-      }),
-    };
+    try {
+      return {
+        data: await this.runnerAdapter.listWorkspaceTree({
+          path: input.path,
+          limit: input.limit,
+        }),
+      };
+    } catch (error: unknown) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Failed to read workspace tree');
+    }
   }
 
   @Get('/file')
   async getWorkspaceFile(@Query() query: unknown) {
     const input = parseWithZod(WorkspaceFileQuerySchema, query);
-    return await this.runnerAdapter.readWorkspaceFile({
-      path: input.path,
-      maxBytes: input.maxBytes,
-    });
+    try {
+      return await this.runnerAdapter.readWorkspaceFile({
+        path: input.path,
+        maxBytes: input.maxBytes,
+      });
+    } catch (error: unknown) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Failed to read workspace file');
+    }
   }
 }

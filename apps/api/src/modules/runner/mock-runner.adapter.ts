@@ -28,6 +28,7 @@ import {
 } from './runner.types';
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+const WORKSPACE_FILE_MAX_SIZE_BYTES = 10 * 1024 * 1024;
 
 @Injectable()
 export class MockRunnerAdapter implements RunnerAdapter {
@@ -217,13 +218,28 @@ export class MockRunnerAdapter implements RunnerAdapter {
     const absolutePath = path.resolve(expandHomeToken(input.path.trim()));
     const limit = Number.isFinite(input.limit) ? Math.min(Math.max(Math.trunc(input.limit ?? 200), 1), 500) : 200;
     const entries = await readdir(absolutePath, { withFileTypes: true, encoding: 'utf8' });
-    return entries
-      .filter((entry) => !entry.name.startsWith('.'))
-      .map((entry) => ({
-        name: entry.name,
-        path: path.join(absolutePath, entry.name),
-        isDirectory: entry.isDirectory(),
-      }))
+    const resolvedEntries = await Promise.all(
+      entries
+        .filter((entry) => !entry.name.startsWith('.'))
+        .map(async (entry) => {
+          const entryPath = path.join(absolutePath, entry.name);
+          let isDirectory = entry.isDirectory();
+          if (!isDirectory && entry.isSymbolicLink()) {
+            try {
+              isDirectory = (await stat(entryPath)).isDirectory();
+            } catch {
+              isDirectory = false;
+            }
+          }
+          return {
+            name: entry.name,
+            path: entryPath,
+            isDirectory,
+          };
+        }),
+    );
+
+    return resolvedEntries
       .sort((a, b) => {
         if (a.isDirectory !== b.isDirectory) {
           return a.isDirectory ? -1 : 1;
@@ -238,6 +254,9 @@ export class MockRunnerAdapter implements RunnerAdapter {
     const info = await stat(absolutePath);
     if (!info.isFile()) {
       throw new Error(`Path is not a file: ${absolutePath}`);
+    }
+    if (info.size > WORKSPACE_FILE_MAX_SIZE_BYTES) {
+      throw new Error(`File is too large to preview (>10MB): ${absolutePath}`);
     }
     const maxBytes = Number.isFinite(input.maxBytes)
       ? Math.min(Math.max(Math.trunc(input.maxBytes ?? 256 * 1024), 1024), 1024 * 1024)

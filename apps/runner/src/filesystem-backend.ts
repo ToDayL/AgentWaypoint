@@ -6,6 +6,8 @@ type FilesystemBackendConfig = {
   allowedRepoRoots: string | null;
 };
 
+const WORKSPACE_FILE_MAX_SIZE_BYTES = 10 * 1024 * 1024;
+
 export class FilesystemBackend {
   constructor(private readonly config: FilesystemBackendConfig) {}
 
@@ -72,13 +74,28 @@ export class FilesystemBackend {
     const sanitizedLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 500) : 200;
 
     const entries = await readdir(absolutePath, { withFileTypes: true, encoding: 'utf8' });
-    return entries
-      .filter((entry) => !entry.name.startsWith('.'))
-      .map((entry) => ({
-        name: entry.name,
-        path: path.join(absolutePath, entry.name),
-        isDirectory: entry.isDirectory(),
-      }))
+    const resolvedEntries = await Promise.all(
+      entries
+        .filter((entry) => !entry.name.startsWith('.'))
+        .map(async (entry) => {
+          const entryPath = path.join(absolutePath, entry.name);
+          let isDirectory = entry.isDirectory();
+          if (!isDirectory && entry.isSymbolicLink()) {
+            try {
+              isDirectory = (await stat(entryPath)).isDirectory();
+            } catch {
+              isDirectory = false;
+            }
+          }
+          return {
+            name: entry.name,
+            path: entryPath,
+            isDirectory,
+          };
+        }),
+    );
+
+    return resolvedEntries
       .sort((a, b) => {
         if (a.isDirectory !== b.isDirectory) {
           return a.isDirectory ? -1 : 1;
@@ -94,6 +111,9 @@ export class FilesystemBackend {
     const info = await stat(absolutePath);
     if (!info.isFile()) {
       throw new Error(`Path is not a file: ${absolutePath}`);
+    }
+    if (info.size > WORKSPACE_FILE_MAX_SIZE_BYTES) {
+      throw new Error(`File is too large to preview (>10MB): ${absolutePath}`);
     }
 
     const sanitizedMaxBytes = Number.isFinite(maxBytes)
