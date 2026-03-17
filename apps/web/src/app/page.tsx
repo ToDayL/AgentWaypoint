@@ -385,6 +385,7 @@ export default function HomePage() {
   const [previewFileTruncated, setPreviewFileTruncated] = useState(false);
   const [previewFileBusy, setPreviewFileBusy] = useState(false);
   const [previewFileError, setPreviewFileError] = useState('');
+  const [recentMentionedPath, setRecentMentionedPath] = useState('');
   const [visibleMessageCount, setVisibleMessageCount] = useState(CHAT_VISIBLE_MESSAGE_STEP);
   const [sessionInfoOpen, setSessionInfoOpen] = useState(true);
   const [mobileLeftSidebarOpen, setMobileLeftSidebarOpen] = useState(false);
@@ -415,6 +416,7 @@ export default function HomePage() {
   const previewLoadSeqRef = useRef(0);
   const fileNodeLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileNodeLongPressTriggeredRef = useRef(false);
+  const mentionBlinkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const canStartTurn = !!selectedSessionId && prompt.trim().length > 0 && activeTurnId === '';
   const canSteerTurn =
@@ -534,6 +536,7 @@ export default function HomePage() {
         chatScrollSettleRafRef.current = null;
       }
       clearFileNodeLongPressTimer();
+      clearMentionBlinkTimer();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1372,6 +1375,7 @@ export default function HomePage() {
       }
       return `${base} ${mention}`;
     });
+    triggerMentionBlink(targetPath);
     if (typeof window !== 'undefined') {
       window.requestAnimationFrame(() => {
         const input = promptInputRef.current;
@@ -1389,6 +1393,33 @@ export default function HomePage() {
       clearTimeout(fileNodeLongPressTimerRef.current);
       fileNodeLongPressTimerRef.current = null;
     }
+  }
+
+  function clearMentionBlinkTimer(): void {
+    if (mentionBlinkTimerRef.current) {
+      clearTimeout(mentionBlinkTimerRef.current);
+      mentionBlinkTimerRef.current = null;
+    }
+  }
+
+  function triggerMentionBlink(targetPath: string): void {
+    const normalizedPath = targetPath.trim();
+    if (!normalizedPath) {
+      return;
+    }
+    clearMentionBlinkTimer();
+    setRecentMentionedPath('');
+    if (typeof window !== 'undefined') {
+      window.requestAnimationFrame(() => {
+        setRecentMentionedPath(normalizedPath);
+      });
+    } else {
+      setRecentMentionedPath(normalizedPath);
+    }
+    mentionBlinkTimerRef.current = setTimeout(() => {
+      setRecentMentionedPath('');
+      mentionBlinkTimerRef.current = null;
+    }, 850);
   }
 
   function startFileNodeLongPress(targetPath: string): void {
@@ -2180,7 +2211,9 @@ export default function HomePage() {
             <li key={entry.path}>
               <button
                 type="button"
-                className={`file-node-row ${entry.isDirectory ? 'directory' : 'file'}`}
+                className={`file-node-row ${entry.isDirectory ? 'directory' : 'file'} ${
+                  recentMentionedPath === entry.path ? 'mention-blink' : ''
+                }`}
                 onClick={() => {
                   if (fileNodeLongPressTriggeredRef.current) {
                     fileNodeLongPressTriggeredRef.current = false;
@@ -2988,7 +3021,9 @@ export default function HomePage() {
                           <>
                             <button
                               type="button"
-                              className="file-node-row directory file-node-root"
+                              className={`file-node-row directory file-node-root ${
+                                recentMentionedPath === activeWorkspacePath ? 'mention-blink' : ''
+                              }`}
                               onClick={() => {
                                 if (fileNodeLongPressTriggeredRef.current) {
                                   fileNodeLongPressTriggeredRef.current = false;

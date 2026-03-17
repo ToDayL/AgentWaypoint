@@ -839,6 +839,10 @@ body {
   border-radius: 6px;
   background: transparent;
   text-align: left;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
 }
 
 .file-node-row:hover:enabled {
@@ -848,6 +852,19 @@ body {
 
 .file-node-root {
   background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+
+.file-node-row.mention-blink {
+  animation: file-node-mention-blink 0.15s ease-out 2;
+}
+
+@keyframes file-node-mention-blink {
+  0% {
+    background: color-mix(in srgb, var(--bg-hover) 52%, var(--bg-panel) 48%);
+  }
+  100% {
+    background: inherit;
+  }
 }
 
 .file-node-row svg {
@@ -864,6 +881,8 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .file-node-spacer {
