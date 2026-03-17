@@ -10,6 +10,8 @@ import {
   ForkThreadInput,
   ForkThreadResult,
   ResolveTurnApprovalInput,
+  WorkspaceTreeEntry,
+  WorkspaceTreeInput,
   WorkspaceSuggestionInput,
   RunnerStreamEvent,
   RunnerAdapter,
@@ -302,6 +304,29 @@ export class HttpRunnerAdapter implements RunnerAdapter {
     return ((response as { data: unknown[] }).data ?? [])
       .filter((item): item is string => typeof item === 'string')
       .filter((item) => item.trim().length > 0);
+  }
+
+  async listWorkspaceTree(input: WorkspaceTreeInput): Promise<WorkspaceTreeEntry[]> {
+    const query = new URLSearchParams({
+      path: input.path,
+      limit: String(input.limit ?? 200),
+    });
+    const response = await this.request({
+      method: 'GET',
+      path: `/runner/fs/tree?${query.toString()}`,
+    });
+    if (!response || typeof response !== 'object' || !Array.isArray((response as { data?: unknown }).data)) {
+      throw new Error('Runner workspace tree response is invalid');
+    }
+
+    return ((response as { data: unknown[] }).data ?? [])
+      .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+      .map((item) => ({
+        name: typeof item.name === 'string' ? item.name : '',
+        path: typeof item.path === 'string' ? item.path : '',
+        isDirectory: item.isDirectory === true,
+      }))
+      .filter((item) => item.name.length > 0 && item.path.length > 0);
   }
 
   private async request(options: RunnerHttpRequestOptions): Promise<unknown> {

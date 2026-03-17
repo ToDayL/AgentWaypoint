@@ -65,6 +65,17 @@ export type WorkspaceSuggestionInput = {
   limit?: number;
 };
 
+export type WorkspaceTreeInput = {
+  path: string;
+  limit?: number;
+};
+
+export type WorkspaceTreeEntry = {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+};
+
 export type RateLimitWindow = {
   usedPercent: number | null;
   resetsAt: number | null;
@@ -152,6 +163,7 @@ export interface RunnerAdapter {
   compactThread(input: CompactThreadInput): Promise<void>;
   ensureDirectory(input: EnsureDirectoryInput): Promise<EnsureDirectoryResult>;
   suggestWorkspaceDirectories(input: WorkspaceSuggestionInput): Promise<string[]>;
+  listWorkspaceTree(input: WorkspaceTreeInput): Promise<WorkspaceTreeEntry[]>;
 }
 
 export const RUNNER_ADAPTER = Symbol('RUNNER_ADAPTER');

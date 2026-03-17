@@ -2,8 +2,12 @@
 
 import { KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ChevronDown,
+  ChevronRight,
   Eye,
   EyeOff,
+  File,
+  Folder,
   FolderPlus,
   FolderTree,
   GitFork,
@@ -151,6 +155,12 @@ type AppSettings = {
   defaultWorkspaceRoot: string | null;
 };
 
+type WorkspaceTreeEntry = {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+};
+
 type RateLimitWindow = {
   usedPercent: number | null;
   resetsAt: number | null;
@@ -264,7 +274,7 @@ const LAST_PROJECT_STORAGE_KEY_PREFIX = 'agentwaypoint:last-project:';
 const LAST_SESSION_STORAGE_KEY_PREFIX = 'agentwaypoint:last-session:';
 const CHAT_VISIBLE_MESSAGE_STEP = 10;
 const CHAT_SCROLL_IDLE_MS = 220;
-type LeftSidebarTab = 'explorer' | 'config';
+type LeftSidebarTab = 'explorer' | 'fileBrowser' | 'config';
 type InsightsTab = 'diff' | 'events';
 type SidebarMode = 'closed' | 'pop' | 'pin';
 type ActionPanelMode =
@@ -364,6 +374,9 @@ export default function HomePage() {
   const [sessionInfoOpen, setSessionInfoOpen] = useState(true);
   const [mobileLeftSidebarOpen, setMobileLeftSidebarOpen] = useState(false);
   const [mobileInsightsOpen, setMobileInsightsOpen] = useState(false);
+  const [fileBrowserNodes, setFileBrowserNodes] = useState<Record<string, WorkspaceTreeEntry[]>>({});
+  const [fileBrowserExpandedPaths, setFileBrowserExpandedPaths] = useState<string[]>([]);
+  const [fileBrowserError, setFileBrowserError] = useState('');
   const [disableNativePathDatalist, setDisableNativePathDatalist] = useState(false);
   const [projectPathInputFocused, setProjectPathInputFocused] = useState(false);
   const [sessionPathInputFocused, setSessionPathInputFocused] = useState(false);
@@ -424,6 +437,22 @@ export default function HomePage() {
 
     return { workspace, model, approval, sandbox };
   }, [sessionInfoTurn, selectedSession, selectedProject]);
+  const activeWorkspacePath = useMemo(
+    () =>
+      sessionInfoTurn?.effectiveCwd?.trim() ||
+      selectedSession?.cwdOverride?.trim() ||
+      selectedProject?.repoPath?.trim() ||
+      '',
+    [sessionInfoTurn, selectedSession, selectedProject],
+  );
+  const activeWorkspaceDirName = useMemo(() => {
+    if (!activeWorkspacePath) {
+      return '';
+    }
+    const normalized = activeWorkspacePath.replace(/[\\/]+$/, '');
+    const parts = normalized.split(/[\\/]/).filter((part) => part.length > 0);
+    return parts[parts.length - 1] ?? normalized;
+  }, [activeWorkspacePath]);
   const displayedMessages = useMemo(() => {
     const base = messages.map((message) => ({ ...message, streaming: false }));
     if (!streamBubbleTurnId) {
@@ -622,6 +651,23 @@ export default function HomePage() {
     }
     writeLastSessionId(currentUserEmail, selectedProjectId, selectedSessionId);
   }, [authenticated, currentUserEmail, selectedProjectId, selectedSessionId, sessions]);
+
+  useEffect(() => {
+    if (!mounted || !authenticated) {
+      return;
+    }
+    if (!activeWorkspacePath) {
+      setFileBrowserNodes({});
+      setFileBrowserExpandedPaths([]);
+      setFileBrowserError('');
+      return;
+    }
+    setFileBrowserNodes({});
+    setFileBrowserExpandedPaths([activeWorkspacePath]);
+    setFileBrowserError('');
+    void loadWorkspaceTree(activeWorkspacePath);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mounted, authenticated, activeWorkspacePath]);
 
   useEffect(() => {
     const container = chatThreadRef.current;
@@ -840,6 +886,9 @@ export default function HomePage() {
       setNewManagedUserDefaultWorkspaceRoot('');
       setDefaultWorkspaceRootInput('');
       setTurnSteerDraft(false);
+      setFileBrowserNodes({});
+      setFileBrowserExpandedPaths([]);
+      setFileBrowserError('');
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
@@ -1183,6 +1232,41 @@ export default function HomePage() {
       setError(extractMessage(requestError));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function loadWorkspaceTree(path: string): Promise<void> {
+    const normalizedPath = path.trim();
+    if (!normalizedPath) {
+      return;
+    }
+    try {
+      const response = await apiRequest<{ data: WorkspaceTreeEntry[] }>(
+        `/api/fs/tree?${new URLSearchParams({ path: normalizedPath, limit: '200' }).toString()}`,
+        {
+          method: 'GET',
+        },
+      );
+      setFileBrowserNodes((current) => ({ ...current, [normalizedPath]: response.data ?? [] }));
+      setFileBrowserError('');
+    } catch (requestError) {
+      setFileBrowserError(extractMessage(requestError));
+    }
+  }
+
+  function toggleFileBrowserDirectory(path: string): void {
+    const normalizedPath = path.trim();
+    if (!normalizedPath) {
+      return;
+    }
+    const expanded = fileBrowserExpandedPaths.includes(normalizedPath);
+    if (expanded) {
+      setFileBrowserExpandedPaths((current) => current.filter((item) => item !== normalizedPath));
+      return;
+    }
+    setFileBrowserExpandedPaths((current) => [...current, normalizedPath]);
+    if (!fileBrowserNodes[normalizedPath]) {
+      void loadWorkspaceTree(normalizedPath);
     }
   }
 
@@ -1951,6 +2035,47 @@ export default function HomePage() {
     void handleSendTurn();
   }
 
+  function renderFileBrowserLevel(parentPath: string) {
+    const entries = fileBrowserNodes[parentPath] ?? [];
+    return (
+      <ul className="file-browser-children">
+        {entries.map((entry) => {
+          const expanded = fileBrowserExpandedPaths.includes(entry.path);
+          return (
+            <li key={entry.path}>
+              <button
+                type="button"
+                className={`file-node-row ${entry.isDirectory ? 'directory' : 'file'}`}
+                onClick={() => {
+                  if (entry.isDirectory) {
+                    toggleFileBrowserDirectory(entry.path);
+                  }
+                }}
+                title={entry.path}
+              >
+                {entry.isDirectory ? (
+                  expanded ? (
+                    <ChevronDown />
+                  ) : (
+                    <ChevronRight />
+                  )
+                ) : (
+                  <span className="file-node-spacer" />
+                )}
+                {entry.isDirectory ? <Folder /> : <File />}
+                <span className="file-node-label">{entry.name}</span>
+              </button>
+              {entry.isDirectory && expanded ? (
+                fileBrowserNodes[entry.path] ? renderFileBrowserLevel(entry.path) : null
+              ) : null}
+            </li>
+          );
+        })}
+        {entries.length === 0 ? <li className="tree-empty">Empty directory</li> : null}
+      </ul>
+    );
+  }
+
   const insightsOpen = rightSidebarMode !== 'closed' || mobileInsightsOpen;
 
   return (
@@ -2511,6 +2636,15 @@ export default function HomePage() {
                     </button>
                     <button
                       type="button"
+                      className={`icon-button ${leftSidebarTab === 'fileBrowser' ? 'tab-active' : ''}`}
+                      aria-label="File Browser"
+                      title="File Browser"
+                      onClick={() => setLeftSidebarTab('fileBrowser')}
+                    >
+                      <Folder />
+                    </button>
+                    <button
+                      type="button"
                       className={`icon-button ${leftSidebarTab === 'config' ? 'tab-active' : ''}`}
                       aria-label="Config"
                       title="Config"
@@ -2671,6 +2805,56 @@ export default function HomePage() {
                             </li>
                           })}
                         </ul>
+                      </div>
+                    ) : null}
+
+                    {leftSidebarTab === 'fileBrowser' ? (
+                      <div className="file-browser">
+                        <div className="explorer-head file-browser-head">
+                          <h3>File Browser</h3>
+                          <div className="tree-actions-top">
+                            <button
+                              type="button"
+                              className="icon-button"
+                              title="Refresh File Browser"
+                              aria-label="Refresh File Browser"
+                              onClick={() => {
+                                if (!activeWorkspacePath) {
+                                  return;
+                                }
+                                setFileBrowserNodes({});
+                                setFileBrowserExpandedPaths([activeWorkspacePath]);
+                                void loadWorkspaceTree(activeWorkspacePath);
+                              }}
+                              disabled={!activeWorkspacePath}
+                            >
+                              <RefreshCw />
+                            </button>
+                          </div>
+                        </div>
+                        {activeWorkspacePath ? (
+                          <>
+                            <button
+                              type="button"
+                              className="file-node-row directory file-node-root"
+                              onClick={() => toggleFileBrowserDirectory(activeWorkspacePath)}
+                              title={activeWorkspacePath}
+                            >
+                              {fileBrowserExpandedPaths.includes(activeWorkspacePath) ? <ChevronDown /> : <ChevronRight />}
+                              <Folder />
+                              <span className="file-node-label">{activeWorkspaceDirName || activeWorkspacePath}</span>
+                            </button>
+                            <p className="file-browser-root-path" title={activeWorkspacePath}>
+                              {activeWorkspacePath}
+                            </p>
+                            {fileBrowserError ? <p className="file-browser-state file-browser-error">{fileBrowserError}</p> : null}
+                            {fileBrowserExpandedPaths.includes(activeWorkspacePath) && fileBrowserNodes[activeWorkspacePath]
+                              ? renderFileBrowserLevel(activeWorkspacePath)
+                              : null}
+                          </>
+                        ) : (
+                          <p className="file-browser-state">Select a session to view its workspace tree.</p>
+                        )}
                       </div>
                     ) : null}
 

@@ -100,6 +100,17 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === 'GET' && pathname === '/runner/fs/tree') {
+      const treePath = (url.searchParams.get('path') ?? '').trim();
+      if (!treePath) {
+        throw new Error('path is required');
+      }
+      const limit = Number.parseInt(url.searchParams.get('limit') ?? '200', 10);
+      const entries = await filesystemBackend.listWorkspaceTree(treePath, limit);
+      sendJson(response, 200, { data: entries });
+      return;
+    }
+
     const turnStatusMatch = request.method === 'GET' ? pathname.match(/^\/runner\/turns\/([^/]+)$/) : null;
     if (turnStatusMatch) {
       const turnId = decodeURIComponent(turnStatusMatch[1] ?? '');

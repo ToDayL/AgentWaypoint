@@ -67,6 +67,27 @@ export class FilesystemBackend {
       .slice(0, sanitizedLimit);
   }
 
+  async listWorkspaceTree(inputPath: string, limit = 200): Promise<Array<{ name: string; path: string; isDirectory: boolean }>> {
+    const absolutePath = await this.assertExistingWorkspaceDirectory(inputPath.trim());
+    const sanitizedLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 500) : 200;
+
+    const entries = await readdir(absolutePath, { withFileTypes: true, encoding: 'utf8' });
+    return entries
+      .filter((entry) => !entry.name.startsWith('.'))
+      .map((entry) => ({
+        name: entry.name,
+        path: path.join(absolutePath, entry.name),
+        isDirectory: entry.isDirectory(),
+      }))
+      .sort((a, b) => {
+        if (a.isDirectory !== b.isDirectory) {
+          return a.isDirectory ? -1 : 1;
+        }
+        return a.name.localeCompare(b.name);
+      })
+      .slice(0, sanitizedLimit);
+  }
+
   private async assertExistingWorkspaceDirectory(normalizedCwd: string): Promise<string> {
     const absolutePath = path.resolve(expandHomeToken(normalizedCwd));
     this.assertWorkspaceAllowed(absolutePath);

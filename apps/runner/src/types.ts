@@ -54,6 +54,12 @@ export type EnsureDirectoryBody = {
   path: string;
 };
 
+export type WorkspaceTreeEntry = {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+};
+
 export type ResolveApprovalBody = {
   turnId: string;
   requestId: string;

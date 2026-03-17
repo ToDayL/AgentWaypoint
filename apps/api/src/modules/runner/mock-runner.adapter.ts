@@ -20,6 +20,8 @@ import {
   RunnerAdapter,
   SteerTurnInput,
   StartTurnInput,
+  WorkspaceTreeEntry,
+  WorkspaceTreeInput,
   WorkspaceSuggestionInput,
 } from './runner.types';
 
@@ -207,6 +209,26 @@ export class MockRunnerAdapter implements RunnerAdapter {
       .map((entry) => path.join(scanDirectory, entry.name))
       .sort((a, b) => a.localeCompare(b))
       .slice(0, sanitizedLimit);
+  }
+
+  async listWorkspaceTree(input: WorkspaceTreeInput): Promise<WorkspaceTreeEntry[]> {
+    const absolutePath = path.resolve(expandHomeToken(input.path.trim()));
+    const limit = Number.isFinite(input.limit) ? Math.min(Math.max(Math.trunc(input.limit ?? 200), 1), 500) : 200;
+    const entries = await readdir(absolutePath, { withFileTypes: true, encoding: 'utf8' });
+    return entries
+      .filter((entry) => !entry.name.startsWith('.'))
+      .map((entry) => ({
+        name: entry.name,
+        path: path.join(absolutePath, entry.name),
+        isDirectory: entry.isDirectory(),
+      }))
+      .sort((a, b) => {
+        if (a.isDirectory !== b.isDirectory) {
+          return a.isDirectory ? -1 : 1;
+        }
+        return a.name.localeCompare(b.name);
+      })
+      .slice(0, limit);
   }
 
   private async handleDelta(turnId: string, chunk: string): Promise<void> {

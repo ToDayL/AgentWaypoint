@@ -792,6 +792,86 @@ body {
   padding: 0.3rem 0.2rem;
 }
 
+.file-browser {
+  margin-top: 0;
+  padding-top: 0.2rem;
+}
+
+.file-browser-head {
+  margin-top: 0;
+}
+
+.file-browser-root-path {
+  margin: 0.32rem 0 0.45rem;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-browser-state {
+  margin: 0.3rem 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.file-browser-error {
+  color: #de8b7d;
+}
+
+.file-browser-children {
+  list-style: none;
+  margin: 0.25rem 0 0;
+  padding: 0 0 0 0.5rem;
+  border-left: 1px solid color-mix(in srgb, var(--line) 45%, transparent);
+}
+
+.file-node-row {
+  margin-top: 0.1rem;
+  margin-bottom: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.26rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+}
+
+.file-node-row:hover:enabled {
+  transform: none;
+  background: color-mix(in srgb, var(--bg-hover) 72%, transparent);
+}
+
+.file-node-root {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+
+.file-node-row svg {
+  width: 0.83rem;
+  height: 0.83rem;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+
+.file-node-label {
+  min-width: 0;
+  font-size: 0.78rem;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-node-spacer {
+  width: 0.83rem;
+  height: 0.83rem;
+  flex: 0 0 auto;
+}
+
 .login-shell {
   margin-top: 0.9rem;
   display: grid;
