@@ -13,6 +13,7 @@
   --shell-gap: 0.6rem;
   --left-pane-width: 280px;
   --right-pane-width: 340px;
+  --right-pop-left-clearance: 600px;
 }
 
 *,
@@ -266,11 +267,96 @@ body {
 
 .insights-pane.mode-pop {
   position: absolute;
+  right: 0;
 }
 
 .shell-grid.left-pin.right-pop .insights-pane.mode-pop {
-  left: calc(var(--left-pane-width) + var(--shell-gap));
-  width: auto;
+  left: auto;
+  right: 0;
+  width: min(var(--right-pane-width), calc(100vw - var(--right-pop-left-clearance)));
+  max-width: calc(100vw - var(--right-pop-left-clearance));
+}
+
+.right-pane-resize-handle {
+  position: absolute;
+  top: 0;
+  left: -5px;
+  width: 10px;
+  height: 100%;
+  z-index: 6;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.right-pane-resize-handle::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 4px;
+  width: 1px;
+  height: 100%;
+  background: color-mix(in srgb, var(--line) 62%, transparent);
+  opacity: 0.32;
+  transition: opacity 0.15s ease;
+}
+
+.insights-pane:hover .right-pane-resize-handle::before,
+.right-pane-resize-handle:hover::before {
+  opacity: 0.9;
+}
+
+.left-pane-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -5px;
+  width: 10px;
+  height: 100%;
+  z-index: 6;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.left-pane-resize-handle::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 4px;
+  width: 1px;
+  height: 100%;
+  background: color-mix(in srgb, var(--line) 62%, transparent);
+  opacity: 0.32;
+  transition: opacity 0.15s ease;
+}
+
+.left-sidebar:hover .left-pane-resize-handle::before,
+.left-pane-resize-handle:hover::before {
+  opacity: 0.9;
+}
+
+.left-pane-resize-handle::after,
+.right-pane-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 34%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 10px;
+  height: 30px;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-radius: 999px;
+  background:
+    linear-gradient(90deg, transparent 3px, color-mix(in srgb, var(--text-muted) 72%, transparent) 3px, color-mix(in srgb, var(--text-muted) 72%, transparent) 4px, transparent 4px),
+    linear-gradient(90deg, transparent 6px, color-mix(in srgb, var(--text-muted) 72%, transparent) 6px, color-mix(in srgb, var(--text-muted) 72%, transparent) 7px, transparent 7px);
+  opacity: 0.6;
+  transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+
+.left-sidebar:hover .left-pane-resize-handle::after,
+.left-pane-resize-handle:hover::after,
+.insights-pane:hover .right-pane-resize-handle::after,
+.right-pane-resize-handle:hover::after {
+  opacity: 0.95;
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--line));
 }
 
 .insights-content {

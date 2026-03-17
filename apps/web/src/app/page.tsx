@@ -1,6 +1,6 @@
 'use client';
 
-import { KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { CSSProperties, KeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -103,6 +103,20 @@ type StreamEnvelope = {
   type: string;
   payload: Record<string, unknown>;
   createdAt: string;
+};
+type PanelLayoutPersistence = {
+  left: {
+    mode: SidebarMode;
+    width: number;
+    open: boolean;
+    pinned: boolean;
+  };
+  right: {
+    mode: SidebarMode;
+    width: number;
+    open: boolean;
+    pinned: boolean;
+  };
 };
 type TimelineEvent = {
   id: string;
@@ -280,8 +294,16 @@ const WORKSPACE_SUGGESTIONS_LIST_ID = 'workspace-path-suggestions';
 const SESSION_CWD_SUGGESTIONS_LIST_ID = 'session-cwd-path-suggestions';
 const LAST_PROJECT_STORAGE_KEY_PREFIX = 'agentwaypoint:last-project:';
 const LAST_SESSION_STORAGE_KEY_PREFIX = 'agentwaypoint:last-session:';
+const PANEL_LAYOUT_STORAGE_KEY_PREFIX = 'agentwaypoint:panel-layout:';
 const CHAT_VISIBLE_MESSAGE_STEP = 10;
 const CHAT_SCROLL_IDLE_MS = 220;
+const LEFT_PANE_DEFAULT_WIDTH = 280;
+const LEFT_PANE_MIN_WIDTH = 220;
+const LEFT_PANE_MAX_RATIO = 0.55;
+const RIGHT_PANE_DEFAULT_WIDTH = 340;
+const RIGHT_PANE_MIN_WIDTH = 280;
+const RIGHT_PANE_MAX_PIN_RATIO = 0.75;
+const RIGHT_PANE_POP_CHAT_CLEARANCE = 320;
 const FILE_NODE_LONG_PRESS_MS = 500;
 type LeftSidebarTab = 'explorer' | 'fileBrowser' | 'config';
 type InsightsTab = 'preview' | 'diff' | 'events';
@@ -377,7 +399,9 @@ export default function HomePage() {
   const [streamActive, setStreamActive] = useState(false);
   const [leftSidebarTab, setLeftSidebarTab] = useState<LeftSidebarTab>('explorer');
   const [leftSidebarMode, setLeftSidebarMode] = useState<SidebarMode>('pin');
+  const [leftPaneWidth, setLeftPaneWidth] = useState(LEFT_PANE_DEFAULT_WIDTH);
   const [rightSidebarMode, setRightSidebarMode] = useState<SidebarMode>('closed');
+  const [rightPaneWidth, setRightPaneWidth] = useState(RIGHT_PANE_DEFAULT_WIDTH);
   const [insightsTab, setInsightsTab] = useState<InsightsTab>('events');
   const [previewFilePath, setPreviewFilePath] = useState('');
   const [previewFileContent, setPreviewFileContent] = useState('');
@@ -405,6 +429,15 @@ export default function HomePage() {
   const eventSourceRef = useRef<EventSource | null>(null);
   const turnPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pendingTurnCreateAbortRef = useRef<AbortController | null>(null);
+  const leftPaneRef = useRef<HTMLElement | null>(null);
+  const leftPaneResizeStateRef = useRef<{ leftEdge: number } | null>(null);
+  const rightPaneRef = useRef<HTMLElement | null>(null);
+  const rightPaneResizeStateRef = useRef<{
+    rightEdge: number;
+    mode: SidebarMode;
+    leftMode: SidebarMode;
+    leftWidth: number;
+  } | null>(null);
   const chatThreadRef = useRef<HTMLDivElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const chatAtBottomRef = useRef(true);
@@ -417,6 +450,7 @@ export default function HomePage() {
   const fileNodeLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileNodeLongPressTriggeredRef = useRef(false);
   const mentionBlinkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const panelLayoutHydratedRef = useRef(false);
 
   const canStartTurn = !!selectedSessionId && prompt.trim().length > 0 && activeTurnId === '';
   const canSteerTurn =
@@ -509,6 +543,15 @@ export default function HomePage() {
   ]
     .filter(Boolean)
     .join(' ');
+  const shellGridStyle = useMemo(
+    () =>
+      ({
+        '--left-pane-width': `${leftPaneWidth}px`,
+        '--right-pane-width': `${rightPaneWidth}px`,
+        '--right-pop-left-clearance': `${computeRightPopLeftClearance(leftSidebarMode, leftPaneWidth)}px`,
+      }) as CSSProperties,
+    [leftPaneWidth, rightPaneWidth, leftSidebarMode],
+  );
   const renderedDiff = useMemo(() => {
     if (!latestDiffSummary) {
       return null;
@@ -676,6 +719,44 @@ export default function HomePage() {
   }, [authenticated, currentUserEmail, selectedProjectId, selectedSessionId, sessions]);
 
   useEffect(() => {
+    if (!mounted || !authenticated || !currentUserEmail) {
+      panelLayoutHydratedRef.current = false;
+      return;
+    }
+    if (panelLayoutHydratedRef.current) {
+      return;
+    }
+    const layout = readPanelLayout(currentUserEmail);
+    if (layout) {
+      setLeftSidebarMode(layout.left.mode);
+      setRightSidebarMode(layout.right.mode);
+      setLeftPaneWidth(clampLeftPaneWidth(layout.left.width));
+      setRightPaneWidth(clampRightPaneWidth(layout.right.width, layout.right.mode, layout.left.mode, layout.left.width));
+    }
+    panelLayoutHydratedRef.current = true;
+  }, [mounted, authenticated, currentUserEmail]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !mounted || !authenticated || !currentUserEmail) {
+      return;
+    }
+    writePanelLayout(currentUserEmail, {
+      left: {
+        mode: leftSidebarMode,
+        width: leftPaneWidth,
+        open: leftSidebarMode !== 'closed',
+        pinned: leftSidebarMode === 'pin',
+      },
+      right: {
+        mode: rightSidebarMode,
+        width: rightPaneWidth,
+        open: rightSidebarMode !== 'closed',
+        pinned: rightSidebarMode === 'pin',
+      },
+    });
+  }, [mounted, authenticated, currentUserEmail, leftSidebarMode, rightSidebarMode, leftPaneWidth, rightPaneWidth]);
+
+  useEffect(() => {
     if (!mounted || !authenticated) {
       return;
     }
@@ -739,6 +820,53 @@ export default function HomePage() {
     });
     return () => window.cancelAnimationFrame(rafId);
   }, [leftSidebarMode, rightSidebarMode]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const handleResize = () => {
+      const nextLeftWidth = clampLeftPaneWidth(leftPaneWidth);
+      setLeftPaneWidth(nextLeftWidth);
+      setRightPaneWidth((current) => clampRightPaneWidth(current, rightSidebarMode, leftSidebarMode, nextLeftWidth));
+    };
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [rightSidebarMode, leftSidebarMode, leftPaneWidth]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const onPointerMove = (event: globalThis.PointerEvent): void => {
+      const leftResizeState = leftPaneResizeStateRef.current;
+      if (leftResizeState) {
+        const nextWidth = event.clientX - leftResizeState.leftEdge;
+        const clampedLeftWidth = clampLeftPaneWidth(nextWidth);
+        setLeftPaneWidth(clampedLeftWidth);
+        setRightPaneWidth((current) => clampRightPaneWidth(current, rightSidebarMode, leftSidebarMode, clampedLeftWidth));
+      }
+      const resizeState = rightPaneResizeStateRef.current;
+      if (!resizeState) {
+        return;
+      }
+      const targetMode: SidebarMode = resizeState.mode === 'pop' ? 'pop' : 'pin';
+      const nextWidth = resizeState.rightEdge - event.clientX;
+      setRightPaneWidth(clampRightPaneWidth(nextWidth, targetMode, resizeState.leftMode, resizeState.leftWidth));
+    };
+    const onPointerUp = (): void => {
+      leftPaneResizeStateRef.current = null;
+      rightPaneResizeStateRef.current = null;
+    };
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+    };
+  }, []);
 
   useEffect(() => {
     const wasConfigFullscreenActive = wasConfigFullscreenActiveRef.current;
@@ -2053,6 +2181,44 @@ export default function HomePage() {
     });
   }
 
+  function handleRightPaneResizeStart(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (typeof window === 'undefined' || window.matchMedia('(max-width: 860px)').matches || rightSidebarMode === 'closed') {
+      return;
+    }
+    const paneElement = rightPaneRef.current;
+    if (!paneElement) {
+      return;
+    }
+    event.preventDefault();
+    const paneRect = paneElement.getBoundingClientRect();
+    rightPaneResizeStateRef.current = {
+      rightEdge: paneRect.right,
+      mode: rightSidebarMode,
+      leftMode: leftSidebarMode,
+      leftWidth: leftPaneWidth,
+    };
+  }
+
+  function handleLeftPaneResizeStart(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (
+      typeof window === 'undefined' ||
+      window.matchMedia('(max-width: 860px)').matches ||
+      leftSidebarMode === 'closed' ||
+      leftSidebarTab === 'config'
+    ) {
+      return;
+    }
+    const paneElement = leftPaneRef.current;
+    if (!paneElement) {
+      return;
+    }
+    event.preventDefault();
+    const paneRect = paneElement.getBoundingClientRect();
+    leftPaneResizeStateRef.current = {
+      leftEdge: paneRect.left,
+    };
+  }
+
   function toggleLeftSidebarPinMode(): void {
     setLeftSidebarMode((current) => (current === 'pin' ? 'pop' : 'pin'));
   }
@@ -2796,13 +2962,23 @@ export default function HomePage() {
         ) : null}
 
         {authenticated ? (
-          <div className={shellGridClassName}>
+          <div className={shellGridClassName} style={shellGridStyle}>
             {leftSidebarMode !== 'closed' || mobileLeftSidebarOpen ? (
               <aside
+                ref={leftPaneRef}
                 className={`left-sidebar ${mobileLeftSidebarOpen ? 'mobile-open' : `mode-${leftSidebarMode}`} ${
                   leftSidebarTab === 'config' ? 'config-fullscreen' : ''
                 }`}
               >
+                {!mobileLeftSidebarOpen && leftSidebarTab !== 'config' ? (
+                  <div
+                    className="left-pane-resize-handle"
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="Resize explorer panel"
+                    onPointerDown={handleLeftPaneResizeStart}
+                  />
+                ) : null}
                 <div className="mobile-sidebar-head mobile-sidebar-head-left">
                   <button type="button" className="icon-button" onClick={() => closeLeftSidebar()} aria-label="Close sidebar">
                     <Menu />
@@ -3317,7 +3493,19 @@ export default function HomePage() {
             </section> : null}
 
             {!configFullscreenActive && (rightSidebarMode !== 'closed' || mobileInsightsOpen) ? (
-              <aside className={`insights-pane ${mobileInsightsOpen ? 'mobile-open' : `mode-${rightSidebarMode}`}`}>
+              <aside
+                ref={rightPaneRef}
+                className={`insights-pane ${mobileInsightsOpen ? 'mobile-open' : `mode-${rightSidebarMode}`}`}
+              >
+                {!mobileInsightsOpen ? (
+                  <div
+                    className="right-pane-resize-handle"
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="Resize insights panel"
+                    onPointerDown={handleRightPaneResizeStart}
+                  />
+                ) : null}
                 <div className="mobile-sidebar-head mobile-sidebar-head-right">
                   <button type="button" className="icon-button" onClick={() => closeRightSidebar()} aria-label="Close insights">
                     <EyeOff />
@@ -3496,6 +3684,39 @@ export default function HomePage() {
   );
 }
 
+function clampLeftPaneWidth(value: number): number {
+  if (!Number.isFinite(value)) {
+    return LEFT_PANE_DEFAULT_WIDTH;
+  }
+  if (typeof window === 'undefined') {
+    return Math.max(LEFT_PANE_MIN_WIDTH, Math.round(value));
+  }
+  const viewportMax = Math.floor(window.innerWidth * LEFT_PANE_MAX_RATIO);
+  const maxWidth = Math.max(LEFT_PANE_MIN_WIDTH, viewportMax);
+  return Math.max(LEFT_PANE_MIN_WIDTH, Math.min(Math.round(value), maxWidth));
+}
+
+function clampRightPaneWidth(value: number, mode: SidebarMode, leftMode: SidebarMode, leftWidth: number): number {
+  if (!Number.isFinite(value)) {
+    return RIGHT_PANE_DEFAULT_WIDTH;
+  }
+  if (typeof window === 'undefined') {
+    return Math.max(RIGHT_PANE_MIN_WIDTH, Math.round(value));
+  }
+  const clearanceMax = Math.floor(window.innerWidth - computeRightPopLeftClearance(leftMode, leftWidth));
+  const pinRatioMax = Math.floor(window.innerWidth * RIGHT_PANE_MAX_PIN_RATIO);
+  const viewportMax = mode === 'pop' ? clearanceMax : Math.min(pinRatioMax, clearanceMax);
+  const maxWidth = Math.max(RIGHT_PANE_MIN_WIDTH, viewportMax);
+  return Math.max(RIGHT_PANE_MIN_WIDTH, Math.min(Math.round(value), maxWidth));
+}
+
+function computeRightPopLeftClearance(leftMode: SidebarMode, leftWidth: number): number {
+  if (leftMode === 'pin') {
+    return Math.round(leftWidth + RIGHT_PANE_POP_CHAT_CLEARANCE);
+  }
+  return RIGHT_PANE_POP_CHAT_CLEARANCE;
+}
+
 async function apiRequest<T>(
   path: string,
   input: { method: 'GET' | 'POST' | 'PATCH' | 'DELETE'; body?: Record<string, unknown>; signal?: AbortSignal },
@@ -3624,6 +3845,61 @@ function writeLastSessionId(userEmail: string, projectId: string, sessionId: str
 
 function lastSessionStorageKey(userEmail: string, projectId: string): string {
   return `${LAST_SESSION_STORAGE_KEY_PREFIX}${userEmail.trim().toLowerCase()}:${projectId.trim()}`;
+}
+
+function readPanelLayout(userEmail: string): PanelLayoutPersistence | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(panelLayoutStorageKey(userEmail));
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Partial<PanelLayoutPersistence>;
+    if (!parsed.left || !parsed.right) {
+      return null;
+    }
+    const leftMode = normalizeSidebarMode(parsed.left.mode);
+    const rightMode = normalizeSidebarMode(parsed.right.mode);
+    const leftWidth = readFiniteNumber(parsed.left.width) ?? LEFT_PANE_DEFAULT_WIDTH;
+    const rightWidth = readFiniteNumber(parsed.right.width) ?? RIGHT_PANE_DEFAULT_WIDTH;
+    return {
+      left: {
+        mode: leftMode,
+        width: leftWidth,
+        open: leftMode !== 'closed',
+        pinned: leftMode === 'pin',
+      },
+      right: {
+        mode: rightMode,
+        width: rightWidth,
+        open: rightMode !== 'closed',
+        pinned: rightMode === 'pin',
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writePanelLayout(userEmail: string, value: PanelLayoutPersistence): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(panelLayoutStorageKey(userEmail), JSON.stringify(value));
+  } catch {
+    // Ignore storage errors so layout still works without persistence.
+  }
+}
+
+function panelLayoutStorageKey(userEmail: string): string {
+  return `${PANEL_LAYOUT_STORAGE_KEY_PREFIX}${userEmail.trim().toLowerCase()}`;
+}
+
+function normalizeSidebarMode(mode: unknown): SidebarMode {
+  return mode === 'pin' || mode === 'pop' || mode === 'closed' ? mode : 'closed';
 }
 
 function applyDirectorySuggestionSelection(value: string, suggestions: string[]): string {
