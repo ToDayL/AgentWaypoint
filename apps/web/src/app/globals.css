@@ -1192,6 +1192,16 @@ button:disabled {
   overflow: hidden;
 }
 
+.sim-output-diff {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
 .sim-output h3,
 .sim-events h3 {
   margin: 0 0 0.45rem;
@@ -1215,12 +1225,16 @@ button:disabled {
 }
 
 .diff-list {
-  display: grid;
+  --diff-font-size: 12px;
+  --diff-line-height: 1.3;
+  --diff-max-lines: 20;
+  display: flex;
+  flex-direction: column;
   gap: 0.6rem;
   flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
-  align-content: start;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .diff-block {
@@ -1228,6 +1242,7 @@ button:disabled {
   border-radius: 10px;
   overflow: hidden;
   background: #161b23;
+  flex: 0 0 auto;
 }
 
 .diff-block-head {
@@ -1292,6 +1307,26 @@ button:disabled {
 .diff-rdv-shell {
   max-height: none;
   min-height: 0;
+  overflow-x: auto;
+  overflow-y: visible;
+}
+
+.diff-block-scrollable .diff-rdv-shell {
+  max-height: calc(var(--diff-max-lines) * var(--diff-font-size) * var(--diff-line-height));
+  overflow-y: auto;
+}
+
+.diff-block > pre {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 0.64rem;
+  white-space: pre-wrap;
+}
+
+.diff-block-scrollable > pre {
+  max-height: calc(var(--diff-max-lines) * 1.35em);
   overflow: auto;
 }
 
@@ -1313,8 +1348,8 @@ button:disabled {
 
 .diff-rdv-shell .diff-code {
   background: #161b23;
-  font-size: 12px;
-  line-height: 1.3;
+  font-size: var(--diff-font-size);
+  line-height: var(--diff-line-height);
 }
 
 .diff-rdv-shell .diff-hunk-header {

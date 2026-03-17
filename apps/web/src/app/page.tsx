@@ -297,6 +297,7 @@ const LAST_SESSION_STORAGE_KEY_PREFIX = 'agentwaypoint:last-session:';
 const PANEL_LAYOUT_STORAGE_KEY_PREFIX = 'agentwaypoint:panel-layout:';
 const CHAT_VISIBLE_MESSAGE_STEP = 10;
 const CHAT_SCROLL_IDLE_MS = 220;
+const MAX_VISIBLE_DIFF_LINES = 20;
 const LEFT_PANE_DEFAULT_WIDTH = 280;
 const LEFT_PANE_MIN_WIDTH = 220;
 const LEFT_PANE_MAX_RATIO = 0.55;
@@ -570,6 +571,7 @@ export default function HomePage() {
       rawDiff: latestDiffSummary,
     };
   }, [latestDiffSummary, parsedDiffFiles]);
+  const rawDiffLineCount = useMemo(() => countDiffTextLines(latestDiffSummary), [latestDiffSummary]);
   const previewPanelView = useMemo(
     () => (
       <article className="sim-output">
@@ -631,32 +633,41 @@ export default function HomePage() {
   );
   const diffPanelView = useMemo(
     () => (
-      <article className="sim-output">
+      <article className="sim-output sim-output-diff">
         <h3>Diff Summary</h3>
         {!renderedDiff ? <pre>No diff updates yet.</pre> : null}
         {renderedDiff ? (
           <div className="diff-list">
             {renderedDiff.files.length === 0 ? (
-              <section key={renderedDiff.id} className="diff-block">
+              <section
+                key={renderedDiff.id}
+                className={`diff-block ${rawDiffLineCount > MAX_VISIBLE_DIFF_LINES ? 'diff-block-scrollable' : ''}`}
+              >
                 <div className="diff-block-head">Latest Diff</div>
                 <pre>{renderedDiff.rawDiff}</pre>
               </section>
             ) : null}
-            {renderedDiff.files.map((file, fileIndex) => (
-              <section key={`diff-${renderedDiff.id}-file-${fileIndex}`} className="diff-block">
-                <div className="diff-block-head">{formatDiffFileLabel(file)}</div>
-                <div className="diff-rdv-shell">
-                  <Diff viewType="unified" diffType={file.type} hunks={file.hunks}>
-                    {(hunks) => hunks.map((hunk, hunkIndex) => <Hunk key={hunkIndex} hunk={hunk} />)}
-                  </Diff>
-                </div>
-              </section>
-            ))}
+            {renderedDiff.files.map((file, fileIndex) => {
+              const diffLineCount = countDiffFileLines(file);
+              return (
+                <section
+                  key={`diff-${renderedDiff.id}-file-${fileIndex}`}
+                  className={`diff-block ${diffLineCount > MAX_VISIBLE_DIFF_LINES ? 'diff-block-scrollable' : ''}`}
+                >
+                  <div className="diff-block-head">{formatDiffFileLabel(file)}</div>
+                  <div className="diff-rdv-shell">
+                    <Diff viewType="unified" diffType={file.type} hunks={file.hunks}>
+                      {(hunks) => hunks.map((hunk, hunkIndex) => <Hunk key={hunkIndex} hunk={hunk} />)}
+                    </Diff>
+                  </div>
+                </section>
+              );
+            })}
           </div>
         ) : null}
       </article>
     ),
-    [renderedDiff],
+    [renderedDiff, rawDiffLineCount],
   );
 
   useEffect(() => {
@@ -4609,6 +4620,26 @@ function formatDiffPayload(payload: Record<string, unknown>): string {
     return 'Diff update available.';
   }
   return '';
+}
+
+function countDiffTextLines(diffText: string): number {
+  if (diffText.length === 0) {
+    return 0;
+  }
+  return diffText.split(/\r?\n/).length;
+}
+
+function countDiffFileLines(file: ParsedDiffFile): number {
+  if (!Array.isArray(file.hunks)) {
+    return 0;
+  }
+  return file.hunks.reduce((total, hunk) => {
+    const changes = (hunk as unknown as { changes?: unknown }).changes;
+    if (!Array.isArray(changes)) {
+      return total;
+    }
+    return total + changes.length;
+  }, 0);
 }
 
 function formatDiffFileLabel(file: ParsedDiffFile): string {
