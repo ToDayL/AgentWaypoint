@@ -3686,24 +3686,33 @@ export default function HomePage() {
                 <article className="sim-approval">
                   <h3>Approval Required</h3>
                   <div className="sim-approval-body">
-                    <p>
-                      <strong>{formatApprovalKind(pendingApproval.kind)}</strong>
-                      {typeof pendingApproval.payload.reason === 'string' && pendingApproval.payload.reason.length > 0
-                        ? `: ${pendingApproval.payload.reason}`
-                        : ''}
-                    </p>
-                    {pendingApproval.kind === 'command_execution' ? (
-                      <>
-                        {readApprovalCommand(pendingApproval.payload) ? (
-                          <pre className="sim-approval-command">{readApprovalCommand(pendingApproval.payload)}</pre>
-                        ) : null}
-                        {typeof pendingApproval.payload.cwd === 'string' && pendingApproval.payload.cwd.length > 0 ? (
-                          <p className="sim-approval-meta">
-                            CWD: <code>{pendingApproval.payload.cwd}</code>
+                    {(() => {
+                      const reason = readApprovalTextField(pendingApproval.payload, 'reason');
+                      const command = readApprovalCommand(pendingApproval.payload);
+                      const cwd = readApprovalTextField(pendingApproval.payload, 'cwd');
+                      return (
+                        <>
+                          <p>
+                            <strong>{formatApprovalKind(pendingApproval.kind)}</strong>
                           </p>
-                        ) : null}
-                      </>
-                    ) : null}
+                          <p className="sim-approval-meta">
+                            Purpose: {reason ?? 'Not provided by runtime'}
+                          </p>
+                          {command ? (
+                            <pre className="sim-approval-command">{command}</pre>
+                          ) : (
+                            <p className="sim-approval-meta">Command: Not provided by runtime</p>
+                          )}
+                          {cwd ? (
+                            <p className="sim-approval-meta sim-approval-meta-cwd">
+                              CWD: <code>{cwd}</code>
+                            </p>
+                          ) : (
+                            <p className="sim-approval-meta">CWD: Not provided by runtime</p>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                   <div className="sim-actions sim-actions-approval">
                     {getApprovalActionOptions(pendingApproval).map((option) => (
@@ -4810,6 +4819,15 @@ function readApprovalCommand(payload: Record<string, unknown>): string | null {
     }
   }
   return null;
+}
+
+function readApprovalTextField(payload: Record<string, unknown>, key: 'reason' | 'cwd'): string | null {
+  const value = payload[key];
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function formatPlanPayload(payload: Record<string, unknown>): string {

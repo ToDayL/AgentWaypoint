@@ -1162,6 +1162,7 @@ button:disabled {
   gap: 0.35rem;
   min-height: 0;
   max-height: 50vh;
+  flex: 0 0 auto;
   overflow: hidden;
 }
 
@@ -1193,6 +1194,14 @@ button:disabled {
   margin: 0;
   font-size: 0.8rem;
   color: var(--fg-muted);
+}
+
+.sim-approval-meta code {
+  font-family: 'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace;
+}
+
+.sim-approval-meta-cwd {
+  font-family: 'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace;
 }
 
 .sim-approval > h3,
