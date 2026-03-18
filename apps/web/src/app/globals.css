@@ -537,8 +537,24 @@ body {
   margin-top: 0;
   display: grid;
   gap: 0.5rem;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: end;
+}
+
+.upload-input-hidden {
+  display: none;
+}
+
+.composer-upload-hint {
+  margin: 0.45rem 0 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.composer-upload-error {
+  margin: 0.45rem 0 0;
+  font-size: 0.8rem;
+  color: #ff9ea2;
 }
 
 .chat-composer-row button:not(.icon-button) {
@@ -1870,5 +1886,25 @@ button:disabled {
 
   .chat-composer-row {
     grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    grid-template-areas:
+      'textarea upload'
+      'textarea send';
+    align-items: stretch;
+  }
+
+  .chat-composer-row textarea {
+    grid-area: textarea;
+    height: 100%;
+  }
+
+  .chat-composer-row .composer-upload-button {
+    grid-area: upload;
+    align-self: start;
+  }
+
+  .chat-composer-row .composer-send-button {
+    grid-area: send;
+    align-self: end;
   }
 }

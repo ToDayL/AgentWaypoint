@@ -1,4 +1,4 @@
-import { BadRequestException, Controller, Get, Inject, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Inject, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { parseWithZod } from '../../common/validation/zod';
 import { AuthGuard } from '../auth/auth.guard';
 import { WorkspaceFileQuerySchema, WorkspaceSuggestionQuerySchema, WorkspaceTreeQuerySchema } from './filesystem.schemas';
@@ -45,6 +45,32 @@ export class FilesystemController {
       });
     } catch (error: unknown) {
       throw new BadRequestException(error instanceof Error ? error.message : 'Failed to read workspace file');
+    }
+  }
+
+  @Post('/upload')
+  async uploadWorkspaceFile(
+    @Req() request: { raw: NodeJS.ReadableStream; headers: Record<string, string | string[] | undefined> },
+  ) {
+    const contentType = Array.isArray(request.headers['content-type'])
+      ? request.headers['content-type'][0] ?? ''
+      : request.headers['content-type'] ?? '';
+    const contentLength = Array.isArray(request.headers['content-length'])
+      ? request.headers['content-length'][0] ?? null
+      : request.headers['content-length'] ?? null;
+
+    if (typeof contentType !== 'string' || !contentType.toLowerCase().includes('multipart/form-data')) {
+      throw new BadRequestException('content-type must be multipart/form-data');
+    }
+
+    try {
+      return await this.runnerAdapter.uploadWorkspaceFile({
+        body: request.raw,
+        contentType,
+        contentLength,
+      });
+    } catch (error: unknown) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Failed to upload workspace file');
     }
   }
 }

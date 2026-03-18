@@ -12,5 +12,8 @@
     "test": "vitest run --passWithNoTests",
     "format": "prettier --write \"src/**/*.ts\""
   },
-  "dependencies": {}
+  "dependencies": {
+    "busboy": "^1.6.0",
+    "@types/busboy": "^1.5.4"
+  }
 }

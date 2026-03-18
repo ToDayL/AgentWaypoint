@@ -52,8 +52,22 @@ async function proxyRequest(request: NextRequest, context: Params): Promise<Resp
     );
   }
 
-  const rawBody = method === 'GET' || method === 'DELETE' ? '' : await request.text();
-  const hasJsonBody = rawBody.trim().length > 0;
+  const contentTypeHeader = request.headers.get('content-type') ?? '';
+  const isJsonRequest = contentTypeHeader.toLowerCase().includes('application/json');
+  const contentLengthHeader = request.headers.get('content-length');
+  let rawJsonBody = '';
+  let upstreamBody: BodyInit | undefined;
+  if (method !== 'GET' && method !== 'DELETE') {
+    if (isJsonRequest) {
+      rawJsonBody = await request.text();
+      if (rawJsonBody.trim().length > 0) {
+        upstreamBody = rawJsonBody;
+      }
+    } else if (request.body) {
+      upstreamBody = request.body;
+    }
+  }
+
   const cookieHeader = request.headers.get('cookie');
   const devEmailHeader = request.headers.get('x-user-email');
   const acceptHeader = request.headers.get('accept');
@@ -68,11 +82,14 @@ async function proxyRequest(request: NextRequest, context: Params): Promise<Resp
         ...(devEmailHeader ? { 'x-user-email': devEmailHeader } : {}),
         ...(acceptHeader ? { accept: acceptHeader } : {}),
         ...(lastEventIdHeader ? { 'last-event-id': lastEventIdHeader } : {}),
-        ...(hasJsonBody ? { 'content-type': 'application/json' } : {}),
+        ...(upstreamBody && isJsonRequest ? { 'content-type': 'application/json' } : {}),
+        ...(upstreamBody && !isJsonRequest && contentTypeHeader ? { 'content-type': contentTypeHeader } : {}),
+        ...(upstreamBody && !isJsonRequest && contentLengthHeader ? { 'content-length': contentLengthHeader } : {}),
       },
-      ...(hasJsonBody ? { body: rawBody } : {}),
+      ...(upstreamBody ? { body: upstreamBody } : {}),
+      ...(upstreamBody === request.body ? { duplex: 'half' } : {}),
       cache: 'no-store',
-    });
+    } as RequestInit & { duplex?: 'half' });
 
     const upstreamContentType = upstream.headers.get('content-type') ?? '';
     const noBodyStatus = upstream.status === 204 || upstream.status === 205 || upstream.status === 304;

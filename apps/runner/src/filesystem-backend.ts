@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import * as path from 'node:path';
 
@@ -7,6 +7,7 @@ type FilesystemBackendConfig = {
 };
 
 const WORKSPACE_FILE_MAX_SIZE_BYTES = 10 * 1024 * 1024;
+const WORKSPACE_UPLOAD_MAX_SIZE_BYTES = 20 * 1024 * 1024;
 
 export class FilesystemBackend {
   constructor(private readonly config: FilesystemBackendConfig) {}
@@ -132,6 +133,49 @@ export class FilesystemBackend {
     };
   }
 
+  async saveWorkspaceUpload(input: {
+    workspacePath: string;
+    fileName: string;
+    mimeType: string;
+    content: Buffer;
+  }): Promise<{ path: string; relativePath: string; size: number; mimeType: string }> {
+    const workspaceRoot = await this.assertExistingWorkspaceDirectory(input.workspacePath.trim());
+    const byteLength = input.content.byteLength;
+    if (byteLength <= 0) {
+      throw new Error('Uploaded file is empty');
+    }
+    if (byteLength > WORKSPACE_UPLOAD_MAX_SIZE_BYTES) {
+      throw new Error('Uploaded file exceeds 20MB limit');
+    }
+
+    const uploadsDirectory = path.join(workspaceRoot, 'uploads');
+    await mkdir(uploadsDirectory, { recursive: true });
+
+    const safeName = sanitizeUploadFileName(input.fileName);
+    let attempt = 0;
+    while (attempt < 10000) {
+      const candidateName = appendNumericSuffix(safeName, attempt);
+      const absolutePath = path.join(uploadsDirectory, candidateName);
+      try {
+        await writeFile(absolutePath, input.content, { flag: 'wx' });
+        return {
+          path: absolutePath,
+          relativePath: `uploads/${candidateName}`,
+          size: byteLength,
+          mimeType: input.mimeType,
+        };
+      } catch (error: unknown) {
+        if (isAlreadyExistsError(error)) {
+          attempt += 1;
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    throw new Error('Failed to allocate a unique file name in uploads');
+  }
+
   private async assertExistingWorkspaceDirectory(normalizedCwd: string): Promise<string> {
     const absolutePath = path.resolve(expandHomeToken(normalizedCwd));
     this.assertWorkspaceAllowed(absolutePath);
@@ -222,4 +266,29 @@ function isMissingPathError(error: unknown): boolean {
 
 function isPermissionDeniedError(error: unknown): boolean {
   return !!error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'EACCES';
+}
+
+function isAlreadyExistsError(error: unknown): boolean {
+  return !!error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'EEXIST';
+}
+
+function sanitizeUploadFileName(input: string): string {
+  const trimmed = path.basename(input.trim());
+  const sanitized = trimmed
+    .replace(/[\u0000-\u001f<>:"/\\|?*]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (sanitized.length > 0) {
+    return sanitized.slice(0, 255);
+  }
+  return `upload-${Date.now()}.bin`;
+}
+
+function appendNumericSuffix(fileName: string, attempt: number): string {
+  if (attempt <= 0) {
+    return fileName;
+  }
+  const ext = path.extname(fileName);
+  const base = ext.length > 0 ? fileName.slice(0, -ext.length) : fileName;
+  return `${base}-${attempt}${ext}`;
 }

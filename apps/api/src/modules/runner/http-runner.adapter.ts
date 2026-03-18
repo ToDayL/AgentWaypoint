@@ -12,6 +12,8 @@ import {
   ResolveTurnApprovalInput,
   WorkspaceFileInput,
   WorkspaceFileResult,
+  WorkspaceUploadInput,
+  WorkspaceUploadResult,
   WorkspaceTreeEntry,
   WorkspaceTreeInput,
   WorkspaceSuggestionInput,
@@ -354,6 +356,63 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       content: contentValue,
       truncated: record.truncated === true,
     };
+  }
+
+  async uploadWorkspaceFile(input: WorkspaceUploadInput): Promise<WorkspaceUploadResult> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      const headers: Record<string, string> = {
+        'content-type': input.contentType,
+        ...(this.authToken ? { authorization: `Bearer ${this.authToken}` } : {}),
+      };
+      if (typeof input.contentLength === 'string' && input.contentLength.trim().length > 0) {
+        headers['content-length'] = input.contentLength.trim();
+      }
+
+      const response = await fetch(`${this.baseUrl}/runner/fs/upload`, {
+        method: 'POST',
+        headers,
+        body: input.body as unknown as BodyInit,
+        signal: controller.signal,
+        // Required by Node fetch when sending a streaming request body.
+        duplex: 'half',
+      } as RequestInit & { duplex: 'half' });
+
+      const responseText = await response.text();
+      if (!response.ok) {
+        const runnerErrorMessage = extractRunnerErrorMessage(responseText, response.status);
+        this.logger.error(
+          `Runner upload failed: /runner/fs/upload -> ${response.status} ${response.statusText} ${responseText}`,
+        );
+        throw new Error(runnerErrorMessage);
+      }
+
+      const payload = JSON.parse(responseText) as Record<string, unknown>;
+      const path = typeof payload.path === 'string' ? payload.path : '';
+      const relativePath = typeof payload.relativePath === 'string' ? payload.relativePath : '';
+      const size = typeof payload.size === 'number' && Number.isFinite(payload.size) ? payload.size : -1;
+      const mimeType = typeof payload.mimeType === 'string' ? payload.mimeType : '';
+      if (!path || !relativePath || size < 0) {
+        throw new Error('Runner workspace upload response is invalid');
+      }
+      return {
+        path,
+        relativePath,
+        size,
+        mimeType,
+      };
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        this.logger.error(`Runner upload error: ${error.message}`, error.stack);
+      } else {
+        this.logger.error('Runner upload error');
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   private async request(options: RunnerHttpRequestOptions): Promise<unknown> {

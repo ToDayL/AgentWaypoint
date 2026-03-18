@@ -22,6 +22,8 @@ import {
   StartTurnInput,
   WorkspaceFileInput,
   WorkspaceFileResult,
+  WorkspaceUploadInput,
+  WorkspaceUploadResult,
   WorkspaceTreeEntry,
   WorkspaceTreeInput,
   WorkspaceSuggestionInput,
@@ -289,6 +291,10 @@ export class MockRunnerAdapter implements RunnerAdapter {
       content: text,
       truncated,
     };
+  }
+
+  async uploadWorkspaceFile(_input: WorkspaceUploadInput): Promise<WorkspaceUploadResult> {
+    throw new Error('Workspace file upload is unavailable in mock runner mode');
   }
 
   private async handleDelta(turnId: string, chunk: string): Promise<void> {
