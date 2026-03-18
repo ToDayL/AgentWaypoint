@@ -15,6 +15,16 @@ fi
 
 cd "$ROOT_DIR"
 
+if command -v pnpm >/dev/null 2>&1; then
+  PM=(pnpm)
+else
+  export COREPACK_HOME="${COREPACK_HOME:-/tmp/corepack}"
+  PM=(corepack pnpm)
+fi
+
+echo "[dev-up] Ensuring host workspace dependencies are installed..."
+CI=true "${PM[@]}" install --no-frozen-lockfile --reporter=append-only
+
 echo "[dev-up] Starting Docker database services (postgres/redis)..."
 docker compose -f "$COMPOSE_FILE" up --build -d postgres redis
 
