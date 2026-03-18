@@ -21,17 +21,6 @@ fi
 cd "$ROOT_DIR"
 
 echo "[prod-up] Using env file: ${ENV_FILE_PATH}"
-
-if command -v pnpm >/dev/null 2>&1; then
-  PM=(pnpm)
-else
-  export COREPACK_HOME="${COREPACK_HOME:-/tmp/corepack}"
-  PM=(corepack pnpm)
-fi
-
-echo "[prod-up] Ensuring host workspace dependencies are installed..."
-CI=true "${PM[@]}" install --frozen-lockfile --reporter=append-only
-
 echo "[prod-up] Starting Docker services (postgres/redis)..."
 docker compose -f "$COMPOSE_FILE" up --build -d postgres redis
 
