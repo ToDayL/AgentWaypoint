@@ -1,6 +1,28 @@
 'use client';
 
-import { CSSProperties, KeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  CSSProperties,
+  KeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { markdown } from '@codemirror/lang-markdown';
+import { css } from '@codemirror/lang-css';
+import { go } from '@codemirror/lang-go';
+import { html } from '@codemirror/lang-html';
+import { java } from '@codemirror/lang-java';
+import { javascript } from '@codemirror/lang-javascript';
+import { json } from '@codemirror/lang-json';
+import { python } from '@codemirror/lang-python';
+import { rust } from '@codemirror/lang-rust';
+import { sql } from '@codemirror/lang-sql';
+import { xml } from '@codemirror/lang-xml';
+import { yaml } from '@codemirror/lang-yaml';
+import { Extension } from '@codemirror/state';
+import { EditorView } from '@codemirror/view';
 import {
   ChevronDown,
   ChevronRight,
@@ -22,10 +44,10 @@ import {
   Trash2,
   UserCog,
 } from 'lucide-react';
+import { oneDark as codeMirrorOneDark } from '@codemirror/theme-one-dark';
+import CodeMirror from '@uiw/react-codemirror';
 import { Diff, Hunk, parseDiff } from 'react-diff-view';
 import ReactMarkdown from 'react-markdown';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import remarkGfm from 'remark-gfm';
 
 type Project = {
@@ -407,7 +429,6 @@ export default function HomePage() {
   const [insightsTab, setInsightsTab] = useState<InsightsTab>('events');
   const [previewFilePath, setPreviewFilePath] = useState('');
   const [previewFileContent, setPreviewFileContent] = useState('');
-  const [previewFileIsMarkdown, setPreviewFileIsMarkdown] = useState(false);
   const [previewFileTruncated, setPreviewFileTruncated] = useState(false);
   const [previewFileBusy, setPreviewFileBusy] = useState(false);
   const [previewFileError, setPreviewFileError] = useState('');
@@ -572,6 +593,9 @@ export default function HomePage() {
     };
   }, [latestDiffSummary, parsedDiffFiles]);
   const rawDiffLineCount = useMemo(() => countDiffTextLines(latestDiffSummary), [latestDiffSummary]);
+  const previewIsMarkdown = useMemo(() => detectCodeLanguage(previewFilePath) === 'markdown', [previewFilePath]);
+  const previewCodeMirrorExtensions = useMemo(() => resolveCodeMirrorExtensions(previewFilePath), [previewFilePath]);
+
   const previewPanelView = useMemo(
     () => (
       <article className="sim-output">
@@ -583,45 +607,31 @@ export default function HomePage() {
             {previewFileBusy ? <pre>Loading preview…</pre> : null}
             {!previewFileBusy && previewFileError ? <pre>{previewFileError}</pre> : null}
             {!previewFileBusy && !previewFileError ? (
-              previewFileIsMarkdown ? (
-                <div className="chat-markdown">
+              previewIsMarkdown ? (
+                <div className="chat-markdown preview-markdown">
                   <ReactMarkdown remarkPlugins={CHAT_MARKDOWN_REMARK_PLUGINS}>{previewFileContent}</ReactMarkdown>
                 </div>
               ) : (
-                <SyntaxHighlighter
-                  language={detectCodeLanguage(previewFilePath)}
-                  style={oneDark}
-                  customStyle={{
-                    margin: 0,
-                    minHeight: '90px',
-                    maxHeight: 'none',
-                    flex: '1 1 auto',
-                    fontFamily: "'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace",
-                    fontSize: '0.81rem',
-                    lineHeight: 1.35,
+                <CodeMirror
+                  className="preview-codemirror"
+                  value={previewFileContent}
+                  theme={codeMirrorOneDark}
+                  height="100%"
+                  editable={false}
+                  extensions={previewCodeMirrorExtensions}
+                  basicSetup={{
+                    lineNumbers: true,
+                    foldGutter: false,
+                    dropCursor: false,
+                    allowMultipleSelections: false,
+                    indentOnInput: false,
+                    autocompletion: false,
+                    bracketMatching: true,
+                    closeBrackets: false,
+                    highlightActiveLine: false,
+                    highlightActiveLineGutter: false,
                   }}
-                  codeTagProps={{
-                    style: {
-                      fontFamily: "'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace",
-                      fontSize: '0.81rem',
-                      lineHeight: 1.35,
-                    },
-                  }}
-                  wrapLongLines
-                  showLineNumbers
-                  lineNumberStyle={{
-                    minWidth: '2.4em',
-                    marginRight: '0.75em',
-                    color: '#7c8aa2',
-                    fontFamily: "'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace",
-                    fontSize: '0.81rem',
-                    lineHeight: 1.35,
-                    textAlign: 'right',
-                    userSelect: 'none',
-                  }}
-                >
-                  {previewFileContent || '(empty file)'}
-                </SyntaxHighlighter>
+                />
               )
             ) : null}
             {previewFileTruncated ? <p className="sim-input-hint">Preview truncated to 256 KB.</p> : null}
@@ -629,7 +639,15 @@ export default function HomePage() {
         ) : null}
       </article>
     ),
-    [previewFilePath, previewFileBusy, previewFileError, previewFileIsMarkdown, previewFileContent, previewFileTruncated],
+    [
+      previewFilePath,
+      previewFileBusy,
+      previewFileError,
+      previewFileContent,
+      previewFileTruncated,
+      previewIsMarkdown,
+      previewCodeMirrorExtensions,
+    ],
   );
   const diffPanelView = useMemo(
     () => (
@@ -884,7 +902,6 @@ export default function HomePage() {
     if (!activeWorkspacePath) {
       setPreviewFilePath('');
       setPreviewFileContent('');
-      setPreviewFileIsMarkdown(false);
       setPreviewFileTruncated(false);
       setPreviewFileBusy(false);
       setPreviewFileError('');
@@ -1170,7 +1187,6 @@ export default function HomePage() {
       setFileBrowserError('');
       setPreviewFilePath('');
       setPreviewFileContent('');
-      setPreviewFileIsMarkdown(false);
       setPreviewFileTruncated(false);
       setPreviewFileBusy(false);
       setPreviewFileError('');
@@ -1565,7 +1581,6 @@ export default function HomePage() {
 
     setPreviewFilePath(normalizedPath);
     setPreviewFileContent('');
-    setPreviewFileIsMarkdown(isMarkdownFilePath(normalizedPath));
     setPreviewFileTruncated(false);
     setPreviewFileError('');
     setPreviewFileBusy(true);
@@ -1589,7 +1604,6 @@ export default function HomePage() {
       setPreviewFilePath(response.path);
       setPreviewFileContent(response.content ?? '');
       setPreviewFileTruncated(response.truncated === true);
-      setPreviewFileIsMarkdown(isMarkdownFilePath(response.path));
       setPreviewFileError('');
     } catch (requestError) {
       if (previewLoadSeqRef.current !== loadSeq) {
@@ -3994,12 +4008,11 @@ function ensureTrailingSlash(value: string): string {
   return value.endsWith('/') ? value : `${value}/`;
 }
 
-function isMarkdownFilePath(filePath: string): boolean {
-  return /\.(md|mdx|markdown)$/i.test(filePath.trim());
-}
-
 function detectCodeLanguage(filePath: string): string {
   const normalized = filePath.trim().toLowerCase();
+  if (normalized.endsWith('.md') || normalized.endsWith('.mdx') || normalized.endsWith('.markdown')) {
+    return 'markdown';
+  }
   if (normalized.endsWith('.ts') || normalized.endsWith('.tsx')) {
     return 'typescript';
   }
@@ -4043,6 +4056,66 @@ function detectCodeLanguage(filePath: string): string {
     return 'toml';
   }
   return 'text';
+}
+
+function resolveCodeMirrorExtensions(filePath: string): Extension[] {
+  const normalized = filePath.trim().toLowerCase();
+  const detected = detectCodeLanguage(filePath);
+  const extensions: Extension[] = [EditorView.lineWrapping];
+
+  if (detected === 'markdown') {
+    extensions.push(markdown());
+    return extensions;
+  }
+  if (detected === 'typescript') {
+    extensions.push(javascript({ typescript: true, jsx: normalized.endsWith('.tsx') }));
+    return extensions;
+  }
+  if (detected === 'javascript') {
+    extensions.push(javascript({ jsx: normalized.endsWith('.jsx') }));
+    return extensions;
+  }
+  if (detected === 'json') {
+    extensions.push(json());
+    return extensions;
+  }
+  if (detected === 'css') {
+    extensions.push(css());
+    return extensions;
+  }
+  if (detected === 'html') {
+    extensions.push(html());
+    return extensions;
+  }
+  if (detected === 'yaml') {
+    extensions.push(yaml());
+    return extensions;
+  }
+  if (detected === 'sql') {
+    extensions.push(sql());
+    return extensions;
+  }
+  if (detected === 'python') {
+    extensions.push(python());
+    return extensions;
+  }
+  if (detected === 'go') {
+    extensions.push(go());
+    return extensions;
+  }
+  if (detected === 'rust') {
+    extensions.push(rust());
+    return extensions;
+  }
+  if (detected === 'java') {
+    extensions.push(java());
+    return extensions;
+  }
+  if (detected === 'xml') {
+    extensions.push(xml());
+    return extensions;
+  }
+  return extensions;
 }
 
 function resolveWorkspaceRelativePath(targetPath: string, workspaceRoot: string): string {

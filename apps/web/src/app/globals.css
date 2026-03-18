@@ -1224,6 +1224,38 @@ button:disabled {
   font-size: 0.81rem;
 }
 
+.preview-codemirror {
+  min-height: 120px;
+  flex: 1 1 auto;
+  overflow: hidden;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+}
+
+.preview-codemirror .cm-editor {
+  height: 100%;
+  min-height: 120px;
+  font-family: 'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace;
+  font-size: 0.81rem;
+  line-height: 1.35;
+}
+
+.preview-codemirror .cm-scroller {
+  overflow: auto;
+  font-family: inherit;
+}
+
+.preview-markdown {
+  margin: 0;
+  min-height: 120px;
+  flex: 1 1 auto;
+  overflow: auto;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: #1b1b1c;
+  padding: 0.64rem;
+}
+
 .diff-list {
   --diff-font-size: 12px;
   --diff-line-height: 1.3;
