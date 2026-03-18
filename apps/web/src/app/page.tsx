@@ -652,7 +652,6 @@ export default function HomePage() {
   const diffPanelView = useMemo(
     () => (
       <article className="sim-output sim-output-diff">
-        <h3>Diff Summary</h3>
         {!renderedDiff ? <pre>No diff updates yet.</pre> : null}
         {renderedDiff ? (
           <div className="diff-list">

@@ -29,6 +29,8 @@ body {
   height: 100%;
   min-height: 100dvh;
   overflow: hidden;
+  text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
@@ -1419,6 +1421,8 @@ button:disabled {
   min-height: 0;
   overflow: auto;
   padding-left: 0.25rem;
+  text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
 }
 
 .timeline-empty {
@@ -1505,6 +1509,8 @@ button:disabled {
   line-height: 1.25;
   font-size: 0.72rem;
   font-family: 'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace;
+  text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
 }
 
 .timeline-diff-file {
@@ -1521,6 +1527,8 @@ button:disabled {
   white-space: pre-wrap;
   word-break: break-all;
   font-family: 'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace;
+  text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
 }
 
 
