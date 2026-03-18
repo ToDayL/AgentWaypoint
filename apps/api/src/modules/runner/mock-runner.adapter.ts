@@ -20,6 +20,8 @@ import {
   RunnerAdapter,
   SteerTurnInput,
   StartTurnInput,
+  WorkspaceFileContentInput,
+  WorkspaceFileContentResult,
   WorkspaceFileInput,
   WorkspaceFileResult,
   WorkspaceUploadInput,
@@ -293,6 +295,22 @@ export class MockRunnerAdapter implements RunnerAdapter {
     };
   }
 
+  async readWorkspaceFileContent(input: WorkspaceFileContentInput): Promise<WorkspaceFileContentResult> {
+    const absolutePath = path.resolve(expandHomeToken(input.path.trim()));
+    const info = await stat(absolutePath);
+    if (!info.isFile()) {
+      throw new Error(`Path is not a file: ${absolutePath}`);
+    }
+    if (info.size > WORKSPACE_FILE_MAX_SIZE_BYTES) {
+      throw new Error(`File is too large to preview (>10MB): ${absolutePath}`);
+    }
+    return {
+      path: absolutePath,
+      content: await readFile(absolutePath),
+      mimeType: resolveMimeTypeFromPath(absolutePath),
+    };
+  }
+
   async uploadWorkspaceFile(_input: WorkspaceUploadInput): Promise<WorkspaceUploadResult> {
     throw new Error('Workspace file upload is unavailable in mock runner mode');
   }
@@ -446,4 +464,30 @@ function extractAssistantDeltaText(payload: Prisma.JsonValue): string {
   }
   const text = (payload as Record<string, unknown>).text;
   return typeof text === 'string' ? text : '';
+}
+
+function resolveMimeTypeFromPath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case '.pdf':
+      return 'application/pdf';
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.gif':
+      return 'image/gif';
+    case '.webp':
+      return 'image/webp';
+    case '.bmp':
+      return 'image/bmp';
+    case '.svg':
+      return 'image/svg+xml';
+    case '.tif':
+    case '.tiff':
+      return 'image/tiff';
+    default:
+      return 'application/octet-stream';
+  }
 }

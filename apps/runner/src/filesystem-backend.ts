@@ -133,6 +133,28 @@ export class FilesystemBackend {
     };
   }
 
+  async readWorkspaceFileBinary(
+    inputPath: string,
+  ): Promise<{ path: string; content: Buffer; mimeType: string; size: number }> {
+    const absolutePath = path.resolve(expandHomeToken(inputPath.trim()));
+    this.assertWorkspaceAllowed(absolutePath);
+    const info = await stat(absolutePath);
+    if (!info.isFile()) {
+      throw new Error(`Path is not a file: ${absolutePath}`);
+    }
+    if (info.size > WORKSPACE_FILE_MAX_SIZE_BYTES) {
+      throw new Error(`File is too large to preview (>10MB): ${absolutePath}`);
+    }
+
+    const content = await readFile(absolutePath);
+    return {
+      path: absolutePath,
+      content,
+      mimeType: resolveMimeTypeFromPath(absolutePath),
+      size: content.byteLength,
+    };
+  }
+
   async saveWorkspaceUpload(input: {
     workspacePath: string;
     fileName: string;
@@ -291,4 +313,30 @@ function appendNumericSuffix(fileName: string, attempt: number): string {
   const ext = path.extname(fileName);
   const base = ext.length > 0 ? fileName.slice(0, -ext.length) : fileName;
   return `${base}-${attempt}${ext}`;
+}
+
+function resolveMimeTypeFromPath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case '.pdf':
+      return 'application/pdf';
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.gif':
+      return 'image/gif';
+    case '.webp':
+      return 'image/webp';
+    case '.bmp':
+      return 'image/bmp';
+    case '.svg':
+      return 'image/svg+xml';
+    case '.tif':
+    case '.tiff':
+      return 'image/tiff';
+    default:
+      return 'application/octet-stream';
+  }
 }

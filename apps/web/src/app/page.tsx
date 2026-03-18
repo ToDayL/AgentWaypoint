@@ -606,6 +606,14 @@ export default function HomePage() {
   }, [latestDiffSummary, parsedDiffFiles]);
   const rawDiffLineCount = useMemo(() => countDiffTextLines(latestDiffSummary), [latestDiffSummary]);
   const previewIsMarkdown = useMemo(() => detectCodeLanguage(previewFilePath) === 'markdown', [previewFilePath]);
+  const previewIsPdf = useMemo(() => isPdfPreviewPath(previewFilePath), [previewFilePath]);
+  const previewIsImage = useMemo(() => isImagePreviewPath(previewFilePath), [previewFilePath]);
+  const previewBinaryUri = useMemo(() => {
+    if (!previewFilePath) {
+      return '';
+    }
+    return `/api/fs/file-content?${new URLSearchParams({ path: previewFilePath }).toString()}`;
+  }, [previewFilePath]);
   const previewCodeMirrorExtensions = useMemo(() => resolveCodeMirrorExtensions(previewFilePath), [previewFilePath]);
 
   const previewPanelView = useMemo(
@@ -619,7 +627,17 @@ export default function HomePage() {
             {previewFileBusy ? <pre>Loading preview…</pre> : null}
             {!previewFileBusy && previewFileError ? <pre>{previewFileError}</pre> : null}
             {!previewFileBusy && !previewFileError ? (
-              previewIsMarkdown ? (
+              previewIsPdf ? (
+                <object className="preview-pdf-object" data={previewBinaryUri} type="application/pdf" aria-label={previewFilePath}>
+                  <a href={previewBinaryUri} target="_blank" rel="noreferrer">
+                    Open PDF
+                  </a>
+                </object>
+              ) : previewIsImage ? (
+                <div className="preview-image-shell">
+                  <img className="preview-image-native" src={previewBinaryUri} alt={previewFilePath} />
+                </div>
+              ) : previewIsMarkdown ? (
                 <div className="chat-markdown preview-markdown">
                   <ReactMarkdown remarkPlugins={CHAT_MARKDOWN_REMARK_PLUGINS}>{previewFileContent}</ReactMarkdown>
                 </div>
@@ -657,6 +675,9 @@ export default function HomePage() {
       previewFileError,
       previewFileContent,
       previewFileTruncated,
+      previewIsPdf,
+      previewIsImage,
+      previewBinaryUri,
       previewIsMarkdown,
       previewCodeMirrorExtensions,
     ],
@@ -1600,6 +1621,11 @@ export default function HomePage() {
       setMobileInsightsOpen(true);
     } else {
       setRightSidebarMode((current) => (current === 'closed' ? 'pop' : current));
+    }
+
+    if (isBinaryPreviewPath(normalizedPath)) {
+      setPreviewFileBusy(false);
+      return;
     }
 
     try {
@@ -4111,6 +4137,29 @@ function applyDirectorySuggestionSelection(value: string, suggestions: string[])
 
 function ensureTrailingSlash(value: string): string {
   return value.endsWith('/') ? value : `${value}/`;
+}
+
+function isImagePreviewPath(filePath: string): boolean {
+  const normalized = filePath.trim().toLowerCase();
+  return (
+    normalized.endsWith('.png') ||
+    normalized.endsWith('.jpg') ||
+    normalized.endsWith('.jpeg') ||
+    normalized.endsWith('.gif') ||
+    normalized.endsWith('.webp') ||
+    normalized.endsWith('.bmp') ||
+    normalized.endsWith('.svg') ||
+    normalized.endsWith('.tif') ||
+    normalized.endsWith('.tiff')
+  );
+}
+
+function isPdfPreviewPath(filePath: string): boolean {
+  return filePath.trim().toLowerCase().endsWith('.pdf');
+}
+
+function isBinaryPreviewPath(filePath: string): boolean {
+  return isPdfPreviewPath(filePath) || isImagePreviewPath(filePath);
 }
 
 function detectCodeLanguage(filePath: string): string {

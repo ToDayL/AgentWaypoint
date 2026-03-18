@@ -15,6 +15,11 @@ export const WorkspaceFileQuerySchema = z.object({
   maxBytes: z.coerce.number().int().min(1024).max(1024 * 1024).optional(),
 });
 
+export const WorkspaceFileContentQuerySchema = z.object({
+  path: z.string().trim().min(1).max(4096),
+});
+
 export type WorkspaceSuggestionQuery = z.infer<typeof WorkspaceSuggestionQuerySchema>;
 export type WorkspaceTreeQuery = z.infer<typeof WorkspaceTreeQuerySchema>;
 export type WorkspaceFileQuery = z.infer<typeof WorkspaceFileQuerySchema>;
+export type WorkspaceFileContentQuery = z.infer<typeof WorkspaceFileContentQuerySchema>;

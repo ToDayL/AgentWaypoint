@@ -87,6 +87,16 @@ export type WorkspaceFileResult = {
   truncated: boolean;
 };
 
+export type WorkspaceFileContentInput = {
+  path: string;
+};
+
+export type WorkspaceFileContentResult = {
+  path: string;
+  content: Buffer;
+  mimeType: string;
+};
+
 export type WorkspaceUploadInput = {
   body: NodeJS.ReadableStream;
   contentType: string;
@@ -189,6 +199,7 @@ export interface RunnerAdapter {
   suggestWorkspaceDirectories(input: WorkspaceSuggestionInput): Promise<string[]>;
   listWorkspaceTree(input: WorkspaceTreeInput): Promise<WorkspaceTreeEntry[]>;
   readWorkspaceFile(input: WorkspaceFileInput): Promise<WorkspaceFileResult>;
+  readWorkspaceFileContent(input: WorkspaceFileContentInput): Promise<WorkspaceFileContentResult>;
   uploadWorkspaceFile(input: WorkspaceUploadInput): Promise<WorkspaceUploadResult>;
 }
 

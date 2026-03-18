@@ -1,8 +1,20 @@
-import { BadRequestException, Controller, Get, Inject, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Inject, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { parseWithZod } from '../../common/validation/zod';
 import { AuthGuard } from '../auth/auth.guard';
-import { WorkspaceFileQuerySchema, WorkspaceSuggestionQuerySchema, WorkspaceTreeQuerySchema } from './filesystem.schemas';
+import {
+  WorkspaceFileContentQuerySchema,
+  WorkspaceFileQuerySchema,
+  WorkspaceSuggestionQuerySchema,
+  WorkspaceTreeQuerySchema,
+} from './filesystem.schemas';
 import { RUNNER_ADAPTER, RunnerAdapter } from './runner.types';
+
+type ReplyLike = {
+  raw: {
+    setHeader: (name: string, value: string) => void;
+    end: (payload?: string | Buffer) => void;
+  };
+};
 
 @Controller('/api/fs')
 @UseGuards(AuthGuard)
@@ -45,6 +57,20 @@ export class FilesystemController {
       });
     } catch (error: unknown) {
       throw new BadRequestException(error instanceof Error ? error.message : 'Failed to read workspace file');
+    }
+  }
+
+  @Get('/file-content')
+  async getWorkspaceFileContent(@Query() query: unknown, @Res() reply: ReplyLike) {
+    const input = parseWithZod(WorkspaceFileContentQuerySchema, query);
+    try {
+      const response = await this.runnerAdapter.readWorkspaceFileContent({ path: input.path });
+      reply.raw.setHeader('Content-Type', response.mimeType);
+      reply.raw.setHeader('Cache-Control', 'no-store');
+      reply.raw.setHeader('X-AgentWaypoint-File-Path', encodeURIComponent(response.path));
+      reply.raw.end(response.content);
+    } catch (error: unknown) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Failed to read workspace file content');
     }
   }
 

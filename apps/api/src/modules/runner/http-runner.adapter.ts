@@ -11,6 +11,8 @@ import {
   ForkThreadResult,
   ResolveTurnApprovalInput,
   WorkspaceFileInput,
+  WorkspaceFileContentInput,
+  WorkspaceFileContentResult,
   WorkspaceFileResult,
   WorkspaceUploadInput,
   WorkspaceUploadResult,
@@ -356,6 +358,54 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       content: contentValue,
       truncated: record.truncated === true,
     };
+  }
+
+  async readWorkspaceFileContent(input: WorkspaceFileContentInput): Promise<WorkspaceFileContentResult> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const query = new URLSearchParams({ path: input.path });
+    const requestPath = `/runner/fs/file-content?${query.toString()}`;
+
+    try {
+      const response = await fetch(`${this.baseUrl}${requestPath}`, {
+        method: 'GET',
+        headers: {
+          accept: '*/*',
+          ...(this.authToken ? { authorization: `Bearer ${this.authToken}` } : {}),
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const responseText = await response.text();
+        const runnerErrorMessage = extractRunnerErrorMessage(responseText, response.status);
+        this.logger.error(
+          `Runner request failed: ${requestPath} -> ${response.status} ${response.statusText} ${responseText}`,
+        );
+        throw new Error(runnerErrorMessage);
+      }
+
+      const content = Buffer.from(await response.arrayBuffer());
+      const mimeType = response.headers.get('content-type')?.trim() || 'application/octet-stream';
+      const pathHeader = response.headers.get('x-agentwaypoint-file-path')?.trim() || '';
+      const pathValue = pathHeader ? decodeURIComponent(pathHeader) : input.path;
+      if (!pathValue) {
+        throw new Error('Runner workspace file content response did not include path');
+      }
+      return {
+        path: pathValue,
+        content,
+        mimeType,
+      };
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        this.logger.error(`Runner request error for ${requestPath}: ${error.message}`, error.stack);
+      } else {
+        this.logger.error(`Runner request error for ${requestPath}`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   async uploadWorkspaceFile(input: WorkspaceUploadInput): Promise<WorkspaceUploadResult> {

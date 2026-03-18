@@ -7,9 +7,13 @@ type Params = {
   params: Promise<{ path: string[] }>;
 };
 
-const ALLOWED_METHODS = new Set(['GET', 'POST', 'PATCH', 'DELETE']);
+const ALLOWED_METHODS = new Set(['GET', 'HEAD', 'POST', 'PATCH', 'DELETE']);
 
 export async function GET(request: NextRequest, context: Params): Promise<Response> {
+  return proxyRequest(request, context);
+}
+
+export async function HEAD(request: NextRequest, context: Params): Promise<Response> {
   return proxyRequest(request, context);
 }
 
@@ -57,7 +61,7 @@ async function proxyRequest(request: NextRequest, context: Params): Promise<Resp
   const contentLengthHeader = request.headers.get('content-length');
   let rawJsonBody = '';
   let upstreamBody: BodyInit | undefined;
-  if (method !== 'GET' && method !== 'DELETE') {
+  if (method !== 'GET' && method !== 'HEAD' && method !== 'DELETE') {
     if (isJsonRequest) {
       rawJsonBody = await request.text();
       if (rawJsonBody.trim().length > 0) {
@@ -119,14 +123,15 @@ async function proxyRequest(request: NextRequest, context: Params): Promise<Resp
       responseHeaders['set-cookie'] = upstreamSetCookie;
     }
 
-    if (noBodyStatus) {
+    if (noBodyStatus || method === 'HEAD') {
       return new Response(null, {
         status: upstream.status,
         headers: responseHeaders,
       });
     }
 
-    return new Response(await upstream.text(), {
+    const responseBuffer = await upstream.arrayBuffer();
+    return new Response(responseBuffer, {
       status: upstream.status,
       headers: responseHeaders,
     });
