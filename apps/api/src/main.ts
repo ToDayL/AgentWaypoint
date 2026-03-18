@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import multipart from '@fastify/multipart';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
@@ -9,6 +10,12 @@ async function bootstrap(): Promise<void> {
     AppModule,
     new FastifyAdapter({ logger: true }),
   );
+  await app.register(multipart, {
+    limits: {
+      fileSize: 20 * 1024 * 1024,
+      files: 1,
+    },
+  });
   app.useGlobalFilters(new HttpExceptionFilter());
 
   const port = Number(process.env.PORT ?? 4000);

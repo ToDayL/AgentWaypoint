@@ -1,6 +1,7 @@
 'use client';
 
 import {
+  ChangeEvent,
   CSSProperties,
   KeyboardEvent,
   PointerEvent as ReactPointerEvent,
@@ -35,6 +36,7 @@ import {
   GitFork,
   Info,
   Menu,
+  Paperclip,
   Pin,
   Plus,
   RefreshCw,
@@ -203,6 +205,13 @@ type WorkspaceFileResponse = {
   path: string;
   content: string;
   truncated: boolean;
+};
+
+type WorkspaceUploadResponse = {
+  path: string;
+  relativePath: string;
+  size: number;
+  mimeType: string;
 };
 
 type RateLimitWindow = {
@@ -449,6 +458,8 @@ export default function HomePage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [compactingContext, setCompactingContext] = useState(false);
+  const [uploadingFiles, setUploadingFiles] = useState(false);
+  const [uploadError, setUploadError] = useState('');
   const eventSourceRef = useRef<EventSource | null>(null);
   const turnPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pendingTurnCreateAbortRef = useRef<AbortController | null>(null);
@@ -463,6 +474,7 @@ export default function HomePage() {
   } | null>(null);
   const chatThreadRef = useRef<HTMLDivElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const chatAtBottomRef = useRef(true);
   const chatScrollIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const chatScrollSettleRafRef = useRef<number | null>(null);
@@ -1827,6 +1839,48 @@ export default function HomePage() {
   async function handleConfirmCompactFromPanel(): Promise<void> {
     await handleManualCompact();
     closeActionPanel();
+  }
+
+  function handleOpenUploadDialog(): void {
+    setUploadError('');
+    uploadInputRef.current?.click();
+  }
+
+  async function handleFileInputChange(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const files = event.target.files;
+    if (!files || files.length === 0) {
+      return;
+    }
+    await uploadSelectedFiles(Array.from(files));
+    event.target.value = '';
+  }
+
+  async function uploadSelectedFiles(files: File[]): Promise<void> {
+    const workspacePath = activeWorkspacePath.trim();
+    if (!workspacePath) {
+      setUploadError('Configure workspace path before uploading files');
+      return;
+    }
+    if (files.length === 0) {
+      return;
+    }
+
+    setUploadingFiles(true);
+    setUploadError('');
+    try {
+      for (const file of files) {
+        const formData = new FormData();
+        formData.append('workspacePath', workspacePath);
+        formData.append('file', file, file.name);
+        const uploaded = await uploadRequest<WorkspaceUploadResponse>('/api/fs/upload', formData);
+        appendWorkspacePathMention(uploaded.path);
+      }
+      await loadWorkspaceTree(workspacePath);
+    } catch (requestError) {
+      setUploadError(extractMessage(requestError));
+    } finally {
+      setUploadingFiles(false);
+    }
   }
 
   async function handleSendTurn(): Promise<void> {
@@ -3642,7 +3696,26 @@ export default function HomePage() {
               ) : null}
 
               <div className="chat-composer">
+                <input
+                  ref={uploadInputRef}
+                  type="file"
+                  multiple
+                  className="upload-input-hidden"
+                  onChange={(event) => {
+                    void handleFileInputChange(event);
+                  }}
+                />
                 <div className="chat-composer-row">
+                  <button
+                    type="button"
+                    className="icon-button composer-upload-button"
+                    title="Upload File"
+                    aria-label="Upload File"
+                    onClick={handleOpenUploadDialog}
+                    disabled={busy || uploadingFiles || !activeWorkspacePath}
+                  >
+                    <Paperclip />
+                  </button>
                   <textarea
                     ref={promptInputRef}
                     value={prompt}
@@ -3653,7 +3726,7 @@ export default function HomePage() {
                   />
                   <button
                     type="button"
-                    className="icon-button"
+                    className="icon-button composer-send-button"
                     title={canSteerTurn ? 'Steer Current Turn' : 'Send'}
                     aria-label={canSteerTurn ? 'Steer Current Turn' : 'Send'}
                     onClick={() => void handleSendTurn()}
@@ -3662,6 +3735,8 @@ export default function HomePage() {
                     <Send />
                   </button>
                 </div>
+                {uploadingFiles ? <p className="composer-upload-hint">Uploading file...</p> : null}
+                {uploadError ? <p className="composer-upload-error">{uploadError}</p> : null}
               </div>
             </section> : null}
 
@@ -3845,6 +3920,37 @@ async function apiRequest<T>(
     const compactText = text.trim().replace(/\s+/g, ' ');
     const detail = compactText ? `: ${compactText.slice(0, 180)}` : '';
     throw new Error(`Request failed (${response.status})${detail}`);
+  }
+  return (jsonPayload ?? ({} as T)) as T;
+}
+
+async function uploadRequest<T>(path: string, body: FormData): Promise<T> {
+  const response = await fetch(path, {
+    method: 'POST',
+    cache: 'no-store',
+    body,
+  });
+
+  const text = await response.text();
+  const contentType = response.headers.get('content-type') ?? '';
+  let jsonPayload: unknown = null;
+  if (text) {
+    const looksLikeJson = contentType.includes('application/json') || /^[\[{]/.test(text.trim());
+    if (looksLikeJson) {
+      try {
+        jsonPayload = JSON.parse(text) as unknown;
+      } catch {
+        jsonPayload = null;
+      }
+    }
+  }
+  if (!response.ok) {
+    if (jsonPayload) {
+      throw new Error(extractApiMessage(jsonPayload, `Upload failed (${response.status})`));
+    }
+    const compactText = text.trim().replace(/\s+/g, ' ');
+    const detail = compactText ? `: ${compactText.slice(0, 180)}` : '';
+    throw new Error(`Upload failed (${response.status})${detail}`);
   }
   return (jsonPayload ?? ({} as T)) as T;
 }

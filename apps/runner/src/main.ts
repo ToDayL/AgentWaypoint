@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
+import Busboy from 'busboy';
 import { CodexBackend } from './codex-backend.js';
 import { FilesystemBackend } from './filesystem-backend.js';
 import type {
@@ -228,6 +229,18 @@ const server = createServer(async (request, response) => {
     if (pathname === '/runner/fs/ensure-directory') {
       const payload = parseEnsureDirectoryBody(await readJsonBody(request));
       const result = await filesystemBackend.ensureWorkspaceDirectory(payload.path);
+      sendJson(response, 200, result);
+      return;
+    }
+
+    if (pathname === '/runner/fs/upload') {
+      const upload = await parseWorkspaceUploadForm(request);
+      const result = await filesystemBackend.saveWorkspaceUpload({
+        workspacePath: upload.workspacePath,
+        fileName: upload.fileName,
+        mimeType: upload.mimeType,
+        content: upload.content,
+      });
       sendJson(response, 200, result);
       return;
     }
@@ -490,6 +503,106 @@ function readOptionalString(value: unknown): string | null {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+async function parseWorkspaceUploadForm(
+  request: IncomingMessage,
+): Promise<{ workspacePath: string; fileName: string; mimeType: string; content: Buffer }> {
+  const contentType = request.headers['content-type'];
+  if (typeof contentType !== 'string' || !contentType.toLowerCase().includes('multipart/form-data')) {
+    throw new Error('content-type must be multipart/form-data');
+  }
+
+  return await new Promise((resolve, reject) => {
+    const parser = Busboy({
+      headers: request.headers,
+      limits: {
+        files: 1,
+        fields: 8,
+        fileSize: 20 * 1024 * 1024,
+      },
+    });
+
+    let workspacePath = '';
+    let fileName = '';
+    let mimeType = 'application/octet-stream';
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let hasFile = false;
+    let fileTooLarge = false;
+
+    parser.on('field', (name: string, value: string) => {
+      if (name === 'workspacePath' && workspacePath.length === 0) {
+        workspacePath = value.trim();
+      }
+    });
+
+    parser.on(
+      'file',
+      (
+        name: string,
+        stream: NodeJS.ReadableStream & { resume: () => void; on: (event: string, handler: (...args: unknown[]) => void) => void },
+        info: { filename: string; mimeType: string },
+      ) => {
+      if (name !== 'file') {
+        stream.resume();
+        return;
+      }
+      hasFile = true;
+      if (typeof info.filename === 'string' && info.filename.trim().length > 0) {
+        fileName = info.filename.trim();
+      }
+      if (typeof info.mimeType === 'string' && info.mimeType.trim().length > 0) {
+        mimeType = info.mimeType.trim();
+      }
+
+      stream.on('data', (chunk: Buffer | string) => {
+        const bufferChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        totalBytes += bufferChunk.length;
+        chunks.push(bufferChunk);
+      });
+      stream.on('limit', () => {
+        fileTooLarge = true;
+      });
+      stream.on('error', (error: unknown) => {
+        reject(error instanceof Error ? error : new Error('Failed to read upload stream'));
+      });
+      },
+    );
+
+    parser.on('filesLimit', () => {
+      reject(new Error('Only one file can be uploaded per request'));
+    });
+    parser.on('error', (error: unknown) => {
+      reject(error instanceof Error ? error : new Error('Failed to parse multipart request'));
+    });
+    parser.on('finish', () => {
+      if (!workspacePath) {
+        reject(new Error('workspacePath is required'));
+        return;
+      }
+      if (!hasFile) {
+        reject(new Error('file is required'));
+        return;
+      }
+      if (fileTooLarge) {
+        reject(new Error('Uploaded file exceeds 20MB limit'));
+        return;
+      }
+      if (totalBytes <= 0) {
+        reject(new Error('Uploaded file is empty'));
+        return;
+      }
+      resolve({
+        workspacePath,
+        fileName: fileName || 'upload.bin',
+        mimeType,
+        content: Buffer.concat(chunks, totalBytes),
+      });
+    });
+
+    request.pipe(parser);
+  });
 }
 
 async function startMockExecution(turn: ActiveMockTurn): Promise<void> {
