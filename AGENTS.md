@@ -124,3 +124,13 @@ Or ensure host-accessible Postgres and correct `DATABASE_URL`.
 
 ### Engine warning about Node version
 If you see Node version warnings, switch to Node `22.x` to match `package.json` engines.
+
+## Codex App Server Schema Rule
+
+When developing Codex-related features, always:
+- Check `doc/Codex-App-Server-Documentation.md` first.
+- Validate request/event fields against generated schema artifacts, using:
+  - `codex app-server generate-ts --out ./schemas`
+  - `codex app-server generate-json-schema --out ./schemas`
+
+Do not rely on inferred or guessed fields when schema-generated definitions are available.
