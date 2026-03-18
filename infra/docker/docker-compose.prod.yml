@@ -26,15 +26,10 @@ services:
   web:
     build:
       context: ../..
-      dockerfile: infra/docker/Dockerfile.dev
+      dockerfile: infra/docker/Dockerfile.prod
+      target: web-prod
     container_name: agentwaypoint-prod-web
     working_dir: /workspace
-    command: >
-      sh -lc "
-      pnpm install --frozen-lockfile --reporter=append-only &&
-      pnpm --filter @agentwaypoint/web build &&
-      pnpm --filter @agentwaypoint/web start
-      "
     environment:
       NODE_ENV: production
       CI: "true"
@@ -51,10 +46,6 @@ services:
       - '3000'
     extra_hosts:
       - 'host.docker.internal:host-gateway'
-    volumes:
-      - ../..:/workspace
-      - prod_pnpm_store:/pnpm
-      - prod_web_node_modules:/workspace/node_modules
     depends_on:
       api:
         condition: service_started
@@ -66,16 +57,10 @@ services:
   api:
     build:
       context: ../..
-      dockerfile: infra/docker/Dockerfile.dev
+      dockerfile: infra/docker/Dockerfile.prod
+      target: api-prod
     container_name: agentwaypoint-prod-api
     working_dir: /workspace
-    command: >
-      sh -lc "
-      pnpm install --frozen-lockfile --reporter=append-only &&
-      pnpm --filter @agentwaypoint/api prisma:generate &&
-      pnpm --filter @agentwaypoint/api build &&
-      pnpm --filter @agentwaypoint/api start
-      "
     environment:
       NODE_ENV: production
       CI: "true"
@@ -101,10 +86,6 @@ services:
       - '4000'
     extra_hosts:
       - 'host.docker.internal:host-gateway'
-    volumes:
-      - ../..:/workspace
-      - prod_pnpm_store:/pnpm
-      - prod_api_node_modules:/workspace/node_modules
     depends_on:
       postgres:
         condition: service_started
@@ -132,8 +113,5 @@ services:
       - ${PROD_REDIS_DATA_MOUNT:-prod_redis_data}:/data
 
 volumes:
-  prod_web_node_modules:
-  prod_api_node_modules:
-  prod_pnpm_store:
   prod_postgres_data:
   prod_redis_data:
