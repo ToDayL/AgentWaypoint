@@ -528,6 +528,19 @@ export default function HomePage() {
 
     return { workspace, model, approval, sandbox };
   }, [sessionInfoTurn, selectedSession, selectedProject]);
+  const currentSessionDebugInfo = useMemo(
+    () =>
+      [
+        `sessionId=${selectedSessionId || '-'}`,
+        `sessionStatus=${selectedSession?.status || '-'}`,
+        `activeTurnId=${activeTurnId || '-'}`,
+        `turnStatus=${turnStatus || '-'}`,
+        `streamBubbleTurnId=${streamBubbleTurnId || '-'}`,
+        `streamActive=${streamActive ? 'true' : 'false'}`,
+        `pendingApprovalId=${pendingApproval?.id || '-'}`,
+      ].join('\n'),
+    [selectedSessionId, selectedSession?.status, activeTurnId, turnStatus, streamBubbleTurnId, streamActive, pendingApproval?.id],
+  );
   const activeWorkspacePath = useMemo(
     () =>
       sessionInfoTurn?.effectiveCwd?.trim() ||
@@ -2245,7 +2258,9 @@ export default function HomePage() {
 
         if (envelope.type === 'turn.approval.resolved') {
           setTurnStatus('running');
-          setPendingApproval(null);
+          void syncTurnState(turnId).catch(() => {
+            // Keep current UI state on transient sync failure.
+          });
         }
 
         if (envelope.type === 'turn.completed' || envelope.type === 'turn.failed' || envelope.type === 'turn.cancelled') {
@@ -3855,6 +3870,7 @@ export default function HomePage() {
                   {sessionInfoOpen ? (
                     <article className="session-info-card">
                       <h3>Current Session</h3>
+                      <p className="session-debug-inline">Session ID: {selectedSessionId || '-'}</p>
                       <dl>
                         <dt>Workspace</dt>
                         <dd>{resolvedSessionInfo.workspace}</dd>
@@ -3864,6 +3880,10 @@ export default function HomePage() {
                         <dd>{resolvedSessionInfo.approval}</dd>
                         <dt>Sandbox</dt>
                         <dd>{resolvedSessionInfo.sandbox}</dd>
+                        <dt>Debug</dt>
+                        <dd>
+                          <pre className="session-debug-lines">{currentSessionDebugInfo}</pre>
+                        </dd>
                       </dl>
                     </article>
                   ) : null}
