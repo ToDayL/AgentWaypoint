@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
   AccountRateLimits,
+  AvailableSkill,
   AvailableModel,
   CancelTurnInput,
   CloseThreadInput,
@@ -10,6 +11,7 @@ import {
   ForkThreadInput,
   ForkThreadResult,
   ResolveTurnApprovalInput,
+  SkillListInput,
   WorkspaceFileInput,
   WorkspaceFileContentInput,
   WorkspaceFileContentResult,
@@ -222,6 +224,30 @@ export class HttpRunnerAdapter implements RunnerAdapter {
         isDefault: item.isDefault === true,
       }))
       .filter((item) => item.id.length > 0 && item.model.length > 0);
+  }
+
+  async listSkills(input: SkillListInput): Promise<AvailableSkill[]> {
+    const query = new URLSearchParams();
+    if (typeof input.cwd === 'string' && input.cwd.trim()) {
+      query.set('cwd', input.cwd.trim());
+    }
+    const response = await this.request({
+      method: 'GET',
+      path: query.size > 0 ? `/runner/skills?${query.toString()}` : '/runner/skills',
+    });
+    if (!response || typeof response !== 'object' || !Array.isArray((response as { data?: unknown }).data)) {
+      throw new Error('Runner skill list response is invalid');
+    }
+
+    return ((response as { data: unknown[] }).data ?? [])
+      .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+      .map((item) => ({
+        name: typeof item.name === 'string' ? item.name : '',
+        description: typeof item.description === 'string' ? item.description : '',
+        path: typeof item.path === 'string' ? item.path : '',
+        enabled: item.enabled !== false,
+      }))
+      .filter((item) => item.name.length > 0);
   }
 
   async forkThread(input: ForkThreadInput): Promise<ForkThreadResult> {

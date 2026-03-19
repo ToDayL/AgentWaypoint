@@ -237,7 +237,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .insights-pane {
@@ -523,7 +523,8 @@ body {
   padding: 0.65rem;
   position: sticky;
   bottom: 0;
-  z-index: 2;
+  z-index: 6;
+  overflow: visible;
   backdrop-filter: blur(6px);
 }
 
@@ -548,6 +549,72 @@ body {
 .chat-composer-row textarea {
   grid-area: textarea;
   height: 100%;
+}
+
+.composer-textarea-wrap {
+  grid-area: textarea;
+  position: relative;
+}
+
+.composer-textarea-wrap textarea {
+  width: 100%;
+}
+
+.composer-skill-suggestions {
+  position: absolute;
+  width: 100%;
+  left: 0;
+  right: auto;
+  bottom: calc(100% + 0.22rem);
+  z-index: 30;
+  max-height: min(55vh, 460px);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-panel) 96%, #0f1420 4%);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+}
+
+.composer-skill-suggestion-item {
+  margin: 0;
+  width: 100%;
+  border: none;
+  border-radius: 0;
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.78rem;
+  background: transparent;
+  display: block;
+}
+
+.composer-skill-suggestion-item:hover:enabled,
+.composer-skill-suggestion-item.active {
+  background: var(--bg-hover);
+  transform: none;
+}
+
+.composer-skill-name {
+  font-weight: 600;
+  color: var(--text-main);
+  flex: 0 0 auto;
+}
+
+.composer-skill-description {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-skill-line {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 .chat-composer-row .composer-upload-button {
@@ -576,7 +643,7 @@ body {
   color: #ff9ea2;
 }
 
-.chat-composer-row button:not(.icon-button) {
+.chat-composer-row > button:not(.icon-button) {
   margin-top: 0;
   width: 96px;
   min-width: 96px;

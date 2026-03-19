@@ -5,6 +5,7 @@ import {
   CSSProperties,
   KeyboardEvent,
   PointerEvent as ReactPointerEvent,
+  SyntheticEvent,
   useEffect,
   useMemo,
   useRef,
@@ -213,6 +214,10 @@ type WorkspaceUploadResponse = {
   size: number;
   mimeType: string;
 };
+type SkillOption = {
+  name: string;
+  description: string;
+};
 
 type RateLimitWindow = {
   usedPercent: number | null;
@@ -414,7 +419,11 @@ export default function HomePage() {
   const [newSessionModelOverride, setNewSessionModelOverride] = useState('');
   const [newSessionSandboxOverride, setNewSessionSandboxOverride] = useState('');
   const [newSessionApprovalPolicyOverride, setNewSessionApprovalPolicyOverride] = useState('');
+  const [availableSkills, setAvailableSkills] = useState<SkillOption[]>([]);
   const [prompt, setPrompt] = useState('');
+  const [promptCursor, setPromptCursor] = useState(0);
+  const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
+  const [skillSuggestionSuppressedKey, setSkillSuggestionSuppressedKey] = useState('');
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [turns, setTurns] = useState<TurnSummary[]>([]);
@@ -557,6 +566,32 @@ export default function HomePage() {
     const parts = normalized.split(/[\\/]/).filter((part) => part.length > 0);
     return parts[parts.length - 1] ?? normalized;
   }, [activeWorkspacePath]);
+  const activeSkillToken = useMemo(() => findSkillTokenContext(prompt, promptCursor), [prompt, promptCursor]);
+  const filteredSkillSuggestions = useMemo(() => {
+    if (!activeSkillToken) {
+      return [];
+    }
+    const loweredPrefix = activeSkillToken.prefix.toLowerCase();
+    const startsWithMatches = availableSkills.filter((skill) => skill.name.toLowerCase().startsWith(loweredPrefix));
+    const containsMatches = availableSkills.filter(
+      (skill) => !skill.name.toLowerCase().startsWith(loweredPrefix) && skill.name.toLowerCase().includes(loweredPrefix),
+    );
+    return [...startsWithMatches, ...containsMatches];
+  }, [availableSkills, activeSkillToken]);
+  const activeSkillSuggestionKey = useMemo(() => {
+    if (!activeSkillToken) {
+      return '';
+    }
+    return `${activeSkillToken.start}:${activeSkillToken.end}:${activeSkillToken.prefix.toLowerCase()}`;
+  }, [activeSkillToken]);
+  const skillSuggestionVisible =
+    !!activeSkillToken &&
+    filteredSkillSuggestions.length > 0 &&
+    skillSuggestionSuppressedKey !== activeSkillSuggestionKey;
+  const selectedSkillSuggestion =
+    skillSuggestionVisible && filteredSkillSuggestions.length > 0
+      ? filteredSkillSuggestions[Math.min(skillSuggestionIndex, filteredSkillSuggestions.length - 1)] ?? null
+      : null;
   const displayedMessages = useMemo(() => {
     const base = messages.map((message) => ({ ...message, streaming: false }));
     if (!streamBubbleTurnId) {
@@ -952,6 +987,70 @@ export default function HomePage() {
       setPreviewFileError('');
     }
   }, [activeWorkspacePath]);
+
+  useEffect(() => {
+    if (!mounted || !authenticated || !activeWorkspacePath) {
+      setAvailableSkills([]);
+      return;
+    }
+
+    const controller = new AbortController();
+    void apiRequest<{ data?: Array<{ name?: string; description?: string; enabled?: boolean }> }>(
+      `/api/skills?${new URLSearchParams({ cwd: activeWorkspacePath }).toString()}`,
+      { method: 'GET', signal: controller.signal },
+    )
+      .then((response) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        const skills = Array.isArray(response.data)
+          ? response.data
+              .filter(
+                (item): item is { name?: string; description?: string; enabled?: boolean } =>
+                  !!item && typeof item === 'object',
+              )
+              .map((item) => ({
+                name: typeof item.name === 'string' ? item.name : '',
+                description: typeof item.description === 'string' ? item.description : '',
+                enabled: item.enabled !== false,
+              }))
+              .filter((item) => item.name.length > 0 && item.enabled)
+              .map(({ name, description }) => ({ name, description }))
+          : [];
+        setAvailableSkills(skills);
+      })
+      .catch((requestError) => {
+        if (isAbortError(requestError)) {
+          return;
+        }
+        setAvailableSkills([]);
+      });
+
+    return () => {
+      controller.abort();
+    };
+  }, [mounted, authenticated, activeWorkspacePath]);
+
+  useEffect(() => {
+    setSkillSuggestionIndex(0);
+  }, [activeSkillSuggestionKey]);
+
+  useEffect(() => {
+    if (!skillSuggestionVisible) {
+      setSkillSuggestionIndex(0);
+      return;
+    }
+    setSkillSuggestionIndex((current) => Math.max(0, Math.min(current, filteredSkillSuggestions.length - 1)));
+  }, [skillSuggestionVisible, filteredSkillSuggestions.length]);
+
+  useEffect(() => {
+    if (!skillSuggestionSuppressedKey || !activeSkillSuggestionKey) {
+      return;
+    }
+    if (skillSuggestionSuppressedKey !== activeSkillSuggestionKey) {
+      setSkillSuggestionSuppressedKey('');
+    }
+  }, [skillSuggestionSuppressedKey, activeSkillSuggestionKey]);
 
   useEffect(() => {
     const container = chatThreadRef.current;
@@ -2608,6 +2707,32 @@ export default function HomePage() {
   }
 
   function handlePromptKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    if (skillSuggestionVisible && filteredSkillSuggestions.length > 0) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setSkillSuggestionIndex((current) => (current + 1) % filteredSkillSuggestions.length);
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setSkillSuggestionIndex((current) =>
+          current === 0 ? filteredSkillSuggestions.length - 1 : current - 1,
+        );
+        return;
+      }
+      if ((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') {
+        event.preventDefault();
+        if (selectedSkillSuggestion) {
+          applySkillSuggestion(selectedSkillSuggestion);
+        }
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setSkillSuggestionSuppressedKey(activeSkillSuggestionKey);
+        return;
+      }
+    }
     if (event.key !== 'Enter' || event.shiftKey) {
       return;
     }
@@ -2616,6 +2741,40 @@ export default function HomePage() {
       return;
     }
     void handleSendTurn();
+  }
+
+  function handlePromptChange(event: ChangeEvent<HTMLTextAreaElement>): void {
+    const nextPrompt = event.target.value;
+    const selectionStart = event.target.selectionStart ?? nextPrompt.length;
+    setPrompt(nextPrompt);
+    setPromptCursor(selectionStart);
+  }
+
+  function handlePromptSelection(event: SyntheticEvent<HTMLTextAreaElement>): void {
+    const target = event.currentTarget;
+    setPromptCursor(target.selectionStart ?? prompt.length);
+  }
+
+  function applySkillSuggestion(skill: SkillOption): void {
+    if (!activeSkillToken) {
+      return;
+    }
+    const replacement = `$${skill.name} `;
+    const nextPrompt = `${prompt.slice(0, activeSkillToken.start)}${replacement}${prompt.slice(activeSkillToken.end)}`;
+    const nextCursor = activeSkillToken.start + replacement.length;
+    setPrompt(nextPrompt);
+    setPromptCursor(nextCursor);
+    setSkillSuggestionSuppressedKey('');
+    if (typeof window !== 'undefined') {
+      window.requestAnimationFrame(() => {
+        const input = promptInputRef.current;
+        if (!input) {
+          return;
+        }
+        input.focus();
+        input.setSelectionRange(nextCursor, nextCursor);
+      });
+    }
   }
 
   function renderFileBrowserLevel(parentPath: string) {
@@ -3766,14 +3925,39 @@ export default function HomePage() {
                   >
                     <Paperclip />
                   </button>
-                  <textarea
-                    ref={promptInputRef}
-                    value={prompt}
-                    onChange={(event) => setPrompt(event.target.value)}
-                    onKeyDown={handlePromptKeyDown}
-                    placeholder="Send a message..."
-                    rows={3}
-                  />
+                  <div className="composer-textarea-wrap">
+                    <textarea
+                      ref={promptInputRef}
+                      value={prompt}
+                      onChange={handlePromptChange}
+                      onSelect={handlePromptSelection}
+                      onClick={handlePromptSelection}
+                      onKeyUp={handlePromptSelection}
+                      onKeyDown={handlePromptKeyDown}
+                      placeholder="Send a message..."
+                      rows={3}
+                    />
+                    {skillSuggestionVisible ? (
+                      <div className="composer-skill-suggestions">
+                        {filteredSkillSuggestions.map((skill, index) => (
+                          <button
+                            key={skill.name}
+                            type="button"
+                            className={`composer-skill-suggestion-item ${index === skillSuggestionIndex ? 'active' : ''}`}
+                            onMouseDown={(event) => {
+                              event.preventDefault();
+                              applySkillSuggestion(skill);
+                            }}
+                          >
+                            <span className="composer-skill-line">
+                              <span className="composer-skill-name">${skill.name}</span>
+                              <span className="composer-skill-description">{skill.description || 'Skill'}</span>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
                   <button
                     type="button"
                     className="icon-button composer-send-button"
@@ -4162,6 +4346,28 @@ function applyDirectorySuggestionSelection(value: string, suggestions: string[])
     return value;
   }
   return suggestions.includes(value) ? ensureTrailingSlash(value) : value;
+}
+
+function findSkillTokenContext(input: string, cursor: number): { start: number; end: number; prefix: string } | null {
+  const safeCursor = Math.max(0, Math.min(cursor, input.length));
+  const beforeCursor = input.slice(0, safeCursor);
+  const match = beforeCursor.match(/(?:^|\s)\$([A-Za-z0-9_-]*)$/);
+  if (!match) {
+    return null;
+  }
+  const prefix = match[1] ?? '';
+  const start = safeCursor - prefix.length - 1;
+  if (start < 0) {
+    return null;
+  }
+  if (start > 0 && !/\s/.test(input[start - 1] ?? '')) {
+    return null;
+  }
+  let end = safeCursor;
+  while (end < input.length && /[A-Za-z0-9_-]/.test(input[end] ?? '')) {
+    end += 1;
+  }
+  return { start, end, prefix };
 }
 
 function ensureTrailingSlash(value: string): string {

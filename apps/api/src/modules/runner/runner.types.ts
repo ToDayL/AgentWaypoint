@@ -18,6 +18,13 @@ export type AvailableModel = {
   isDefault: boolean;
 };
 
+export type AvailableSkill = {
+  name: string;
+  description: string;
+  path: string;
+  enabled: boolean;
+};
+
 export type CancelTurnInput = {
   turnId: string;
 };
@@ -110,6 +117,10 @@ export type WorkspaceUploadResult = {
   mimeType: string;
 };
 
+export type SkillListInput = {
+  cwd?: string | null;
+};
+
 export type RateLimitWindow = {
   usedPercent: number | null;
   resetsAt: number | null;
@@ -192,6 +203,7 @@ export interface RunnerAdapter {
   resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void>;
   readAccountRateLimits(): Promise<AccountRateLimits>;
   listModels(): Promise<AvailableModel[]>;
+  listSkills(input: SkillListInput): Promise<AvailableSkill[]>;
   forkThread(input: ForkThreadInput): Promise<ForkThreadResult>;
   closeThread(input: CloseThreadInput): Promise<void>;
   compactThread(input: CompactThreadInput): Promise<void>;

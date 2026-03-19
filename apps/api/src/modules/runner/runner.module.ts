@@ -6,6 +6,7 @@ import { HttpRunnerAdapter } from './http-runner.adapter';
 import { ModelsController } from './models.controller';
 import { MockRunnerAdapter } from './mock-runner.adapter';
 import { RUNNER_ADAPTER } from './runner.types';
+import { SkillsController } from './skills.controller';
 
 @Injectable()
 class RunnerModeLogger implements OnModuleInit {
@@ -26,7 +27,7 @@ class RunnerModeLogger implements OnModuleInit {
 
 @Module({
   imports: [PrismaModule, AuthModule],
-  controllers: [ModelsController, FilesystemController],
+  controllers: [ModelsController, SkillsController, FilesystemController],
   providers: [
     MockRunnerAdapter,
     HttpRunnerAdapter,

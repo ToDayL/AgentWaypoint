@@ -21,6 +21,13 @@ export type ModelListItem = {
   isDefault: boolean;
 };
 
+export type SkillListItem = {
+  name: string;
+  description: string;
+  path: string;
+  enabled: boolean;
+};
+
 export type CancelTurnBody = {
   turnId: string;
 };

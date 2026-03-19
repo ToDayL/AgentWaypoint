@@ -19,7 +19,12 @@ export const WorkspaceFileContentQuerySchema = z.object({
   path: z.string().trim().min(1).max(4096),
 });
 
+export const SkillsQuerySchema = z.object({
+  cwd: z.string().trim().min(1).max(4096).optional(),
+});
+
 export type WorkspaceSuggestionQuery = z.infer<typeof WorkspaceSuggestionQuerySchema>;
 export type WorkspaceTreeQuery = z.infer<typeof WorkspaceTreeQuerySchema>;
 export type WorkspaceFileQuery = z.infer<typeof WorkspaceFileQuerySchema>;
 export type WorkspaceFileContentQuery = z.infer<typeof WorkspaceFileContentQuerySchema>;
+export type SkillsQuery = z.infer<typeof SkillsQuerySchema>;

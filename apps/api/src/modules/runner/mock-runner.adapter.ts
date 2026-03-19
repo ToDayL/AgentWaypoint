@@ -7,6 +7,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   AccountRateLimits,
+  AvailableSkill,
   AvailableModel,
   CancelTurnInput,
   CloseThreadInput,
@@ -16,6 +17,7 @@ import {
   ForkThreadInput,
   ForkThreadResult,
   ResolveTurnApprovalInput,
+  SkillListInput,
   RunnerStreamEvent,
   RunnerAdapter,
   SteerTurnInput,
@@ -172,6 +174,10 @@ export class MockRunnerAdapter implements RunnerAdapter {
         isDefault: true,
       },
     ];
+  }
+
+  async listSkills(_input: SkillListInput): Promise<AvailableSkill[]> {
+    return [];
   }
 
   async forkThread(input: ForkThreadInput): Promise<ForkThreadResult> {

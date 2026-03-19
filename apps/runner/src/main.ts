@@ -13,6 +13,7 @@ import type {
   EnsureDirectoryBody,
   ForkThreadBody,
   ModelListItem,
+  SkillListItem,
   ResolveApprovalBody,
   RunnerBackend,
   RunnerEventType,
@@ -77,6 +78,14 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && pathname === '/runner/models') {
       sendJson(response, 200, {
         data: await listModels(),
+      });
+      return;
+    }
+
+    if (request.method === 'GET' && pathname === '/runner/skills') {
+      const cwd = (url.searchParams.get('cwd') ?? '').trim() || null;
+      sendJson(response, 200, {
+        data: await listSkills(cwd),
       });
       return;
     }
@@ -661,6 +670,13 @@ async function listModels(): Promise<ModelListItem[]> {
   }
 
   return codexBackend.listModels();
+}
+
+async function listSkills(cwd: string | null): Promise<SkillListItem[]> {
+  if (runnerBackend === 'mock') {
+    return [];
+  }
+  return codexBackend.listSkills(cwd?.trim() || codexDefaultCwd);
 }
 
 function ensureTurnStreamState(

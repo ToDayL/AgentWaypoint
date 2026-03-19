@@ -9,6 +9,7 @@ import type {
   CompactThreadBody,
   ForkThreadBody,
   ModelListItem,
+  SkillListItem,
   PendingApprovalRequest,
   ResolveApprovalBody,
   RunnerEventType,
@@ -92,6 +93,49 @@ export class CodexBackend {
     }
 
     return items;
+  }
+
+  async listSkills(cwd: string): Promise<SkillListItem[]> {
+    const worker = await this.ensureCodexWorker();
+    await worker.readyPromise;
+
+    const result = (await this.sendWorkerRequest(worker, 'skills/list', {
+      cwds: [cwd],
+      forceReload: false,
+    })) as Record<string, unknown>;
+
+    const entries = Array.isArray(result.data) ? result.data : [];
+    const skillItems: SkillListItem[] = [];
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') {
+        continue;
+      }
+      const skills = Array.isArray((entry as { skills?: unknown }).skills) ? (entry as { skills: unknown[] }).skills : [];
+      for (const skillEntry of skills) {
+        if (!skillEntry || typeof skillEntry !== 'object') {
+          continue;
+        }
+        const record = skillEntry as Record<string, unknown>;
+        const name = readOptionalString(record.name) ?? '';
+        if (!name) {
+          continue;
+        }
+        skillItems.push({
+          name,
+          description: readOptionalString(record.description) ?? '',
+          path: readOptionalString(record.path) ?? '',
+          enabled: record.enabled !== false,
+        });
+      }
+    }
+
+    const deduped = new Map<string, SkillListItem>();
+    for (const item of skillItems) {
+      if (!deduped.has(item.name)) {
+        deduped.set(item.name, item);
+      }
+    }
+    return Array.from(deduped.values());
   }
 
   async readAccountRateLimits(): Promise<Record<string, unknown>> {
