@@ -342,6 +342,7 @@ const RIGHT_PANE_MIN_WIDTH = 280;
 const RIGHT_PANE_MAX_PIN_RATIO = 0.75;
 const RIGHT_PANE_POP_CHAT_CLEARANCE = 320;
 const FILE_NODE_LONG_PRESS_MS = 500;
+const SESSION_DEBUG_INFO_ENABLED = process.env.NODE_ENV === 'development';
 type LeftSidebarTab = 'explorer' | 'fileBrowser' | 'config';
 type InsightsTab = 'preview' | 'diff' | 'events';
 type SidebarMode = 'closed' | 'pop' | 'pin';
@@ -4054,7 +4055,9 @@ export default function HomePage() {
                   {sessionInfoOpen ? (
                     <article className="session-info-card">
                       <h3>Current Session</h3>
-                      <p className="session-debug-inline">Session ID: {selectedSessionId || '-'}</p>
+                      {SESSION_DEBUG_INFO_ENABLED ? (
+                        <p className="session-debug-inline">Session ID: {selectedSessionId || '-'}</p>
+                      ) : null}
                       <dl>
                         <dt>Workspace</dt>
                         <dd>{resolvedSessionInfo.workspace}</dd>
@@ -4064,10 +4067,14 @@ export default function HomePage() {
                         <dd>{resolvedSessionInfo.approval}</dd>
                         <dt>Sandbox</dt>
                         <dd>{resolvedSessionInfo.sandbox}</dd>
-                        <dt>Debug</dt>
-                        <dd>
-                          <pre className="session-debug-lines">{currentSessionDebugInfo}</pre>
-                        </dd>
+                        {SESSION_DEBUG_INFO_ENABLED ? (
+                          <>
+                            <dt>Debug</dt>
+                            <dd>
+                              <pre className="session-debug-lines">{currentSessionDebugInfo}</pre>
+                            </dd>
+                          </>
+                        ) : null}
                       </dl>
                     </article>
                   ) : null}
