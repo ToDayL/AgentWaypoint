@@ -176,9 +176,10 @@ export class CodexBackend {
       await worker.readyPromise;
 
       const workspaceCwd = input.cwd?.trim() || this.config.codexDefaultCwd;
-      const model = input.model?.trim() || this.config.codexDefaultModel;
-      const sandbox = input.sandbox?.trim() || this.config.codexSandboxMode;
-      const approvalPolicy = input.approvalPolicy?.trim() || this.config.codexApprovalPolicy;
+      const { model, sandbox, approvalPolicy } = resolveCodexExecutionConfig(
+        input.backendConfig,
+        this.config,
+      );
       const threadId = await this.resolveThreadId(worker, input.threadId ?? null, workspaceCwd, {
         model,
         sandbox,
@@ -209,13 +210,17 @@ export class CodexBackend {
   async forkThread(input: ForkThreadBody): Promise<string> {
     const worker = await this.ensureCodexWorker();
     await worker.readyPromise;
+    const { model, sandbox, approvalPolicy } = resolveCodexExecutionConfig(
+      input.backendConfig,
+      this.config,
+    );
 
     const result = (await this.sendWorkerRequest(worker, 'thread/fork', {
       threadId: input.threadId,
       cwd: input.cwd ?? this.config.codexDefaultCwd,
-      model: input.model ?? this.config.codexDefaultModel,
-      sandbox: input.sandbox ?? this.config.codexSandboxMode,
-      approvalPolicy: input.approvalPolicy ?? this.config.codexApprovalPolicy,
+      model,
+      sandbox,
+      approvalPolicy,
     })) as Record<string, unknown>;
     const threadId = readNestedString(result, ['thread', 'id']);
     if (!threadId) {
@@ -236,9 +241,10 @@ export class CodexBackend {
     const worker = await this.ensureCodexWorker();
     await worker.readyPromise;
     const cwd = input.cwd?.trim() || this.config.codexDefaultCwd;
-    const model = input.model?.trim() || this.config.codexDefaultModel;
-    const sandbox = input.sandbox?.trim() || this.config.codexSandboxMode;
-    const approvalPolicy = input.approvalPolicy?.trim() || this.config.codexApprovalPolicy;
+    const { model, sandbox, approvalPolicy } = resolveCodexExecutionConfig(
+      input.backendConfig,
+      this.config,
+    );
 
     await this.sendWorkerRequest(worker, 'thread/resume', {
       threadId: input.threadId,
@@ -873,6 +879,17 @@ export class CodexBackend {
 
     worker.process.stdin.write(`${JSON.stringify({ id: requestId, result: response.result ?? {} })}\n`);
   }
+}
+
+function resolveCodexExecutionConfig(
+  backendConfig: Record<string, unknown> | null | undefined,
+  defaults: CodexBackendConfig,
+): { model: string | null; sandbox: string | null; approvalPolicy: string } {
+  const config = backendConfig ?? {};
+  const model = readOptionalString(config.model) ?? defaults.codexDefaultModel;
+  const sandbox = readOptionalString(config.sandbox) ?? defaults.codexSandboxMode;
+  const approvalPolicy = readOptionalString(config.approvalPolicy) ?? defaults.codexApprovalPolicy;
+  return { model, sandbox, approvalPolicy };
 }
 
 function extractAssistantTextFromTurn(params: Record<string, unknown>): string | null {

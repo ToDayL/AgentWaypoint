@@ -54,11 +54,10 @@ export class HttpRunnerAdapter implements RunnerAdapter {
         turnId: input.turnId,
         sessionId: input.sessionId,
         content: input.content,
+        backend: input.backend ?? null,
+        backendConfig: input.backendConfig ?? null,
         threadId: input.threadId ?? null,
         cwd: input.cwd ?? null,
-        model: input.model ?? null,
-        sandbox: input.sandbox ?? null,
-        approvalPolicy: input.approvalPolicy ?? null,
       },
     });
   }
@@ -256,10 +255,9 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       path: '/runner/threads/fork',
       body: {
         threadId: input.threadId,
+        backend: input.backend ?? null,
+        backendConfig: input.backendConfig ?? null,
         cwd: input.cwd ?? null,
-        model: input.model ?? null,
-        sandbox: input.sandbox ?? null,
-        approvalPolicy: input.approvalPolicy ?? null,
       },
     });
     if (!response || typeof response !== 'object') {
@@ -290,10 +288,9 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       path: '/runner/threads/compact',
       body: {
         threadId: input.threadId,
+        backend: input.backend ?? null,
+        backendConfig: input.backendConfig ?? null,
         cwd: input.cwd ?? null,
-        model: input.model ?? null,
-        sandbox: input.sandbox ?? null,
-        approvalPolicy: input.approvalPolicy ?? null,
       },
     });
   }

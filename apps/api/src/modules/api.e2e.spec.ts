@@ -216,7 +216,6 @@ describe('API e2e', () => {
     });
     expect(turnStatusResponse.statusCode).toBe(200);
     expect(turnStatusResponse.json()).toMatchObject({
-      requestedModel: 'gpt-5-mini',
       effectiveModel: 'gpt-5-mini',
     });
   });

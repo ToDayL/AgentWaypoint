@@ -1,6 +1,5 @@
 import { ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { resolveProjectCodexDefaults } from '../projects/project-backend-config';
 import { ProjectsService } from '../projects/projects.service';
 import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
 import { CreateSessionBody, ForkSessionBody } from './sessions.schemas';
@@ -177,18 +176,20 @@ export class SessionsService {
       throw new ConflictException({ message: 'Cannot fork a session while a turn is active' });
     }
 
-    const projectDefaults = resolveProjectCodexDefaults(sourceSession.project);
     const cwd = sourceSession.project.repoPath?.trim() || null;
-    const model = projectDefaults.model;
-    const sandbox = projectDefaults.sandbox;
-    const approvalPolicy = projectDefaults.approvalPolicy;
+    const backend = sourceSession.project.backend?.trim() || null;
+    const backendConfig =
+      sourceSession.project.backendConfig &&
+      typeof sourceSession.project.backendConfig === 'object' &&
+      !Array.isArray(sourceSession.project.backendConfig)
+        ? (sourceSession.project.backendConfig as Record<string, unknown>)
+        : null;
 
     const forked = await this.runnerAdapter.forkThread({
       threadId: sourceSession.codexThreadId,
+      backend,
+      backendConfig,
       cwd,
-      model,
-      sandbox,
-      approvalPolicy,
     });
 
     const title = input.title?.trim() || `${sourceSession.title} (Fork)`;
@@ -297,11 +298,14 @@ export class SessionsService {
     if (!threadId) {
       throw new ConflictException({ message: 'Session cannot be compacted before the first turn starts' });
     }
-    const projectDefaults = resolveProjectCodexDefaults(session.project);
     const cwd = session.project.repoPath?.trim() || null;
-    const model = projectDefaults.model;
-    const sandbox = projectDefaults.sandbox;
-    const approvalPolicy = projectDefaults.approvalPolicy;
+    const backend = session.project.backend?.trim() || null;
+    const backendConfig =
+      session.project.backendConfig &&
+      typeof session.project.backendConfig === 'object' &&
+      !Array.isArray(session.project.backendConfig)
+        ? (session.project.backendConfig as Record<string, unknown>)
+        : null;
 
     const activeTurn = await this.prisma.turn.findFirst({
       where: {
@@ -320,10 +324,9 @@ export class SessionsService {
     try {
       await this.runnerAdapter.compactThread({
         threadId,
+        backend,
+        backendConfig,
         cwd,
-        model,
-        sandbox,
-        approvalPolicy,
       });
 
       const latestTurn = await this.prisma.turn.findFirst({

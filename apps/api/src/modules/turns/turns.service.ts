@@ -1,7 +1,6 @@
 import { ConflictException, Inject, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { resolveProjectCodexDefaults } from '../projects/project-backend-config';
 import { RUNNER_ADAPTER, RunnerAdapter, RunnerStreamEvent } from '../runner/runner.types';
 import { SettingsService } from '../settings/settings.service';
 import { CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from './turns.schemas';
@@ -75,11 +74,12 @@ export class TurnsService implements OnModuleInit {
       throw new NotFoundException({ message: 'Session not found' });
     }
 
-    const projectDefaults = resolveProjectCodexDefaults(session.project);
     const cwd = session.project.repoPath?.trim() || null;
-    const model = projectDefaults.model;
-    const sandbox = projectDefaults.sandbox;
-    const approvalPolicy = projectDefaults.approvalPolicy;
+    const backend = session.project.backend?.trim() || null;
+    const backendConfig =
+      session.project.backendConfig && typeof session.project.backendConfig === 'object' && !Array.isArray(session.project.backendConfig)
+        ? (session.project.backendConfig as Record<string, unknown>)
+        : null;
 
     const activeTurn = await this.prisma.turn.findFirst({
       where: {
@@ -107,9 +107,9 @@ export class TurnsService implements OnModuleInit {
           userMessageId: userMessage.id,
           status: 'queued',
           requestedCwd: cwd,
-          requestedModel: model,
-          requestedSandbox: sandbox,
-          requestedApprovalPolicy: approvalPolicy,
+          requestedModel: null,
+          requestedSandbox: null,
+          requestedApprovalPolicy: null,
         },
       });
     });
@@ -119,11 +119,10 @@ export class TurnsService implements OnModuleInit {
         turnId: turn.id,
         sessionId,
         content: input.content,
+        backend,
+        backendConfig,
         threadId: session.codexThreadId,
         cwd,
-        model,
-        sandbox,
-        approvalPolicy,
       })
       .then(() => {
         this.ensureRunnerEventConsumer(turn.id);

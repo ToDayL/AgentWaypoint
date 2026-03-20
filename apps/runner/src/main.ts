@@ -211,6 +211,7 @@ const server = createServer(async (request, response) => {
     if (pathname === '/runner/turns/start') {
       const payload = parseStartTurnBody(await readJsonBody(request));
       payload.cwd = await filesystemBackend.resolveWorkspaceCwd(payload.cwd);
+      const requestedBackend = parseRunnerBackend(payload.backend ?? runnerBackend, 'backend');
       const existing = activeTurns.get(payload.turnId);
       if (existing) {
         await cancelActiveTurn(existing, { emitCancelEvent: false });
@@ -221,7 +222,7 @@ const server = createServer(async (request, response) => {
         runnerRequestId: randomUUID(),
       });
 
-      if (runnerBackend === 'mock') {
+      if (requestedBackend === 'mock') {
         const turn: ActiveMockTurn = {
           backend: 'mock',
           turnId: payload.turnId,
@@ -237,17 +238,11 @@ const server = createServer(async (request, response) => {
         return;
       }
 
+      if (requestedBackend !== 'codex') {
+        throw new Error(`Unsupported backend: ${requestedBackend}`);
+      }
       ensureTurnStreamState(payload.turnId, payload.sessionId, 'queued');
-      void codexBackend.startTurn({
-        turnId: payload.turnId,
-        sessionId: payload.sessionId,
-        content: payload.content,
-        threadId: payload.threadId ?? null,
-        cwd: payload.cwd ?? null,
-        model: payload.model ?? null,
-        sandbox: payload.sandbox ?? null,
-        approvalPolicy: payload.approvalPolicy ?? null,
-      });
+      void codexBackend.startTurn(payload);
       return;
     }
 
@@ -273,14 +268,18 @@ const server = createServer(async (request, response) => {
     if (pathname === '/runner/threads/fork') {
       const payload = parseForkThreadBody(await readJsonBody(request));
       const cwd = await filesystemBackend.resolveWorkspaceCwd(payload.cwd);
+      const requestedBackend = parseRunnerBackend(payload.backend ?? runnerBackend, 'backend');
 
-      if (runnerBackend === 'mock') {
+      if (requestedBackend === 'mock') {
         sendJson(response, 200, {
           threadId: `mock-fork-${randomUUID()}`,
         });
         return;
       }
 
+      if (requestedBackend !== 'codex') {
+        throw new Error(`Unsupported backend: ${requestedBackend}`);
+      }
       const threadId = await codexBackend.forkThread({ ...payload, cwd });
       sendJson(response, 200, { threadId });
       return;
@@ -304,8 +303,9 @@ const server = createServer(async (request, response) => {
     if (pathname === '/runner/threads/compact') {
       const payload = parseCompactThreadBody(await readJsonBody(request));
       const cwd = await filesystemBackend.resolveWorkspaceCwd(payload.cwd);
+      const requestedBackend = parseRunnerBackend(payload.backend ?? runnerBackend, 'backend');
 
-      if (runnerBackend === 'mock') {
+      if (requestedBackend === 'mock') {
         sendJson(response, 202, {
           accepted: true,
           runnerRequestId: randomUUID(),
@@ -313,6 +313,9 @@ const server = createServer(async (request, response) => {
         return;
       }
 
+      if (requestedBackend !== 'codex') {
+        throw new Error(`Unsupported backend: ${requestedBackend}`);
+      }
       await codexBackend.compactThread({ ...payload, cwd });
       sendJson(response, 202, {
         accepted: true,
@@ -422,12 +425,11 @@ function parseStartTurnBody(input: unknown): StartTurnBody {
   const turnId = readNonEmptyString(record.turnId, 'turnId');
   const sessionId = readNonEmptyString(record.sessionId, 'sessionId');
   const content = readNonEmptyString(record.content, 'content');
+  const backend = readOptionalString(record.backend);
+  const backendConfig = readOptionalRecord(record.backendConfig, 'backendConfig');
   const threadId = readOptionalString(record.threadId);
   const cwd = readOptionalString(record.cwd);
-  const model = readOptionalString(record.model);
-  const sandbox = readOptionalString(record.sandbox);
-  const approvalPolicy = readOptionalString(record.approvalPolicy);
-  return { turnId, sessionId, content, threadId, cwd, model, sandbox, approvalPolicy };
+  return { turnId, sessionId, content, backend, backendConfig, threadId, cwd };
 }
 
 function parseCancelTurnBody(input: unknown): CancelTurnBody {
@@ -447,10 +449,9 @@ function parseForkThreadBody(input: unknown): ForkThreadBody {
   const record = input as Record<string, unknown>;
   return {
     threadId: readNonEmptyString(record.threadId, 'threadId'),
+    backend: readOptionalString(record.backend),
+    backendConfig: readOptionalRecord(record.backendConfig, 'backendConfig'),
     cwd: readOptionalString(record.cwd),
-    model: readOptionalString(record.model),
-    sandbox: readOptionalString(record.sandbox),
-    approvalPolicy: readOptionalString(record.approvalPolicy),
   };
 }
 
@@ -481,10 +482,9 @@ function parseCompactThreadBody(input: unknown): CompactThreadBody {
   const record = input as Record<string, unknown>;
   return {
     threadId: readNonEmptyString(record.threadId, 'threadId'),
+    backend: readOptionalString(record.backend),
+    backendConfig: readOptionalRecord(record.backendConfig, 'backendConfig'),
     cwd: readOptionalString(record.cwd),
-    model: readOptionalString(record.model),
-    sandbox: readOptionalString(record.sandbox),
-    approvalPolicy: readOptionalString(record.approvalPolicy),
   };
 }
 
@@ -528,6 +528,24 @@ function readOptionalString(value: unknown): string | null {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function readOptionalRecord(value: unknown, field: string): Record<string, unknown> | null {
+  if (value === null || typeof value === 'undefined') {
+    return null;
+  }
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${field} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function parseRunnerBackend(value: string, field: string): RunnerBackend {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'codex' || normalized === 'mock') {
+    return normalized;
+  }
+  throw new Error(`${field} must be one of: codex, mock`);
 }
 
 async function parseWorkspaceUploadForm(

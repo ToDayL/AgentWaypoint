@@ -231,13 +231,20 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
         const turnId = readRequiredString(payload, 'turnId');
         const sessionId = readRequiredString(payload, 'sessionId');
         const content = readRequiredString(payload, 'content');
-        const model = typeof payload.model === 'string' && payload.model.trim().length > 0 ? payload.model.trim() : null;
         const cwd = typeof payload.cwd === 'string' && payload.cwd.trim().length > 0 ? payload.cwd.trim() : null;
+        const backendConfig =
+          payload.backendConfig && typeof payload.backendConfig === 'object' && !Array.isArray(payload.backendConfig)
+            ? (payload.backendConfig as Record<string, unknown>)
+            : {};
+        const model =
+          typeof backendConfig.model === 'string' && backendConfig.model.trim().length > 0 ? backendConfig.model.trim() : null;
         const sandbox =
-          typeof payload.sandbox === 'string' && payload.sandbox.trim().length > 0 ? payload.sandbox.trim() : null;
+          typeof backendConfig.sandbox === 'string' && backendConfig.sandbox.trim().length > 0
+            ? backendConfig.sandbox.trim()
+            : null;
         const approvalPolicy =
-          typeof payload.approvalPolicy === 'string' && payload.approvalPolicy.trim().length > 0
-            ? payload.approvalPolicy.trim()
+          typeof backendConfig.approvalPolicy === 'string' && backendConfig.approvalPolicy.trim().length > 0
+            ? backendConfig.approvalPolicy.trim()
             : null;
         const threadId = `thread-${sessionId}`;
         ensureBufferedTurn(turnId);
@@ -563,7 +570,6 @@ describe.sequential('API e2e (http runner)', () => {
     expect(turnStatusResponse.status).toBe(200);
     expect(await turnStatusResponse.json()).toMatchObject({
       id: turn.turnId,
-      requestedModel: 'gpt-5-codex',
       effectiveModel: 'gpt-5-codex',
     });
 
@@ -688,8 +694,6 @@ describe.sequential('API e2e (http runner)', () => {
     expect(turnStatusResponse.status).toBe(200);
     expect(await turnStatusResponse.json()).toMatchObject({
       id: turn.turnId,
-      requestedSandbox: 'workspace-write',
-      requestedApprovalPolicy: 'on-request',
       effectiveSandbox: 'workspace-write',
       effectiveApprovalPolicy: 'on-request',
     });

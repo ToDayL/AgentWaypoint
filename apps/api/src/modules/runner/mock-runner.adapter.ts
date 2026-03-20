@@ -52,24 +52,32 @@ export class MockRunnerAdapter implements RunnerAdapter {
       return;
     }
 
+    const backendConfig =
+      input.backendConfig && typeof input.backendConfig === 'object' && !Array.isArray(input.backendConfig)
+        ? input.backendConfig
+        : null;
+    const model = readOptionalString(backendConfig?.model);
+    const sandbox = readOptionalString(backendConfig?.sandbox);
+    const approvalPolicy = readOptionalString(backendConfig?.approvalPolicy);
+
     await this.prisma.turn.update({
       where: { id: input.turnId },
       data: {
         status: 'running',
         startedAt: new Date(),
         effectiveCwd: input.cwd ?? null,
-        effectiveModel: input.model ?? null,
-        effectiveSandbox: input.sandbox ?? null,
-        effectiveApprovalPolicy: input.approvalPolicy ?? null,
+        effectiveModel: model,
+        effectiveSandbox: sandbox,
+        effectiveApprovalPolicy: approvalPolicy,
       },
     });
     const threadId = `mock-thread-${input.sessionId}`;
     await this.appendEvent(input.turnId, 'turn.started', {
       threadId,
-      ...(input.model ? { model: input.model } : {}),
+      ...(model ? { model } : {}),
       ...(input.cwd ? { cwd: input.cwd } : {}),
-      ...(input.sandbox ? { sandbox: input.sandbox } : {}),
-      ...(input.approvalPolicy ? { approvalPolicy: input.approvalPolicy } : {}),
+      ...(sandbox ? { sandbox } : {}),
+      ...(approvalPolicy ? { approvalPolicy } : {}),
     });
 
     const assistantText = `Echo: ${input.content}`;
@@ -470,6 +478,14 @@ function extractAssistantDeltaText(payload: Prisma.JsonValue): string {
   }
   const text = (payload as Record<string, unknown>).text;
   return typeof text === 'string' ? text : '';
+}
+
+function readOptionalString(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function resolveMimeTypeFromPath(filePath: string): string {

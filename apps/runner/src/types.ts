@@ -5,11 +5,10 @@ export type StartTurnBody = {
   turnId: string;
   sessionId: string;
   content: string;
+  backend?: string | null;
+  backendConfig?: Record<string, unknown> | null;
   threadId?: string | null;
   cwd?: string | null;
-  model?: string | null;
-  sandbox?: string | null;
-  approvalPolicy?: string | null;
 };
 
 export type ModelListItem = {
@@ -39,10 +38,9 @@ export type SteerTurnBody = {
 
 export type ForkThreadBody = {
   threadId: string;
+  backend?: string | null;
+  backendConfig?: Record<string, unknown> | null;
   cwd?: string | null;
-  model?: string | null;
-  sandbox?: string | null;
-  approvalPolicy?: string | null;
 };
 
 export type CloseThreadBody = {
@@ -51,10 +49,9 @@ export type CloseThreadBody = {
 
 export type CompactThreadBody = {
   threadId: string;
+  backend?: string | null;
+  backendConfig?: Record<string, unknown> | null;
   cwd?: string | null;
-  model?: string | null;
-  sandbox?: string | null;
-  approvalPolicy?: string | null;
 };
 
 export type EnsureDirectoryBody = {

@@ -2,11 +2,10 @@ export type StartTurnInput = {
   turnId: string;
   sessionId: string;
   content: string;
+  backend?: string | null;
+  backendConfig?: Record<string, unknown> | null;
   threadId?: string | null;
   cwd?: string | null;
-  model?: string | null;
-  sandbox?: string | null;
-  approvalPolicy?: string | null;
 };
 
 export type AvailableModel = {
@@ -36,10 +35,9 @@ export type SteerTurnInput = {
 
 export type ForkThreadInput = {
   threadId: string;
+  backend?: string | null;
+  backendConfig?: Record<string, unknown> | null;
   cwd?: string | null;
-  model?: string | null;
-  sandbox?: string | null;
-  approvalPolicy?: string | null;
 };
 
 export type ForkThreadResult = {
@@ -52,10 +50,9 @@ export type CloseThreadInput = {
 
 export type CompactThreadInput = {
   threadId: string;
+  backend?: string | null;
+  backendConfig?: Record<string, unknown> | null;
   cwd?: string | null;
-  model?: string | null;
-  sandbox?: string | null;
-  approvalPolicy?: string | null;
 };
 
 export type EnsureDirectoryInput = {
