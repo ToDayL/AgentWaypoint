@@ -142,7 +142,7 @@ Last updated: 2026-03-12
    - Fallback to new thread if resume fails.
 7. Workspace and cwd management are implemented:
    - Project workspace (`repoPath`) is forwarded by API and validated by the host runner before execution.
-   - Session `cwdOverride` is resolved by API and applied as thread configuration through the runner.
+   - Historical note: session `cwdOverride` support existed at this stage and was removed on 2026-03-20.
    - Optional root allowlist via `RUNNER_ALLOWED_REPO_ROOTS`.
 8. Web simulation UX was expanded before current turn:
    - Project form includes workspace path (`repoPath`).
@@ -203,10 +203,9 @@ Last updated: 2026-03-12
    - Runner now buffers per-turn events and exposes `GET /runner/turns/:id` plus `GET /runner/turns/:id/stream?since=N`.
    - API opens and maintains runner SSE subscriptions for in-flight turns.
    - Host-exposed API port `4000` is no longer required for the production dev flow.
-3. Session-level execution controls were added:
-   - Project defaults: `defaultModel`, `defaultSandbox`, `defaultApprovalPolicy`.
-   - Session overrides: `modelOverride`, `cwdOverride`, `sandboxOverride`, `approvalPolicyOverride`.
-   - Session execution config is applied at thread start or resume rather than per turn.
+3. Session-level execution controls were added (later superseded on 2026-03-20):
+   - Historical design was project defaults plus session overrides.
+   - Current design is project-level `backend` + `backendConfig` only, with no session overrides.
 4. Runner-backed model discovery was added:
    - Runner exposes `GET /runner/models`.
    - API exposes `GET /api/models`.
@@ -221,3 +220,21 @@ Last updated: 2026-03-12
 7. Current verification state:
    - `@agentwaypoint/api`, `@agentwaypoint/runner`, and `@agentwaypoint/web` typechecks pass.
    - `./scripts/test-api-e2e.sh` passes (`18/18` tests).
+
+## Completed on 2026-03-20
+1. Project execution config model migrated to backend-oriented shape:
+   - `Project` now persists `backend` and `backendConfig`.
+   - Legacy project default fields were removed from schema and API contracts.
+2. Session execution override model removed:
+   - Session create API now accepts `title` only.
+   - Session-level override columns were dropped from DB schema.
+   - Turn execution config is always resolved from project `backendConfig`.
+3. Codex backend config guarantees were enforced:
+   - Codex config shape is `model/sandbox/approvalPolicy`.
+   - Backfill migration applied so existing codex projects have complete config values.
+4. Web create/update project forms now write explicit config:
+   - No `runner default` sentinel behavior.
+   - Model default is derived from `/api/models` (`isDefault` first, then first item).
+5. Validation and regression checks:
+   - Dev stack restart applied all migrations successfully.
+   - `./scripts/test-api-e2e.sh` passes (`29/29` tests).

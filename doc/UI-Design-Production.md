@@ -1,6 +1,6 @@
 # AgentWaypoint Production UI Design
 
-Last updated: 2026-03-13
+Last updated: 2026-03-20
 
 ## 1. Purpose
 
@@ -75,7 +75,7 @@ Sections:
 Interactions:
 - Selecting project refreshes session list and current context.
 - Selecting session hydrates chat history and turn state.
-- Inline workspace and session override forms should remain, but not dominate layout.
+- Inline session execution override forms are removed; execution config is project-scoped (`backendConfig`).
 - Create and confirm flows are not inline in tree rows; they use the top-center action panel.
 
 ### 3.1.2 User Config Tab
@@ -152,7 +152,6 @@ Modes:
 
 3. Create Session Form
 - title
-- optional cwd/model/sandbox/approval overrides
 - actions: `Cancel`, `Create`
 
 4. Confirm Delete
