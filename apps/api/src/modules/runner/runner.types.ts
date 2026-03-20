@@ -137,7 +137,7 @@ export type RateLimitSnapshot = {
   secondary: RateLimitWindow | null;
 };
 
-export type AccountRateLimits = {
+export type CodexRateLimits = {
   rateLimits: RateLimitSnapshot | null;
   rateLimitsByLimitId: Record<string, RateLimitSnapshot> | null;
 };
@@ -198,7 +198,7 @@ export interface RunnerAdapter {
   steerTurn(input: SteerTurnInput): Promise<void>;
   cancelTurn(input: CancelTurnInput): Promise<void>;
   resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void>;
-  readAccountRateLimits(): Promise<AccountRateLimits>;
+  readCodexRateLimits(): Promise<CodexRateLimits>;
   listModels(): Promise<AvailableModel[]>;
   listSkills(input: SkillListInput): Promise<AvailableSkill[]>;
   forkThread(input: ForkThreadInput): Promise<ForkThreadResult>;

@@ -22,9 +22,9 @@ export class SettingsController {
     return this.settingsService.updateAppSettings(user.id, input);
   }
 
-  @Get('/account/rate-limits')
-  async getAccountRateLimits() {
-    return this.settingsService.getAccountRateLimits();
+  @Get('/codex/rate-limits')
+  async getCodexRateLimits() {
+    return this.settingsService.getCodexRateLimits();
   }
 
   @Get('/users')

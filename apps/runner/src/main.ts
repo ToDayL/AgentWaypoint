@@ -90,7 +90,10 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    if (request.method === 'GET' && pathname === '/runner/account/rate-limits') {
+    if (
+      request.method === 'GET' &&
+      (pathname === '/runner/codex/rate-limits' || pathname === '/runner/account/rate-limits')
+    ) {
       if (runnerBackend === 'mock') {
         sendJson(response, 200, {
           rateLimits: null,
@@ -98,7 +101,7 @@ const server = createServer(async (request, response) => {
         });
         return;
       }
-      sendJson(response, 200, await codexBackend.readAccountRateLimits());
+      sendJson(response, 200, await codexBackend.readCodexRateLimits());
       return;
     }
 

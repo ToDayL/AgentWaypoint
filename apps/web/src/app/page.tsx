@@ -269,7 +269,7 @@ type RateLimitWindow = {
   windowDurationMins: number | null;
 };
 
-type AccountRateLimitsResponse = {
+type CodexRateLimitsResponse = {
   rateLimits: {
     primary: RateLimitWindow | null;
     secondary: RateLimitWindow | null;
@@ -1448,7 +1448,7 @@ export default function HomePage() {
   async function loadAccountRateLimits(): Promise<void> {
     setAccountRateLimitsBusy(true);
     try {
-      const response = await apiRequest<AccountRateLimitsResponse>('/api/settings/account/rate-limits', {
+      const response = await apiRequest<CodexRateLimitsResponse>('/api/settings/codex/rate-limits', {
         method: 'GET',
       });
       setAccountRateLimits(extract5hAndWeeklyLimits(response));
@@ -3610,8 +3610,8 @@ export default function HomePage() {
                       <div className="left-config-panel">
                         <h2>Config</h2>
                         <p>Signed in as: <strong>{currentUserEmail}</strong></p>
-                        <h3>Rate Limits</h3>
-                        {accountRateLimitsBusy ? <p>Loading account limits…</p> : null}
+                        <h3>Codex Rate Limits</h3>
+                        {accountRateLimitsBusy ? <p>Loading Codex rate limits…</p> : null}
                         {!accountRateLimitsBusy ? (
                           <div className="rate-limit-list">
                             <div className="rate-limit-item">
@@ -4915,7 +4915,7 @@ function readFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function extract5hAndWeeklyLimits(response: AccountRateLimitsResponse): {
+function extract5hAndWeeklyLimits(response: CodexRateLimitsResponse): {
   fiveHour: RateLimitWindow | null;
   weekly: RateLimitWindow | null;
 } {

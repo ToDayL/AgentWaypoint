@@ -45,12 +45,12 @@ export class SettingsService {
     });
   }
 
-  async getAccountRateLimits() {
+  async getCodexRateLimits() {
     try {
-      return await this.runnerAdapter.readAccountRateLimits();
+      return await this.runnerAdapter.readCodexRateLimits();
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'unknown runner error';
-      this.logger.warn(`Failed to read account rate limits from runner: ${message}`);
+      this.logger.warn(`Failed to read codex rate limits from runner: ${message}`);
       return {
         rateLimits: null,
         rateLimitsByLimitId: null,

@@ -6,7 +6,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
-  AccountRateLimits,
+  CodexRateLimits,
   AvailableSkill,
   AvailableModel,
   CancelTurnInput,
@@ -163,7 +163,7 @@ export class MockRunnerAdapter implements RunnerAdapter {
     throw new Error(`Mock runner does not support approvals for turn ${input.turnId}`);
   }
 
-  async readAccountRateLimits(): Promise<AccountRateLimits> {
+  async readCodexRateLimits(): Promise<CodexRateLimits> {
     return {
       rateLimits: null,
       rateLimitsByLimitId: null,

@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
-  AccountRateLimits,
+  CodexRateLimits,
   AvailableSkill,
   AvailableModel,
   CancelTurnInput,
@@ -188,13 +188,13 @@ export class HttpRunnerAdapter implements RunnerAdapter {
     });
   }
 
-  async readAccountRateLimits(): Promise<AccountRateLimits> {
+  async readCodexRateLimits(): Promise<CodexRateLimits> {
     const response = await this.request({
       method: 'GET',
-      path: '/runner/account/rate-limits',
+      path: '/runner/codex/rate-limits',
     });
     if (!response || typeof response !== 'object') {
-      throw new Error('Runner account rate limits response is invalid');
+      throw new Error('Runner codex rate limits response is invalid');
     }
     const record = response as Record<string, unknown>;
     return {

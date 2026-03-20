@@ -138,7 +138,7 @@ export class CodexBackend {
     return Array.from(deduped.values());
   }
 
-  async readAccountRateLimits(): Promise<Record<string, unknown>> {
+  async readCodexRateLimits(): Promise<Record<string, unknown>> {
     const worker = await this.ensureCodexWorker();
     await worker.readyPromise;
     const result = await this.sendWorkerRequest(worker, 'account/rateLimits/read', null);

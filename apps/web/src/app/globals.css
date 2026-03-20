@@ -1589,10 +1589,12 @@ button:disabled {
   display: grid;
   gap: 0.15rem;
   max-height: none;
-  height: 100%;
+  height: auto;
   min-height: 0;
   overflow: auto;
+  margin-top: 0.6rem;
   padding-left: 0.25rem;
+  align-content: start;
   text-size-adjust: 100%;
   -webkit-text-size-adjust: 100%;
 }
