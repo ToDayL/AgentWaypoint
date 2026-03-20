@@ -486,6 +486,7 @@ export default function HomePage() {
   const [previewFileTruncated, setPreviewFileTruncated] = useState(false);
   const [previewFileBusy, setPreviewFileBusy] = useState(false);
   const [previewFileError, setPreviewFileError] = useState('');
+  const [expandedToolDetailKeys, setExpandedToolDetailKeys] = useState<Record<string, boolean>>({});
   const [recentMentionedPath, setRecentMentionedPath] = useState('');
   const [visibleMessageCount, setVisibleMessageCount] = useState(CHAT_VISIBLE_MESSAGE_STEP);
   const [sessionInfoOpen, setSessionInfoOpen] = useState(true);
@@ -3990,9 +3991,32 @@ export default function HomePage() {
                                       <header className="timeline-diff-file-title">{event.diffFiles.join('\n')}</header>
                                     </article>
                                   )
-                                : event.details.map((detail, index) => (
-                                    <pre key={`${event.id}-${index}`}>{detail}</pre>
-                                  ))}
+                                : event.details.map((detail, index) => {
+                                    const detailKey = `${event.id}-${index}`;
+                                    const normalizedDetail = typeof detail === 'string' ? detail : String(detail ?? '');
+                                    const isToolDetail = event.kind === 'tool';
+                                    const lineCount = normalizedDetail.length === 0 ? 0 : normalizedDetail.split('\n').length;
+                                    const canToggle = isToolDetail && lineCount > 5;
+                                    const expanded = expandedToolDetailKeys[detailKey] === true;
+                                    return (
+                                      <div key={detailKey} className="timeline-detail-box">
+                                        {canToggle ? (
+                                          <button
+                                            type="button"
+                                            className="icon-button timeline-detail-toggle"
+                                            onClick={() =>
+                                              setExpandedToolDetailKeys((current) => ({ ...current, [detailKey]: !expanded }))
+                                            }
+                                            title={expanded ? 'Collapse details' : 'Expand details'}
+                                            aria-label={expanded ? 'Collapse details' : 'Expand details'}
+                                          >
+                                            <ChevronDown className={expanded ? 'timeline-toggle-icon is-open' : 'timeline-toggle-icon'} />
+                                          </button>
+                                        ) : null}
+                                        <pre>{canToggle && !expanded ? tailLines(normalizedDetail, 5) : normalizedDetail}</pre>
+                                      </div>
+                                    );
+                                  })}
                             </div>
                           ) : null}
                         </article>
@@ -5067,6 +5091,17 @@ function countDiffFileLines(file: ParsedDiffFile): number {
     }
     return total + changes.length;
   }, 0);
+}
+
+function tailLines(content: string, maxLines: number): string {
+  if (maxLines <= 0) {
+    return '';
+  }
+  const lines = content.split('\n');
+  if (lines.length <= maxLines) {
+    return content;
+  }
+  return lines.slice(lines.length - maxLines).join('\n');
 }
 
 function formatDiffFileLabel(file: ParsedDiffFile): string {

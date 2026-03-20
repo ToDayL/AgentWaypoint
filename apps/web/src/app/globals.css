@@ -1603,6 +1603,16 @@ button:disabled {
   font-size: 0.8rem;
 }
 
+.timeline-toggle-icon {
+  width: 0.78rem;
+  height: 0.78rem;
+  transition: transform 0.12s ease;
+}
+
+.timeline-toggle-icon.is-open {
+  transform: rotate(180deg);
+}
+
 .timeline-event {
   position: relative;
   margin-left: 0.52rem;
@@ -1670,6 +1680,22 @@ button:disabled {
   gap: 0.3rem;
 }
 
+.timeline-detail-box {
+  position: relative;
+}
+
+.timeline-detail-toggle {
+  position: absolute;
+  top: 0.2rem;
+  right: 0.2rem;
+  width: 1.3rem;
+  min-width: 1.3rem;
+  height: 1.3rem;
+  margin-top: 0;
+  border-radius: 999px;
+  z-index: 1;
+}
+
 .timeline-event-details pre {
   margin: 0;
   border-radius: 6px;
@@ -1683,6 +1709,10 @@ button:disabled {
   font-family: 'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace;
   text-size-adjust: 100%;
   -webkit-text-size-adjust: 100%;
+}
+
+.timeline-detail-box .timeline-detail-toggle + pre {
+  padding-right: 1.9rem;
 }
 
 .timeline-diff-file {
