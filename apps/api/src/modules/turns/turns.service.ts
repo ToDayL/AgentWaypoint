@@ -1,6 +1,7 @@
 import { ConflictException, Inject, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { resolveProjectCodexDefaults } from '../projects/project-backend-config';
 import { RUNNER_ADAPTER, RunnerAdapter, RunnerStreamEvent } from '../runner/runner.types';
 import { SettingsService } from '../settings/settings.service';
 import { CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from './turns.schemas';
@@ -60,21 +61,25 @@ export class TurnsService implements OnModuleInit {
       },
       select: {
         id: true,
-        cwdOverride: true,
         codexThreadId: true,
-        modelOverride: true,
-        sandboxOverride: true,
-        approvalPolicyOverride: true,
+        project: {
+          select: {
+            repoPath: true,
+            backend: true,
+            backendConfig: true,
+          },
+        },
       },
     });
     if (!session) {
       throw new NotFoundException({ message: 'Session not found' });
     }
 
-    const cwd = session.cwdOverride?.trim() || null;
-    const model = session.modelOverride?.trim() || null;
-    const sandbox = session.sandboxOverride?.trim() || null;
-    const approvalPolicy = session.approvalPolicyOverride?.trim() || null;
+    const projectDefaults = resolveProjectCodexDefaults(session.project);
+    const cwd = session.project.repoPath?.trim() || null;
+    const model = projectDefaults.model;
+    const sandbox = projectDefaults.sandbox;
+    const approvalPolicy = projectDefaults.approvalPolicy;
 
     const activeTurn = await this.prisma.turn.findFirst({
       where: {

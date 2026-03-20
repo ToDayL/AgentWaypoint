@@ -72,17 +72,23 @@ describe('API e2e', () => {
       payload: {
         name: 'E2E Project',
         repoPath: '/workspace/e2e',
-        defaultModel: 'gpt-5-codex',
-        defaultSandbox: 'workspace-write',
-        defaultApprovalPolicy: 'on-request',
+        backend: 'codex',
+        backendConfig: {
+          model: 'gpt-5-codex',
+          sandbox: 'workspace-write',
+          approvalPolicy: 'on-request',
+        },
       },
     });
     expect(createProjectResponse.statusCode).toBe(201);
     const project = createProjectResponse.json();
     expect(project.name).toBe('E2E Project');
-    expect(project.defaultModel).toBe('gpt-5-codex');
-    expect(project.defaultSandbox).toBe('workspace-write');
-    expect(project.defaultApprovalPolicy).toBe('on-request');
+    expect(project.backend).toBe('codex');
+    expect(project.backendConfig).toMatchObject({
+      model: 'gpt-5-codex',
+      sandbox: 'workspace-write',
+      approvalPolicy: 'on-request',
+    });
     expect(project.ownerUserId).toBeTypeOf('string');
     expect(project.id).toBeTypeOf('string');
 
@@ -102,10 +108,6 @@ describe('API e2e', () => {
       headers: { 'x-user-email': email },
       payload: {
         title: 'E2E Session',
-        cwdOverride: '/workspace/e2e/session',
-        modelOverride: 'gpt-5-mini',
-        sandboxOverride: 'read-only',
-        approvalPolicyOverride: 'never',
       },
     });
     expect(createSessionResponse.statusCode).toBe(201);
@@ -113,10 +115,6 @@ describe('API e2e', () => {
     expect(session.projectId).toBe(project.id);
     expect(session.title).toBe('E2E Session');
     expect(session.status).toBe('active');
-    expect(session.cwdOverride).toBe('/workspace/e2e/session');
-    expect(session.modelOverride).toBe('gpt-5-mini');
-    expect(session.sandboxOverride).toBe('read-only');
-    expect(session.approvalPolicyOverride).toBe('never');
 
     const listSessionsResponse = await app.inject({
       method: 'GET',
@@ -129,11 +127,10 @@ describe('API e2e', () => {
     expect(sessions.some((item: { id: string }) => item.id === session.id)).toBe(true);
   });
 
-  it('creates missing workspace directories for project and session paths', async () => {
+  it('creates missing workspace directories for project paths', async () => {
     const email = randomEmail('workspace-create');
     const tempRoot = await mkdtemp(path.join(tmpdir(), 'aw-workspace-'));
     const projectPath = path.join(tempRoot, 'project-root');
-    const sessionPath = path.join(projectPath, 'session-root');
 
     const createProjectResponse = await app.inject({
       method: 'POST',
@@ -155,16 +152,12 @@ describe('API e2e', () => {
       headers: { 'x-user-email': email },
       payload: {
         title: 'Workspace Session',
-        cwdOverride: sessionPath,
       },
     });
     expect(createSessionResponse.statusCode).toBe(201);
-    const session = createSessionResponse.json();
-    expect(session.cwdOverride).toBe(sessionPath);
-    expect((await stat(sessionPath)).isDirectory()).toBe(true);
   });
 
-  it('uses session-persisted execution settings even if project defaults change later', async () => {
+  it('uses latest project execution settings when creating a turn', async () => {
     const email = randomEmail('session-persisted-settings');
 
     const projectResponse = await app.inject({
@@ -174,7 +167,12 @@ describe('API e2e', () => {
       payload: {
         name: 'Persisted Session Config',
         repoPath: TEST_REPO_PATH,
-        defaultModel: 'gpt-5-codex',
+        backend: 'codex',
+        backendConfig: {
+          model: 'gpt-5-codex',
+          sandbox: 'workspace-write',
+          approvalPolicy: 'on-request',
+        },
       },
     });
     expect(projectResponse.statusCode).toBe(201);
@@ -187,12 +185,17 @@ describe('API e2e', () => {
       payload: { title: 'Session Snapshot' },
     });
     expect(sessionResponse.statusCode).toBe(201);
-    const session = sessionResponse.json() as { id: string; modelOverride: string | null };
-    expect(session.modelOverride).toBe('gpt-5-codex');
+    const session = sessionResponse.json() as { id: string };
 
     await prisma.project.update({
       where: { id: project.id },
-      data: { defaultModel: 'gpt-5-mini' },
+      data: {
+        backendConfig: {
+          model: 'gpt-5-mini',
+          sandbox: 'workspace-write',
+          approvalPolicy: 'on-request',
+        },
+      },
     });
 
     const createTurnResponse = await app.inject({
@@ -213,12 +216,12 @@ describe('API e2e', () => {
     });
     expect(turnStatusResponse.statusCode).toBe(200);
     expect(turnStatusResponse.json()).toMatchObject({
-      requestedModel: 'gpt-5-codex',
-      effectiveModel: 'gpt-5-codex',
+      requestedModel: 'gpt-5-mini',
+      effectiveModel: 'gpt-5-mini',
     });
   });
 
-  it('updates project config without changing existing session execution settings', async () => {
+  it('updates project config and applies it to existing sessions for new turns', async () => {
     const email = randomEmail('project-config-update');
 
     const projectResponse = await app.inject({
@@ -228,7 +231,12 @@ describe('API e2e', () => {
       payload: {
         name: 'Project Config Source',
         repoPath: TEST_REPO_PATH,
-        defaultModel: 'gpt-5-codex',
+        backend: 'codex',
+        backendConfig: {
+          model: 'gpt-5-codex',
+          sandbox: 'workspace-write',
+          approvalPolicy: 'on-request',
+        },
       },
     });
     expect(projectResponse.statusCode).toBe(201);
@@ -241,8 +249,7 @@ describe('API e2e', () => {
       payload: { title: 'Existing Session' },
     });
     expect(sessionResponse.statusCode).toBe(201);
-    const session = sessionResponse.json() as { id: string; modelOverride: string | null };
-    expect(session.modelOverride).toBe('gpt-5-codex');
+    const session = sessionResponse.json() as { id: string };
 
     const patchResponse = await app.inject({
       method: 'PATCH',
@@ -250,14 +257,22 @@ describe('API e2e', () => {
       headers: { 'x-user-email': email },
       payload: {
         name: 'Project Config Updated',
-        defaultModel: 'gpt-5-mini',
+        backendConfig: {
+          model: 'gpt-5-mini',
+          sandbox: 'workspace-write',
+          approvalPolicy: 'on-request',
+        },
       },
     });
     expect(patchResponse.statusCode).toBe(200);
     expect(patchResponse.json()).toMatchObject({
       id: project.id,
       name: 'Project Config Updated',
-      defaultModel: 'gpt-5-mini',
+      backendConfig: {
+        model: 'gpt-5-mini',
+        sandbox: 'workspace-write',
+        approvalPolicy: 'on-request',
+      },
     });
 
     const historyResponse = await app.inject({
@@ -269,7 +284,6 @@ describe('API e2e', () => {
     expect(historyResponse.json()).toMatchObject({
       session: {
         id: session.id,
-        modelOverride: 'gpt-5-codex',
       },
     });
   });

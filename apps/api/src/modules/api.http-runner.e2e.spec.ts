@@ -519,13 +519,22 @@ describe.sequential('API e2e (http runner)', () => {
     });
   });
 
-  it('prefers session model override over project default when dispatching a turn', async () => {
+  it('uses project model default when dispatching a turn', async () => {
     const email = randomEmail('http-runner-model');
 
     const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-user-email': email },
-      body: JSON.stringify({ name: 'HTTP Model Project', repoPath: TEST_REPO_PATH, defaultModel: 'gpt-5-codex' }),
+      body: JSON.stringify({
+        name: 'HTTP Model Project',
+        repoPath: TEST_REPO_PATH,
+        backend: 'codex',
+        backendConfig: {
+          model: 'gpt-5-codex',
+          sandbox: 'workspace-write',
+          approvalPolicy: 'on-request',
+        },
+      }),
     });
     expect(projectResponse.status).toBe(201);
     const project = (await projectResponse.json()) as { id: string };
@@ -533,7 +542,7 @@ describe.sequential('API e2e (http runner)', () => {
     const sessionResponse = await fetch(`${apiBaseUrl}/api/projects/${project.id}/sessions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-user-email': email },
-      body: JSON.stringify({ title: 'HTTP Model Session', modelOverride: 'gpt-5-mini' }),
+      body: JSON.stringify({ title: 'HTTP Model Session' }),
     });
     expect(sessionResponse.status).toBe(201);
     const session = (await sessionResponse.json()) as { id: string };
@@ -554,8 +563,8 @@ describe.sequential('API e2e (http runner)', () => {
     expect(turnStatusResponse.status).toBe(200);
     expect(await turnStatusResponse.json()).toMatchObject({
       id: turn.turnId,
-      requestedModel: 'gpt-5-mini',
-      effectiveModel: 'gpt-5-mini',
+      requestedModel: 'gpt-5-codex',
+      effectiveModel: 'gpt-5-codex',
     });
 
     const streamResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/stream?since=0`, {
@@ -563,10 +572,10 @@ describe.sequential('API e2e (http runner)', () => {
     });
     expect(streamResponse.status).toBe(200);
     const streamText = await streamResponse.text();
-    expect(streamText).toContain('"model":"gpt-5-mini"');
+    expect(streamText).toContain('"model":"gpt-5-codex"');
   });
 
-  it('prefers session cwd override over project repoPath when dispatching a turn', async () => {
+  it('uses project repoPath when dispatching a turn', async () => {
     const email = randomEmail('http-runner-cwd');
 
     const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
@@ -580,7 +589,7 @@ describe.sequential('API e2e (http runner)', () => {
     const sessionResponse = await fetch(`${apiBaseUrl}/api/projects/${project.id}/sessions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-user-email': email },
-      body: JSON.stringify({ title: 'HTTP Cwd Session', cwdOverride: '/tmp' }),
+      body: JSON.stringify({ title: 'HTTP Cwd Session' }),
     });
     expect(sessionResponse.status).toBe(201);
     const session = (await sessionResponse.json()) as { id: string };
@@ -601,8 +610,8 @@ describe.sequential('API e2e (http runner)', () => {
     expect(turnStatusResponse.status).toBe(200);
     expect(await turnStatusResponse.json()).toMatchObject({
       id: turn.turnId,
-      requestedCwd: '/tmp',
-      effectiveCwd: '/tmp',
+      requestedCwd: TEST_REPO_PATH,
+      effectiveCwd: TEST_REPO_PATH,
     });
 
     const streamResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/stream?since=0`, {
@@ -610,10 +619,10 @@ describe.sequential('API e2e (http runner)', () => {
     });
     expect(streamResponse.status).toBe(200);
     const streamText = await streamResponse.text();
-    expect(streamText).toContain('"cwd":"/tmp"');
+    expect(streamText).toContain(`"cwd":"${TEST_REPO_PATH}"`);
   });
 
-  it('normalizes project and session workspace paths through the runner filesystem endpoint', async () => {
+  it('normalizes project workspace paths through the runner filesystem endpoint', async () => {
     const email = randomEmail('http-runner-workspace');
 
     const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
@@ -628,14 +637,14 @@ describe.sequential('API e2e (http runner)', () => {
     const sessionResponse = await fetch(`${apiBaseUrl}/api/projects/${project.id}/sessions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-user-email': email },
-      body: JSON.stringify({ title: 'HTTP Workspace Session', cwdOverride: './tmp/http-project/session' }),
+      body: JSON.stringify({ title: 'HTTP Workspace Session' }),
     });
     expect(sessionResponse.status).toBe(201);
-    const session = (await sessionResponse.json()) as { cwdOverride: string };
-    expect(session.cwdOverride).toBe(path.resolve('./tmp/http-project/session'));
+    const session = (await sessionResponse.json()) as { projectId: string };
+    expect(session.projectId).toBe(project.id);
   });
 
-  it('prefers session sandbox and approval policy overrides over project defaults when dispatching a turn', async () => {
+  it('uses project sandbox and approval policy defaults when dispatching a turn', async () => {
     const email = randomEmail('http-runner-exec-defaults');
 
     const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
@@ -644,8 +653,12 @@ describe.sequential('API e2e (http runner)', () => {
       body: JSON.stringify({
         name: 'HTTP Exec Project',
         repoPath: TEST_REPO_PATH,
-        defaultSandbox: 'workspace-write',
-        defaultApprovalPolicy: 'on-request',
+        backend: 'codex',
+        backendConfig: {
+          model: 'gpt-5-codex',
+          sandbox: 'workspace-write',
+          approvalPolicy: 'on-request',
+        },
       }),
     });
     expect(projectResponse.status).toBe(201);
@@ -654,11 +667,7 @@ describe.sequential('API e2e (http runner)', () => {
     const sessionResponse = await fetch(`${apiBaseUrl}/api/projects/${project.id}/sessions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-user-email': email },
-      body: JSON.stringify({
-        title: 'HTTP Exec Session',
-        sandboxOverride: 'read-only',
-        approvalPolicyOverride: 'never',
-      }),
+      body: JSON.stringify({ title: 'HTTP Exec Session' }),
     });
     expect(sessionResponse.status).toBe(201);
     const session = (await sessionResponse.json()) as { id: string };
@@ -666,7 +675,7 @@ describe.sequential('API e2e (http runner)', () => {
     const turnResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}/turns`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-user-email': email },
-      body: JSON.stringify({ content: 'use execution overrides' }),
+      body: JSON.stringify({ content: 'use project execution defaults' }),
     });
     expect(turnResponse.status).toBe(201);
     const turn = (await turnResponse.json()) as { turnId: string };
@@ -679,10 +688,10 @@ describe.sequential('API e2e (http runner)', () => {
     expect(turnStatusResponse.status).toBe(200);
     expect(await turnStatusResponse.json()).toMatchObject({
       id: turn.turnId,
-      requestedSandbox: 'read-only',
-      requestedApprovalPolicy: 'never',
-      effectiveSandbox: 'read-only',
-      effectiveApprovalPolicy: 'never',
+      requestedSandbox: 'workspace-write',
+      requestedApprovalPolicy: 'on-request',
+      effectiveSandbox: 'workspace-write',
+      effectiveApprovalPolicy: 'on-request',
     });
 
     const streamResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/stream?since=0`, {
@@ -690,8 +699,8 @@ describe.sequential('API e2e (http runner)', () => {
     });
     expect(streamResponse.status).toBe(200);
     const streamText = await streamResponse.text();
-    expect(streamText).toContain('"sandbox":"read-only"');
-    expect(streamText).toContain('"approvalPolicy":"never"');
+    expect(streamText).toContain('"sandbox":"workspace-write"');
+    expect(streamText).toContain('"approvalPolicy":"on-request"');
   });
 
   it('forks a session into a new session with copied history and a new codex thread id', async () => {

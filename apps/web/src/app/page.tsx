@@ -56,10 +56,9 @@ import remarkGfm from 'remark-gfm';
 type Project = {
   id: string;
   name: string;
+  backend?: string;
+  backendConfig?: Record<string, unknown> | null;
   repoPath?: string | null;
-  defaultModel?: string | null;
-  defaultSandbox?: string | null;
-  defaultApprovalPolicy?: string | null;
   createdAt: string;
 };
 
@@ -67,10 +66,6 @@ type Session = {
   id: string;
   title: string;
   status: string;
-  cwdOverride?: string | null;
-  modelOverride?: string | null;
-  sandboxOverride?: string | null;
-  approvalPolicyOverride?: string | null;
   updatedAt: string;
 };
 
@@ -219,6 +214,55 @@ type SkillOption = {
   description: string;
 };
 
+const DEFAULT_CODEX_MODEL = 'gpt-5-codex';
+const DEFAULT_CODEX_SANDBOX = 'workspace-write';
+const DEFAULT_CODEX_APPROVAL_POLICY = 'on-request';
+
+function buildCodexBackendConfig(input: {
+  model: string;
+  sandbox: string;
+  approvalPolicy: string;
+}): Record<string, string> | null {
+  const config: Record<string, string> = {};
+  if (input.model.trim()) {
+    config.model = input.model.trim();
+  }
+  if (input.sandbox.trim()) {
+    config.sandbox = input.sandbox.trim();
+  }
+  if (input.approvalPolicy.trim()) {
+    config.approvalPolicy = input.approvalPolicy.trim();
+  }
+  return Object.keys(config).length > 0 ? config : null;
+}
+
+function readCodexBackendConfig(config: Record<string, unknown> | null | undefined): {
+  model: string;
+  sandbox: string;
+  approvalPolicy: string;
+} {
+  if (!config) {
+    return {
+      model: DEFAULT_CODEX_MODEL,
+      sandbox: DEFAULT_CODEX_SANDBOX,
+      approvalPolicy: DEFAULT_CODEX_APPROVAL_POLICY,
+    };
+  }
+  return {
+    model: typeof config.model === 'string' && config.model.trim() ? config.model : DEFAULT_CODEX_MODEL,
+    sandbox:
+      typeof config.sandbox === 'string' && config.sandbox.trim() ? config.sandbox : DEFAULT_CODEX_SANDBOX,
+    approvalPolicy:
+      typeof config.approvalPolicy === 'string' && config.approvalPolicy.trim()
+        ? config.approvalPolicy
+        : DEFAULT_CODEX_APPROVAL_POLICY,
+  };
+}
+
+function resolveModelDefault(models: AvailableModel[]): string {
+  return models.find((model) => model.isDefault)?.model ?? models[0]?.model ?? DEFAULT_CODEX_MODEL;
+}
+
 type RateLimitWindow = {
   usedPercent: number | null;
   resetsAt: number | null;
@@ -294,14 +338,12 @@ type ApprovalActionOption = {
 };
 
 const SANDBOX_OPTIONS = [
-  { value: '', label: 'Use runner default' },
   { value: 'read-only', label: 'read-only' },
   { value: 'workspace-write', label: 'workspace-write' },
   { value: 'danger-full-access', label: 'danger-full-access' },
 ];
 
 const APPROVAL_POLICY_OPTIONS = [
-  { value: '', label: 'Use runner default' },
   { value: 'untrusted', label: 'untrusted' },
   { value: 'on-failure', label: 'on-failure' },
   { value: 'on-request', label: 'on-request' },
@@ -327,7 +369,6 @@ const STREAM_EVENTS = [
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const CHAT_MARKDOWN_REMARK_PLUGINS = [remarkGfm];
 const WORKSPACE_SUGGESTIONS_LIST_ID = 'workspace-path-suggestions';
-const SESSION_CWD_SUGGESTIONS_LIST_ID = 'session-cwd-path-suggestions';
 const LAST_PROJECT_STORAGE_KEY_PREFIX = 'agentwaypoint:last-project:';
 const LAST_SESSION_STORAGE_KEY_PREFIX = 'agentwaypoint:last-session:';
 const PANEL_LAYOUT_STORAGE_KEY_PREFIX = 'agentwaypoint:panel-layout:';
@@ -406,20 +447,14 @@ export default function HomePage() {
   const [workspaceSuggestions, setWorkspaceSuggestions] = useState<string[]>([]);
   const [workspaceSuggestionBusy, setWorkspaceSuggestionBusy] = useState(false);
   const [newProjectDefaultModel, setNewProjectDefaultModel] = useState('');
-  const [newProjectDefaultSandbox, setNewProjectDefaultSandbox] = useState('');
-  const [newProjectDefaultApprovalPolicy, setNewProjectDefaultApprovalPolicy] = useState('');
+  const [newProjectDefaultSandbox, setNewProjectDefaultSandbox] = useState(DEFAULT_CODEX_SANDBOX);
+  const [newProjectDefaultApprovalPolicy, setNewProjectDefaultApprovalPolicy] = useState(DEFAULT_CODEX_APPROVAL_POLICY);
   const [projectConfigName, setProjectConfigName] = useState('');
   const [projectConfigRepoPath, setProjectConfigRepoPath] = useState('');
-  const [projectConfigDefaultModel, setProjectConfigDefaultModel] = useState('');
-  const [projectConfigDefaultSandbox, setProjectConfigDefaultSandbox] = useState('');
-  const [projectConfigDefaultApprovalPolicy, setProjectConfigDefaultApprovalPolicy] = useState('');
+  const [projectConfigDefaultModel, setProjectConfigDefaultModel] = useState(DEFAULT_CODEX_MODEL);
+  const [projectConfigDefaultSandbox, setProjectConfigDefaultSandbox] = useState(DEFAULT_CODEX_SANDBOX);
+  const [projectConfigDefaultApprovalPolicy, setProjectConfigDefaultApprovalPolicy] = useState(DEFAULT_CODEX_APPROVAL_POLICY);
   const [newSessionTitle, setNewSessionTitle] = useState('First Simulation Session');
-  const [newSessionCwdOverride, setNewSessionCwdOverride] = useState('');
-  const [sessionCwdSuggestions, setSessionCwdSuggestions] = useState<string[]>([]);
-  const [sessionCwdSuggestionBusy, setSessionCwdSuggestionBusy] = useState(false);
-  const [newSessionModelOverride, setNewSessionModelOverride] = useState('');
-  const [newSessionSandboxOverride, setNewSessionSandboxOverride] = useState('');
-  const [newSessionApprovalPolicyOverride, setNewSessionApprovalPolicyOverride] = useState('');
   const [availableSkills, setAvailableSkills] = useState<SkillOption[]>([]);
   const [prompt, setPrompt] = useState('');
   const [promptCursor, setPromptCursor] = useState(0);
@@ -461,7 +496,6 @@ export default function HomePage() {
   const [fileBrowserError, setFileBrowserError] = useState('');
   const [disableNativePathDatalist, setDisableNativePathDatalist] = useState(false);
   const [projectPathInputFocused, setProjectPathInputFocused] = useState(false);
-  const [sessionPathInputFocused, setSessionPathInputFocused] = useState(false);
   const [actionPanelMode, setActionPanelMode] = useState<ActionPanelMode>('closed');
   const [projectDeleteTarget, setProjectDeleteTarget] = useState<Project | null>(null);
   const [sessionDeleteTarget, setSessionDeleteTarget] = useState<Session | null>(null);
@@ -521,20 +555,18 @@ export default function HomePage() {
   const resolvedSessionInfo = useMemo(() => {
     const workspace =
       sessionInfoTurn?.effectiveCwd?.trim() ||
-      selectedSession?.cwdOverride?.trim() ||
+      selectedProject?.repoPath?.trim() ||
       'not set';
+    const codexBackendConfig = readCodexBackendConfig(selectedProject?.backendConfig);
     const model =
       sessionInfoTurn?.effectiveModel?.trim() ||
-      selectedSession?.modelOverride?.trim() ||
-      'runner default';
+      codexBackendConfig.model;
     const approval =
       sessionInfoTurn?.effectiveApprovalPolicy?.trim() ||
-      selectedSession?.approvalPolicyOverride?.trim() ||
-      'runner default';
+      codexBackendConfig.approvalPolicy;
     const sandbox =
       sessionInfoTurn?.effectiveSandbox?.trim() ||
-      selectedSession?.sandboxOverride?.trim() ||
-      'runner default';
+      codexBackendConfig.sandbox;
 
     return { workspace, model, approval, sandbox };
   }, [sessionInfoTurn, selectedSession, selectedProject]);
@@ -554,7 +586,6 @@ export default function HomePage() {
   const activeWorkspacePath = useMemo(
     () =>
       sessionInfoTurn?.effectiveCwd?.trim() ||
-      selectedSession?.cwdOverride?.trim() ||
       selectedProject?.repoPath?.trim() ||
       '',
     [sessionInfoTurn, selectedSession, selectedProject],
@@ -854,50 +885,6 @@ export default function HomePage() {
       controller.abort();
     };
   }, [mounted, newProjectRepoPath, projectConfigRepoPath, actionPanelMode, authenticated]);
-
-  useEffect(() => {
-    if (!mounted || !authenticated) {
-      return;
-    }
-
-    const prefix = newSessionCwdOverride.trim();
-    if (!prefix) {
-      setSessionCwdSuggestions([]);
-      setSessionCwdSuggestionBusy(false);
-      return;
-    }
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      setSessionCwdSuggestionBusy(true);
-      void apiRequest<{ data: string[] }>(
-        `/api/fs/suggestions?${new URLSearchParams({ prefix, limit: '8' }).toString()}`,
-        {
-          method: 'GET',
-          signal: controller.signal,
-        },
-      )
-        .then((response) => {
-          setSessionCwdSuggestions(response.data ?? []);
-        })
-        .catch((requestError) => {
-          if (isAbortError(requestError)) {
-            return;
-          }
-          setSessionCwdSuggestions([]);
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) {
-            setSessionCwdSuggestionBusy(false);
-          }
-        });
-    }, 180);
-
-    return () => {
-      clearTimeout(timer);
-      controller.abort();
-    };
-  }, [mounted, newSessionCwdOverride, authenticated]);
 
   useEffect(() => {
     if (!mounted || !authenticated || leftSidebarTab !== 'config') {
@@ -1480,7 +1467,11 @@ export default function HomePage() {
       const response = await apiRequest<{ data: AvailableModel[] }>('/api/models', {
         method: 'GET',
       });
-      setAvailableModels(response.data ?? []);
+      const models = response.data ?? [];
+      setAvailableModels(models);
+      const modelDefault = resolveModelDefault(models);
+      setNewProjectDefaultModel((current) => (current.trim() ? current : modelDefault));
+      setProjectConfigDefaultModel((current) => (current.trim() ? current : modelDefault));
     } catch (requestError) {
       setError(extractMessage(requestError));
     }
@@ -1853,16 +1844,18 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
+      const backendConfig = buildCodexBackendConfig({
+        model: newProjectDefaultModel,
+        sandbox: newProjectDefaultSandbox,
+        approvalPolicy: newProjectDefaultApprovalPolicy,
+      });
       const created = await apiRequest<Project>('/api/projects', {
         method: 'POST',
         body: {
           name: newProjectName.trim(),
+          backend: 'codex',
+          backendConfig,
           ...(newProjectRepoPath.trim() ? { repoPath: newProjectRepoPath.trim() } : {}),
-          ...(newProjectDefaultModel.trim() ? { defaultModel: newProjectDefaultModel.trim() } : {}),
-          ...(newProjectDefaultSandbox.trim() ? { defaultSandbox: newProjectDefaultSandbox.trim() } : {}),
-          ...(newProjectDefaultApprovalPolicy.trim()
-            ? { defaultApprovalPolicy: newProjectDefaultApprovalPolicy.trim() }
-            : {}),
         },
       });
       await loadProjects();
@@ -1889,12 +1882,6 @@ export default function HomePage() {
         method: 'POST',
         body: {
           title: newSessionTitle.trim(),
-          ...(newSessionCwdOverride.trim() ? { cwdOverride: newSessionCwdOverride.trim() } : {}),
-          ...(newSessionModelOverride.trim() ? { modelOverride: newSessionModelOverride.trim() } : {}),
-          ...(newSessionSandboxOverride.trim() ? { sandboxOverride: newSessionSandboxOverride.trim() } : {}),
-          ...(newSessionApprovalPolicyOverride.trim()
-            ? { approvalPolicyOverride: newSessionApprovalPolicyOverride.trim() }
-            : {}),
         },
       });
       await loadSessions(selectedProjectId);
@@ -2457,14 +2444,17 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
+      const backendConfig = buildCodexBackendConfig({
+        model: projectConfigDefaultModel,
+        sandbox: projectConfigDefaultSandbox,
+        approvalPolicy: projectConfigDefaultApprovalPolicy,
+      });
       await apiRequest<Project>(`/api/projects/${selectedProjectId}`, {
         method: 'PATCH',
         body: {
           name: projectConfigName.trim(),
           repoPath: projectConfigRepoPath.trim() || null,
-          defaultModel: projectConfigDefaultModel.trim() || null,
-          defaultSandbox: projectConfigDefaultSandbox.trim() || null,
-          defaultApprovalPolicy: projectConfigDefaultApprovalPolicy.trim() || null,
+          backendConfig,
         },
       });
       await loadProjects();
@@ -2477,6 +2467,11 @@ export default function HomePage() {
   }
 
   function openActionPanel(mode: ActionPanelMode): void {
+    if (mode === 'createProject') {
+      setNewProjectDefaultModel(resolveModelDefault(availableModels));
+      setNewProjectDefaultSandbox(DEFAULT_CODEX_SANDBOX);
+      setNewProjectDefaultApprovalPolicy(DEFAULT_CODEX_APPROVAL_POLICY);
+    }
     setActionPanelMode(mode);
   }
 
@@ -2500,12 +2495,13 @@ export default function HomePage() {
   }
 
   function openProjectConfigPanel(project: Project): void {
+    const backendConfig = readCodexBackendConfig(project.backendConfig);
     setSelectedProjectId(project.id);
     setProjectConfigName(project.name);
     setProjectConfigRepoPath(project.repoPath ?? '');
-    setProjectConfigDefaultModel(project.defaultModel ?? '');
-    setProjectConfigDefaultSandbox(project.defaultSandbox ?? '');
-    setProjectConfigDefaultApprovalPolicy(project.defaultApprovalPolicy ?? '');
+    setProjectConfigDefaultModel(backendConfig.model);
+    setProjectConfigDefaultSandbox(backendConfig.sandbox);
+    setProjectConfigDefaultApprovalPolicy(backendConfig.approvalPolicy);
     openActionPanel('projectConfig');
   }
 
@@ -2641,9 +2637,9 @@ export default function HomePage() {
     setManagedUserDefaultWorkspaceRootDraft('');
     setProjectConfigName('');
     setProjectConfigRepoPath('');
-    setProjectConfigDefaultModel('');
-    setProjectConfigDefaultSandbox('');
-    setProjectConfigDefaultApprovalPolicy('');
+    setProjectConfigDefaultModel(DEFAULT_CODEX_MODEL);
+    setProjectConfigDefaultSandbox(DEFAULT_CODEX_SANDBOX);
+    setProjectConfigDefaultApprovalPolicy(DEFAULT_CODEX_APPROVAL_POLICY);
   }
 
   async function handleApplyManagedUserFromPanel(): Promise<void> {
@@ -2986,7 +2982,6 @@ export default function HomePage() {
                       value={newProjectDefaultModel}
                       onChange={(event) => setNewProjectDefaultModel(event.target.value)}
                     >
-                      <option value="">Use runner default</option>
                       {availableModels.map((model) => (
                         <option key={model.id} value={model.model}>
                           {model.displayName}
@@ -3036,51 +3031,6 @@ export default function HomePage() {
                   <label>
                     Title
                     <input value={newSessionTitle} onChange={(event) => setNewSessionTitle(event.target.value)} />
-                  </label>
-                  <label>
-                    CWD Override
-                    <div className="path-input-wrap">
-                      <input
-                        value={newSessionCwdOverride}
-                        onFocus={() => setSessionPathInputFocused(true)}
-                        onChange={(event) => setNewSessionCwdOverride(event.target.value)}
-                        onBlur={(event) => {
-                          setNewSessionCwdOverride(
-                            applyDirectorySuggestionSelection(event.target.value, sessionCwdSuggestions),
-                          );
-                          setSessionPathInputFocused(false);
-                        }}
-                        list={disableNativePathDatalist ? undefined : SESSION_CWD_SUGGESTIONS_LIST_ID}
-                      />
-                      {disableNativePathDatalist && sessionPathInputFocused && sessionCwdSuggestions.length > 0 ? (
-                        <div className="path-suggestions">
-                          {sessionCwdSuggestions.map((suggestion) => (
-                            <button
-                              key={suggestion}
-                              type="button"
-                              className="path-suggestion-item"
-                              onPointerDown={(event) => event.preventDefault()}
-                              onClick={() => {
-                                setNewSessionCwdOverride(ensureTrailingSlash(suggestion));
-                                setSessionPathInputFocused(true);
-                              }}
-                            >
-                              {suggestion}
-                            </button>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                    {disableNativePathDatalist ? null : (
-                      <datalist id={SESSION_CWD_SUGGESTIONS_LIST_ID}>
-                        {sessionCwdSuggestions.map((suggestion) => (
-                          <option key={suggestion} value={suggestion} />
-                        ))}
-                      </datalist>
-                    )}
-                    <span className="sim-input-hint">
-                      {sessionCwdSuggestionBusy ? 'Loading suggestions…' : 'Directory suggestions by prefix.'}
-                    </span>
                   </label>
                   <div className="sim-actions">
                     <button type="button" onClick={() => void handleCreateSessionFromPanel()} disabled={busy}>
@@ -3150,7 +3100,6 @@ export default function HomePage() {
                       value={projectConfigDefaultModel}
                       onChange={(event) => setProjectConfigDefaultModel(event.target.value)}
                     >
-                      <option value="">Use runner default</option>
                       {availableModels.map((model) => (
                         <option key={model.id} value={model.model}>
                           {model.displayName}

@@ -1,5 +1,6 @@
 import { ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { resolveProjectCodexDefaults } from '../projects/project-backend-config';
 import { ProjectsService } from '../projects/projects.service';
 import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
 import { CreateSessionBody, ForkSessionBody } from './sessions.schemas';
@@ -33,10 +34,6 @@ export class SessionsService {
       },
       select: {
         id: true,
-        repoPath: true,
-        defaultModel: true,
-        defaultSandbox: true,
-        defaultApprovalPolicy: true,
       },
     });
 
@@ -44,24 +41,11 @@ export class SessionsService {
       throw new NotFoundException({ message: 'Project not found' });
     }
 
-    const cwdOverride = input.cwdOverride?.trim()
-      ? (await this.runnerAdapter.ensureDirectory({ path: input.cwdOverride.trim() })).path
-      : project.repoPath?.trim() || null;
-
-    const modelOverride = input.modelOverride?.trim() || project.defaultModel?.trim() || null;
-    const sandboxOverride = input.sandboxOverride?.trim() || project.defaultSandbox?.trim() || null;
-    const approvalPolicyOverride =
-      input.approvalPolicyOverride?.trim() || project.defaultApprovalPolicy?.trim() || null;
-
     return this.prisma.session.create({
       data: {
         projectId,
         title: input.title,
         status: 'active',
-        cwdOverride,
-        modelOverride,
-        sandboxOverride,
-        approvalPolicyOverride,
       },
     });
   }
@@ -79,10 +63,6 @@ export class SessionsService {
         projectId: true,
         title: true,
         status: true,
-        cwdOverride: true,
-        modelOverride: true,
-        sandboxOverride: true,
-        approvalPolicyOverride: true,
         updatedAt: true,
         messages: {
           orderBy: { createdAt: 'asc' },
@@ -134,10 +114,6 @@ export class SessionsService {
         projectId: session.projectId,
         title: session.title,
         status: session.status,
-        cwdOverride: session.cwdOverride,
-        modelOverride: session.modelOverride,
-        sandboxOverride: session.sandboxOverride,
-        approvalPolicyOverride: session.approvalPolicyOverride,
         updatedAt: session.updatedAt,
       },
       messages: session.messages,
@@ -164,10 +140,13 @@ export class SessionsService {
         projectId: true,
         title: true,
         codexThreadId: true,
-        cwdOverride: true,
-        modelOverride: true,
-        sandboxOverride: true,
-        approvalPolicyOverride: true,
+        project: {
+          select: {
+            repoPath: true,
+            backend: true,
+            backendConfig: true,
+          },
+        },
         messages: {
           orderBy: { createdAt: 'asc' },
           select: {
@@ -198,10 +177,11 @@ export class SessionsService {
       throw new ConflictException({ message: 'Cannot fork a session while a turn is active' });
     }
 
-    const cwd = sourceSession.cwdOverride?.trim() || null;
-    const model = sourceSession.modelOverride?.trim() || null;
-    const sandbox = sourceSession.sandboxOverride?.trim() || null;
-    const approvalPolicy = sourceSession.approvalPolicyOverride?.trim() || null;
+    const projectDefaults = resolveProjectCodexDefaults(sourceSession.project);
+    const cwd = sourceSession.project.repoPath?.trim() || null;
+    const model = projectDefaults.model;
+    const sandbox = projectDefaults.sandbox;
+    const approvalPolicy = projectDefaults.approvalPolicy;
 
     const forked = await this.runnerAdapter.forkThread({
       threadId: sourceSession.codexThreadId,
@@ -219,10 +199,6 @@ export class SessionsService {
           projectId: sourceSession.projectId,
           title,
           status: 'active',
-          cwdOverride: sourceSession.cwdOverride,
-          modelOverride: sourceSession.modelOverride,
-          sandboxOverride: sourceSession.sandboxOverride,
-          approvalPolicyOverride: sourceSession.approvalPolicyOverride,
           codexThreadId: forked.threadId,
         },
       });
@@ -303,10 +279,13 @@ export class SessionsService {
       select: {
         id: true,
         codexThreadId: true,
-        cwdOverride: true,
-        modelOverride: true,
-        sandboxOverride: true,
-        approvalPolicyOverride: true,
+        project: {
+          select: {
+            repoPath: true,
+            backend: true,
+            backendConfig: true,
+          },
+        },
       },
     });
 
@@ -318,10 +297,11 @@ export class SessionsService {
     if (!threadId) {
       throw new ConflictException({ message: 'Session cannot be compacted before the first turn starts' });
     }
-    const cwd = session.cwdOverride?.trim() || null;
-    const model = session.modelOverride?.trim() || null;
-    const sandbox = session.sandboxOverride?.trim() || null;
-    const approvalPolicy = session.approvalPolicyOverride?.trim() || null;
+    const projectDefaults = resolveProjectCodexDefaults(session.project);
+    const cwd = session.project.repoPath?.trim() || null;
+    const model = projectDefaults.model;
+    const sandbox = projectDefaults.sandbox;
+    const approvalPolicy = projectDefaults.approvalPolicy;
 
     const activeTurn = await this.prisma.turn.findFirst({
       where: {

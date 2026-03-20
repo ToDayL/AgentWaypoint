@@ -1,7 +1,9 @@
 import * as path from 'node:path';
 import { ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
+import { buildCodexBackendConfig, readCodexBackendConfigWithFallback } from './project-backend-config';
 import { CreateProjectBody, UpdateProjectBody } from './projects.schemas';
 
 const ACTIVE_TURN_STATUSES = ['queued', 'running', 'waiting_approval'] as const;
@@ -36,15 +38,16 @@ export class ProjectsService {
     const repoPath = input.repoPath?.trim()
       ? (await this.runnerAdapter.ensureDirectory({ path: input.repoPath.trim() })).path
       : await this.createDefaultWorkspaceForProject(input.name, user.defaultWorkspaceRoot);
+    const backend = normalizeBackend(input.backend);
+    const backendConfig = normalizeBackendConfigForWrite(resolveBackendConfigForCreate(backend, input.backendConfig));
 
     return this.prisma.project.create({
       data: {
         ownerUserId: userId,
         name: input.name,
         repoPath,
-        defaultModel: input.defaultModel,
-        defaultSandbox: input.defaultSandbox,
-        defaultApprovalPolicy: input.defaultApprovalPolicy,
+        backend,
+        backendConfig,
       },
     });
   }
@@ -83,14 +86,21 @@ export class ProjectsService {
   }
 
   async updateByIdForUser(userId: string, projectId: string, input: UpdateProjectBody) {
-    await this.getByIdForUser(userId, projectId);
+    const project = await this.prisma.project.findFirst({
+      where: {
+        id: projectId,
+        ownerUserId: userId,
+      },
+    });
+    if (!project) {
+      throw new NotFoundException({ message: 'Project not found' });
+    }
 
     const data: {
       name?: string;
       repoPath?: string | null;
-      defaultModel?: string | null;
-      defaultSandbox?: string | null;
-      defaultApprovalPolicy?: string | null;
+      backend?: string;
+      backendConfig?: Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput;
     } = {};
 
     if (typeof input.name === 'string') {
@@ -101,14 +111,11 @@ export class ProjectsService {
         ? (await this.runnerAdapter.ensureDirectory({ path: input.repoPath.trim() })).path
         : null;
     }
-    if (Object.prototype.hasOwnProperty.call(input, 'defaultModel')) {
-      data.defaultModel = input.defaultModel?.trim() || null;
+    if (typeof input.backend === 'string') {
+      data.backend = normalizeBackend(input.backend);
     }
-    if (Object.prototype.hasOwnProperty.call(input, 'defaultSandbox')) {
-      data.defaultSandbox = input.defaultSandbox?.trim() || null;
-    }
-    if (Object.prototype.hasOwnProperty.call(input, 'defaultApprovalPolicy')) {
-      data.defaultApprovalPolicy = input.defaultApprovalPolicy?.trim() || null;
+    if (Object.prototype.hasOwnProperty.call(input, 'backendConfig')) {
+      data.backendConfig = normalizeBackendConfigForWrite(input.backendConfig ?? {});
     }
 
     return this.prisma.project.update({
@@ -180,6 +187,31 @@ export class ProjectsService {
       },
     });
   }
+}
+
+function normalizeBackend(inputBackend: string | undefined): string {
+  const backend = (inputBackend ?? 'codex').trim().toLowerCase();
+  if (!backend) {
+    return 'codex';
+  }
+  return backend;
+}
+
+function normalizeBackendConfigForWrite(
+  backendConfig: Record<string, unknown>,
+): Prisma.InputJsonValue {
+  return backendConfig as Prisma.InputJsonValue;
+}
+
+function resolveBackendConfigForCreate(
+  backend: string,
+  inputConfig: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (backend !== 'codex') {
+    return inputConfig ?? {};
+  }
+  const codexConfig = readCodexBackendConfigWithFallback(inputConfig);
+  return buildCodexBackendConfig(codexConfig);
 }
 
 function resolveWorkspaceRoot(userWorkspaceRoot: string | null): string {
