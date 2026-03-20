@@ -3015,7 +3015,7 @@ export default function HomePage() {
                       ))}
                     </select>
                   </label>
-                  <div className="sim-actions">
+                  <div className="sim-actions action-panel-actions-inline">
                     <button type="button" onClick={() => void handleCreateProjectFromPanel()} disabled={busy}>
                       Create
                     </button>
@@ -3032,7 +3032,7 @@ export default function HomePage() {
                     Title
                     <input value={newSessionTitle} onChange={(event) => setNewSessionTitle(event.target.value)} />
                   </label>
-                  <div className="sim-actions">
+                  <div className="sim-actions action-panel-actions-inline">
                     <button type="button" onClick={() => void handleCreateSessionFromPanel()} disabled={busy}>
                       Create
                     </button>

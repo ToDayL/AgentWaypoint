@@ -1214,6 +1214,15 @@ button:disabled {
   gap: 0.6rem;
 }
 
+.action-panel-actions-inline {
+  margin-top: 0.95rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.action-panel-actions-inline button {
+  margin-top: 0;
+}
+
 .sim-actions-approval {
   margin-top: 0.7rem;
 }
@@ -1989,6 +1998,10 @@ button:disabled {
 
   .sim-actions {
     grid-template-columns: 1fr;
+  }
+
+  .action-panel-actions-inline {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .sim-approval {
