@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import Busboy from 'busboy';
+import { ClaudeBackend } from './claude-backend.js';
 import { CodexBackend } from './codex-backend.js';
 import { FilesystemBackend } from './filesystem-backend.js';
 import type {
@@ -25,7 +26,9 @@ import type {
 const port = Number(process.env.RUNNER_PORT ?? 4700);
 const host = process.env.RUNNER_HOST ?? '127.0.0.1';
 const authToken = process.env.RUNNER_AUTH_TOKEN?.trim() || null;
-const runnerBackend: RunnerBackend = (process.env.RUNNER_BACKEND ?? 'codex').trim().toLowerCase() === 'mock' ? 'mock' : 'codex';
+const defaultRunnerBackend: RunnerBackend = 'codex';
+const allRunnerBackends: RunnerBackend[] = ['codex', 'claude', 'mock'];
+const supportedBackends = parseSupportedBackends(process.env.RUNNER_SUPPORTED_BACKENDS);
 const codexBin = process.env.RUNNER_CODEX_BIN?.trim() || 'codex';
 const codexDefaultCwd = process.env.RUNNER_CODEX_CWD?.trim() || process.cwd();
 const codexDefaultModel = process.env.RUNNER_CODEX_MODEL?.trim() || null;
@@ -54,6 +57,7 @@ const codexBackend = new CodexBackend(
     failTurn,
   },
 );
+const claudeBackend = new ClaudeBackend();
 
 const server = createServer(async (request, response) => {
   try {
@@ -61,7 +65,12 @@ const server = createServer(async (request, response) => {
     const pathname = url.pathname;
 
     if (request.method === 'GET' && pathname === '/runner/health') {
-      sendJson(response, 200, { status: 'ok', backend: runnerBackend, activeTurnCount: activeTurns.size });
+      sendJson(response, 200, {
+        status: 'ok',
+        backend: supportedBackends.length === 1 ? supportedBackends[0] : 'multi',
+        supportedBackends,
+        activeTurnCount: activeTurns.size,
+      });
       return;
     }
 
@@ -98,7 +107,7 @@ const server = createServer(async (request, response) => {
       request.method === 'GET' &&
       (pathname === '/runner/codex/rate-limits' || pathname === '/runner/account/rate-limits')
     ) {
-      if (runnerBackend === 'mock') {
+      if (!isBackendSupported('codex')) {
         sendJson(response, 200, {
           rateLimits: null,
           rateLimitsByLimitId: null,
@@ -218,7 +227,7 @@ const server = createServer(async (request, response) => {
     if (pathname === '/runner/turns/start') {
       const payload = parseStartTurnBody(await readJsonBody(request));
       payload.cwd = await filesystemBackend.resolveWorkspaceCwd(payload.cwd);
-      const requestedBackend = parseRunnerBackend(payload.backend ?? runnerBackend, 'backend');
+      const requestedBackend = resolveRequestedBackend(payload.backend, 'backend');
       const existing = activeTurns.get(payload.turnId);
       if (existing) {
         await cancelActiveTurn(existing, { emitCancelEvent: false });
@@ -275,7 +284,7 @@ const server = createServer(async (request, response) => {
     if (pathname === '/runner/threads/fork') {
       const payload = parseForkThreadBody(await readJsonBody(request));
       const cwd = await filesystemBackend.resolveWorkspaceCwd(payload.cwd);
-      const requestedBackend = parseRunnerBackend(payload.backend ?? runnerBackend, 'backend');
+      const requestedBackend = resolveRequestedBackend(payload.backend, 'backend');
 
       if (requestedBackend === 'mock') {
         sendJson(response, 200, {
@@ -294,8 +303,7 @@ const server = createServer(async (request, response) => {
 
     if (pathname === '/runner/threads/close') {
       const payload = parseCloseThreadBody(await readJsonBody(request));
-
-      if (runnerBackend === 'mock') {
+      if (!isBackendSupported('codex')) {
         response.statusCode = 204;
         response.end();
         return;
@@ -310,7 +318,7 @@ const server = createServer(async (request, response) => {
     if (pathname === '/runner/threads/compact') {
       const payload = parseCompactThreadBody(await readJsonBody(request));
       const cwd = await filesystemBackend.resolveWorkspaceCwd(payload.cwd);
-      const requestedBackend = parseRunnerBackend(payload.backend ?? runnerBackend, 'backend');
+      const requestedBackend = resolveRequestedBackend(payload.backend, 'backend');
 
       if (requestedBackend === 'mock') {
         sendJson(response, 202, {
@@ -388,7 +396,9 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, host, () => {
   // eslint-disable-next-line no-console
-  console.log(`[agentwaypoint-runner] listening on http://${host}:${port} (backend=${runnerBackend})`);
+  console.log(
+    `[agentwaypoint-runner] listening on http://${host}:${port} (supportedBackends=${supportedBackends.join(',')})`,
+  );
 });
 
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
@@ -549,10 +559,36 @@ function readOptionalRecord(value: unknown, field: string): Record<string, unkno
 
 function parseRunnerBackend(value: string, field: string): RunnerBackend {
   const normalized = value.trim().toLowerCase();
-  if (normalized === 'codex' || normalized === 'mock') {
+  if (normalized === 'codex' || normalized === 'mock' || normalized === 'claude') {
     return normalized;
   }
-  throw new Error(`${field} must be one of: codex, mock`);
+  throw new Error(`${field} must be one of: codex, claude, mock`);
+}
+
+function parseSupportedBackends(value: string | undefined): RunnerBackend[] {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) {
+    return [...allRunnerBackends];
+  }
+  const parsed = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => parseRunnerBackend(entry, 'RUNNER_SUPPORTED_BACKENDS'));
+  const unique = Array.from(new Set(parsed));
+  return unique.length > 0 ? unique : [...allRunnerBackends];
+}
+
+function isBackendSupported(backend: RunnerBackend): boolean {
+  return supportedBackends.includes(backend);
+}
+
+function resolveRequestedBackend(input: string | null | undefined, field: string): RunnerBackend {
+  const parsed = parseRunnerBackend(input ?? defaultRunnerBackend, field);
+  if (!isBackendSupported(parsed)) {
+    throw new Error(`${field} backend "${parsed}" is not enabled`);
+  }
+  return parsed;
 }
 
 async function parseWorkspaceUploadForm(
@@ -680,33 +716,53 @@ async function startMockExecution(turn: ActiveMockTurn): Promise<void> {
 }
 
 async function listModels(requestedBackend: RunnerBackend | null): Promise<ModelListItem[]> {
-  if (requestedBackend && requestedBackend !== runnerBackend) {
+  if (requestedBackend && !isBackendSupported(requestedBackend)) {
     return [];
   }
 
-  if (runnerBackend === 'mock') {
-    const model = codexDefaultModel || 'gpt-5-codex';
-    return [
-      {
-        id: model,
-        backend: 'mock',
-        model,
-        displayName: model,
-        description: 'Configured mock/default model',
-        hidden: false,
-        isDefault: true,
-      },
-    ];
+  if (requestedBackend === 'claude') {
+    return claudeBackend.listModels();
   }
 
-  return codexBackend.listModels();
+  if (requestedBackend === 'mock') {
+    return [buildMockModel()];
+  }
+
+  if (requestedBackend === 'codex') {
+    return codexBackend.listModels();
+  }
+
+  const models: ModelListItem[] = [];
+  if (isBackendSupported('codex')) {
+    models.push(...(await codexBackend.listModels()));
+  }
+  if (isBackendSupported('claude')) {
+    models.push(...(await claudeBackend.listModels()));
+  }
+  if (isBackendSupported('mock')) {
+    models.push(buildMockModel());
+  }
+  return models;
 }
 
 async function listSkills(cwd: string | null): Promise<SkillListItem[]> {
-  if (runnerBackend === 'mock') {
+  if (!isBackendSupported('codex')) {
     return [];
   }
   return codexBackend.listSkills(cwd?.trim() || codexDefaultCwd);
+}
+
+function buildMockModel(): ModelListItem {
+  const model = codexDefaultModel || 'gpt-5-codex';
+  return {
+    id: model,
+    backend: 'mock',
+    model,
+    displayName: model,
+    description: 'Configured mock/default model',
+    hidden: false,
+    isDefault: true,
+  };
 }
 
 function ensureTurnStreamState(

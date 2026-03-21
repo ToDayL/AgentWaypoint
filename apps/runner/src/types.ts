@@ -104,7 +104,7 @@ export type RunnerEventType =
   | 'turn.failed'
   | 'turn.cancelled';
 
-export type RunnerBackend = 'codex' | 'mock';
+export type RunnerBackend = 'codex' | 'claude' | 'mock';
 
 export type ActiveTurnBase = {
   turnId: string;
