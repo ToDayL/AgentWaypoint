@@ -106,10 +106,8 @@ export class TurnsService implements OnModuleInit {
           sessionId,
           userMessageId: userMessage.id,
           status: 'queued',
-          requestedCwd: cwd,
-          requestedModel: null,
-          requestedSandbox: null,
-          requestedApprovalPolicy: null,
+          backend,
+          requestedBackendConfig: buildRequestedBackendConfig(backendConfig, cwd),
         },
       });
     });
@@ -250,20 +248,16 @@ export class TurnsService implements OnModuleInit {
     return {
       id: turn.id,
       sessionId: turn.sessionId,
+      backend: turn.backend,
       status: turn.status,
       failureCode: turn.failureCode,
       failureMessage: turn.failureMessage,
       createdAt: turn.createdAt,
       startedAt: turn.startedAt,
       endedAt: turn.endedAt,
-      requestedCwd: turn.requestedCwd,
-      requestedModel: turn.requestedModel,
-      requestedSandbox: turn.requestedSandbox,
-      requestedApprovalPolicy: turn.requestedApprovalPolicy,
-      effectiveCwd: turn.effectiveCwd,
-      effectiveModel: turn.effectiveModel,
-      effectiveSandbox: turn.effectiveSandbox,
-      effectiveApprovalPolicy: turn.effectiveApprovalPolicy,
+      requestedBackendConfig: normalizeJsonRecord(turn.requestedBackendConfig),
+      effectiveBackendConfig: normalizeJsonRecord(turn.effectiveBackendConfig),
+      effectiveRuntimeConfig: normalizeJsonRecord(turn.effectiveRuntimeConfig),
       contextRemainingRatio: turn.contextRemainingRatio === null ? null : Number(turn.contextRemainingRatio),
       contextRemainingTokens: turn.contextRemainingTokens,
       contextWindowTokens: turn.contextWindowTokens,
@@ -275,7 +269,7 @@ export class TurnsService implements OnModuleInit {
   async ingestRunnerEvent(turnId: string, type: RunnerEventType, payload: Record<string, unknown>) {
     const turn = await this.prisma.turn.findUnique({
       where: { id: turnId },
-      select: { id: true, sessionId: true, status: true },
+      select: { id: true, sessionId: true, status: true, backend: true, requestedBackendConfig: true },
     });
     if (!turn) {
       throw new NotFoundException({ message: 'Turn not found' });
@@ -296,22 +290,16 @@ export class TurnsService implements OnModuleInit {
             data: {
               status: 'running',
               startedAt: new Date(),
-              effectiveCwd: typeof payload.cwd === 'string' ? payload.cwd : null,
-              effectiveModel: typeof payload.model === 'string' ? payload.model : null,
-              effectiveSandbox: typeof payload.sandbox === 'string' ? payload.sandbox : null,
-              effectiveApprovalPolicy:
-                typeof payload.approvalPolicy === 'string' ? payload.approvalPolicy : null,
+              effectiveBackendConfig: buildEffectiveBackendConfig(payload, turn),
+              effectiveRuntimeConfig: buildEffectiveRuntimeConfig(payload),
             },
           });
         } else {
           await this.prisma.turn.update({
             where: { id: turnId },
             data: {
-              effectiveCwd: typeof payload.cwd === 'string' ? payload.cwd : null,
-              effectiveModel: typeof payload.model === 'string' ? payload.model : null,
-              effectiveSandbox: typeof payload.sandbox === 'string' ? payload.sandbox : null,
-              effectiveApprovalPolicy:
-                typeof payload.approvalPolicy === 'string' ? payload.approvalPolicy : null,
+              effectiveBackendConfig: buildEffectiveBackendConfig(payload, turn),
+              effectiveRuntimeConfig: buildEffectiveRuntimeConfig(payload),
             },
           });
         }
@@ -715,4 +703,110 @@ function extractAssistantDeltaText(payload: Prisma.JsonValue): string {
   }
   const text = (payload as Record<string, unknown>).text;
   return typeof text === 'string' ? text : '';
+}
+
+function normalizeJsonRecord(value: Prisma.JsonValue | null): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function buildRequestedBackendConfig(
+  backendConfig: Record<string, unknown> | null,
+  cwd: string | null,
+): Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput {
+  const payload: Record<string, unknown> = {};
+  if (backendConfig) {
+    Object.assign(payload, backendConfig);
+  }
+  if (typeof cwd === 'string' && cwd.trim().length > 0) {
+    payload.cwd = cwd.trim();
+  }
+  if (Object.keys(payload).length === 0) {
+    return Prisma.JsonNull;
+  }
+  return JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue;
+}
+
+function buildEffectiveBackendConfig(
+  payload: Record<string, unknown>,
+  turn: { backend: string | null; requestedBackendConfig: Prisma.JsonValue | null },
+): Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput {
+  const effective: Record<string, unknown> = {};
+  const requested = normalizeJsonRecord(turn.requestedBackendConfig);
+  if (typeof payload.cwd === 'string' && payload.cwd.trim().length > 0) {
+    effective.cwd = payload.cwd.trim();
+  } else if (typeof requested?.cwd === 'string' && requested.cwd.trim().length > 0) {
+    effective.cwd = requested.cwd.trim();
+  }
+  if (typeof payload.model === 'string' && payload.model.trim().length > 0) {
+    effective.model = payload.model.trim();
+  } else if (typeof requested?.model === 'string' && requested.model.trim().length > 0) {
+    effective.model = requested.model.trim();
+  }
+
+  const explicitExecutionMode =
+    typeof payload.executionMode === 'string' && payload.executionMode.trim().length > 0
+      ? normalizeExecutionMode(payload.executionMode)
+      : null;
+  const requestedExecutionMode =
+    typeof requested?.executionMode === 'string' && requested.executionMode.trim().length > 0
+      ? normalizeExecutionMode(requested.executionMode)
+      : null;
+  const derivedExecutionMode =
+    turn.backend?.trim() === 'codex' ? deriveExecutionModeFromRuntime(payload) : null;
+  const executionMode = explicitExecutionMode ?? requestedExecutionMode ?? derivedExecutionMode;
+  if (executionMode) {
+    effective.executionMode = executionMode;
+  }
+  if (Object.keys(effective).length === 0) {
+    return Prisma.JsonNull;
+  }
+  return JSON.parse(JSON.stringify(effective)) as Prisma.InputJsonValue;
+}
+
+function buildEffectiveRuntimeConfig(
+  payload: Record<string, unknown>,
+): Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput {
+  const runtime: Record<string, unknown> = {};
+  if (typeof payload.cwd === 'string' && payload.cwd.trim().length > 0) {
+    runtime.cwd = payload.cwd.trim();
+  }
+  if (typeof payload.model === 'string' && payload.model.trim().length > 0) {
+    runtime.model = payload.model.trim();
+  }
+  if (typeof payload.sandbox === 'string' && payload.sandbox.trim().length > 0) {
+    runtime.sandbox = payload.sandbox.trim();
+  }
+  if (typeof payload.approvalPolicy === 'string' && payload.approvalPolicy.trim().length > 0) {
+    runtime.approvalPolicy = payload.approvalPolicy.trim();
+  }
+  if (Object.keys(runtime).length === 0) {
+    return Prisma.JsonNull;
+  }
+  return JSON.parse(JSON.stringify(runtime)) as Prisma.InputJsonValue;
+}
+
+function normalizeExecutionMode(value: string): 'read-only' | 'safe-write' | 'yolo' | null {
+  const normalized = value.trim();
+  if (normalized === 'read-only' || normalized === 'safe-write' || normalized === 'yolo') {
+    return normalized;
+  }
+  return null;
+}
+
+function deriveExecutionModeFromRuntime(payload: Record<string, unknown>): 'read-only' | 'safe-write' | 'yolo' | null {
+  const sandbox = typeof payload.sandbox === 'string' ? payload.sandbox.trim() : '';
+  const approvalPolicy = typeof payload.approvalPolicy === 'string' ? payload.approvalPolicy.trim() : '';
+  if (!sandbox && !approvalPolicy) {
+    return null;
+  }
+  if (sandbox === 'read-only') {
+    return 'read-only';
+  }
+  if (sandbox === 'danger-full-access' || approvalPolicy === 'never') {
+    return 'yolo';
+  }
+  return 'safe-write';
 }

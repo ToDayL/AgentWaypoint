@@ -77,14 +77,10 @@ export class SessionsService {
           select: {
             id: true,
             status: true,
-            requestedCwd: true,
-            requestedModel: true,
-            requestedSandbox: true,
-            requestedApprovalPolicy: true,
-            effectiveCwd: true,
-            effectiveModel: true,
-            effectiveSandbox: true,
-            effectiveApprovalPolicy: true,
+            backend: true,
+            requestedBackendConfig: true,
+            effectiveBackendConfig: true,
+            effectiveRuntimeConfig: true,
             failureCode: true,
             failureMessage: true,
             contextRemainingRatio: true,
@@ -118,6 +114,9 @@ export class SessionsService {
       messages: session.messages,
       turns: session.turns.map((turn) => ({
         ...turn,
+        requestedBackendConfig: normalizeJsonRecord(turn.requestedBackendConfig),
+        effectiveBackendConfig: normalizeJsonRecord(turn.effectiveBackendConfig),
+        effectiveRuntimeConfig: normalizeJsonRecord(turn.effectiveRuntimeConfig),
         contextRemainingRatio:
           turn.contextRemainingRatio === null ? null : Number(turn.contextRemainingRatio),
       })),
@@ -359,4 +358,11 @@ export class SessionsService {
     }
     return { accepted: true };
   }
+}
+
+function normalizeJsonRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
 }

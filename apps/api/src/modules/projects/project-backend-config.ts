@@ -1,11 +1,10 @@
 export const DEFAULT_CODEX_MODEL = 'gpt-5-codex';
-export const DEFAULT_CODEX_SANDBOX = 'workspace-write';
-export const DEFAULT_CODEX_APPROVAL_POLICY = 'on-request';
+export const DEFAULT_CODEX_EXECUTION_MODE = 'safe-write';
+export type CodexExecutionMode = 'read-only' | 'safe-write' | 'yolo';
 
-type CodexDefaults = {
+export type CodexDefaults = {
   model: string;
-  sandbox: string;
-  approvalPolicy: string;
+  executionMode: CodexExecutionMode;
 };
 
 type ProjectLikeWithBackendConfig = {
@@ -16,8 +15,7 @@ type ProjectLikeWithBackendConfig = {
 export function buildCodexBackendConfig(input: CodexDefaults): Record<string, string> {
   return {
     model: input.model,
-    sandbox: input.sandbox,
-    approvalPolicy: input.approvalPolicy,
+    executionMode: input.executionMode,
   };
 }
 
@@ -29,8 +27,7 @@ export function resolveProjectCodexDefaults(project: ProjectLikeWithBackendConfi
   const fromConfig = readCodexBackendConfig(project.backendConfig) ?? codexDefaultsFromFallback();
   return {
     model: fromConfig.model,
-    sandbox: fromConfig.sandbox,
-    approvalPolicy: fromConfig.approvalPolicy,
+    executionMode: fromConfig.executionMode,
   };
 }
 
@@ -49,23 +46,20 @@ export function readCodexBackendConfig(input: unknown): CodexDefaults | null {
 
   const record = input as Record<string, unknown>;
   const model = normalizeNullableString(typeof record.model === 'string' ? record.model : null);
-  const sandbox = normalizeNullableString(typeof record.sandbox === 'string' ? record.sandbox : null);
-  const approvalPolicy = normalizeNullableString(typeof record.approvalPolicy === 'string' ? record.approvalPolicy : null);
-  if (!model || !sandbox || !approvalPolicy) {
+  const executionMode = readCodexExecutionMode(record);
+  if (!model || !executionMode) {
     return null;
   }
   return {
     model,
-    sandbox,
-    approvalPolicy,
+    executionMode,
   };
 }
 
 function codexDefaultsFromFallback(): CodexDefaults {
   return {
     model: DEFAULT_CODEX_MODEL,
-    sandbox: DEFAULT_CODEX_SANDBOX,
-    approvalPolicy: DEFAULT_CODEX_APPROVAL_POLICY,
+    executionMode: DEFAULT_CODEX_EXECUTION_MODE,
   };
 }
 
@@ -83,4 +77,12 @@ export function ensureCompleteCodexBackendConfig(input: unknown): CodexDefaults 
     return codexDefaultsFromFallback();
   }
   return parsed;
+}
+
+function readCodexExecutionMode(record: Record<string, unknown>): CodexExecutionMode | null {
+  const explicit = normalizeNullableString(typeof record.executionMode === 'string' ? record.executionMode : null);
+  if (explicit === 'read-only' || explicit === 'safe-write' || explicit === 'yolo') {
+    return explicit;
+  }
+  return null;
 }

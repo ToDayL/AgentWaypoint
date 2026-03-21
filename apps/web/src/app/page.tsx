@@ -87,15 +87,11 @@ type ChatMessage = {
 
 type TurnSummary = {
   id: string;
+  backend: string | null;
   status: string;
-  requestedCwd: string | null;
-  requestedModel: string | null;
-  requestedSandbox: string | null;
-  requestedApprovalPolicy: string | null;
-  effectiveCwd: string | null;
-  effectiveModel: string | null;
-  effectiveSandbox: string | null;
-  effectiveApprovalPolicy: string | null;
+  requestedBackendConfig: Record<string, unknown> | null;
+  effectiveBackendConfig: Record<string, unknown> | null;
+  effectiveRuntimeConfig: Record<string, unknown> | null;
   failureCode: string | null;
   failureMessage: string | null;
   contextRemainingRatio: number | null;
@@ -155,15 +151,11 @@ type ParsedDiffFile = ReturnType<typeof parseDiff>[number];
 type TurnStatusResponse = {
   id: string;
   sessionId: string;
+  backend: string | null;
   status: string;
-  requestedCwd: string | null;
-  requestedModel: string | null;
-  requestedSandbox: string | null;
-  requestedApprovalPolicy: string | null;
-  effectiveCwd: string | null;
-  effectiveModel: string | null;
-  effectiveSandbox: string | null;
-  effectiveApprovalPolicy: string | null;
+  requestedBackendConfig: Record<string, unknown> | null;
+  effectiveBackendConfig: Record<string, unknown> | null;
+  effectiveRuntimeConfig: Record<string, unknown> | null;
   failureCode: string | null;
   failureMessage: string | null;
   contextRemainingRatio: number | null;
@@ -215,52 +207,70 @@ type SkillOption = {
 };
 
 const DEFAULT_CODEX_MODEL = 'gpt-5-codex';
-const DEFAULT_CODEX_SANDBOX = 'workspace-write';
-const DEFAULT_CODEX_APPROVAL_POLICY = 'on-request';
+const DEFAULT_CODEX_EXECUTION_MODE = 'safe-write';
 
 function buildCodexBackendConfig(input: {
   model: string;
-  sandbox: string;
-  approvalPolicy: string;
+  executionMode: string;
 }): Record<string, string> | null {
   const config: Record<string, string> = {};
   if (input.model.trim()) {
     config.model = input.model.trim();
   }
-  if (input.sandbox.trim()) {
-    config.sandbox = input.sandbox.trim();
-  }
-  if (input.approvalPolicy.trim()) {
-    config.approvalPolicy = input.approvalPolicy.trim();
+  if (input.executionMode.trim()) {
+    config.executionMode = input.executionMode.trim();
   }
   return Object.keys(config).length > 0 ? config : null;
 }
 
 function readCodexBackendConfig(config: Record<string, unknown> | null | undefined): {
   model: string;
-  sandbox: string;
-  approvalPolicy: string;
+  executionMode: string;
 } {
   if (!config) {
     return {
       model: DEFAULT_CODEX_MODEL,
-      sandbox: DEFAULT_CODEX_SANDBOX,
-      approvalPolicy: DEFAULT_CODEX_APPROVAL_POLICY,
+      executionMode: DEFAULT_CODEX_EXECUTION_MODE,
     };
   }
   return {
     model: typeof config.model === 'string' && config.model.trim() ? config.model : DEFAULT_CODEX_MODEL,
-    sandbox:
-      typeof config.sandbox === 'string' && config.sandbox.trim() ? config.sandbox : DEFAULT_CODEX_SANDBOX,
-    approvalPolicy:
-      typeof config.approvalPolicy === 'string' && config.approvalPolicy.trim()
-        ? config.approvalPolicy
-        : DEFAULT_CODEX_APPROVAL_POLICY,
+    executionMode:
+      typeof config.executionMode === 'string' && config.executionMode.trim()
+        ? config.executionMode
+        : DEFAULT_CODEX_EXECUTION_MODE,
   };
 }
 
 function resolveModelDefault(models: AvailableModel[]): string {
   return models.find((model) => model.isDefault)?.model ?? models[0]?.model ?? DEFAULT_CODEX_MODEL;
+}
+
+function mapExecutionModeToRuntime(executionMode: string): { sandbox: string; approvalPolicy: string } {
+  if (executionMode === 'read-only') {
+    return { sandbox: 'read-only', approvalPolicy: 'on-request' };
+  }
+  if (executionMode === 'yolo') {
+    return { sandbox: 'danger-full-access', approvalPolicy: 'never' };
+  }
+  return { sandbox: 'workspace-write', approvalPolicy: 'on-request' };
+}
+
+function readTurnRuntimeConfig(config: Record<string, unknown> | null | undefined): {
+  cwd: string | null;
+  model: string | null;
+  sandbox: string | null;
+  approvalPolicy: string | null;
+} {
+  if (!config) {
+    return { cwd: null, model: null, sandbox: null, approvalPolicy: null };
+  }
+  const cwd = typeof config.cwd === 'string' && config.cwd.trim() ? config.cwd.trim() : null;
+  const model = typeof config.model === 'string' && config.model.trim() ? config.model.trim() : null;
+  const sandbox = typeof config.sandbox === 'string' && config.sandbox.trim() ? config.sandbox.trim() : null;
+  const approvalPolicy =
+    typeof config.approvalPolicy === 'string' && config.approvalPolicy.trim() ? config.approvalPolicy.trim() : null;
+  return { cwd, model, sandbox, approvalPolicy };
 }
 
 type RateLimitWindow = {
@@ -337,17 +347,10 @@ type ApprovalActionOption = {
   secondary?: boolean;
 };
 
-const SANDBOX_OPTIONS = [
+const EXECUTION_MODE_OPTIONS = [
   { value: 'read-only', label: 'read-only' },
-  { value: 'workspace-write', label: 'workspace-write' },
-  { value: 'danger-full-access', label: 'danger-full-access' },
-];
-
-const APPROVAL_POLICY_OPTIONS = [
-  { value: 'untrusted', label: 'untrusted' },
-  { value: 'on-failure', label: 'on-failure' },
-  { value: 'on-request', label: 'on-request' },
-  { value: 'never', label: 'never' },
+  { value: 'safe-write', label: 'safe-write' },
+  { value: 'yolo', label: 'yolo' },
 ];
 
 const STREAM_EVENTS = [
@@ -447,13 +450,11 @@ export default function HomePage() {
   const [workspaceSuggestions, setWorkspaceSuggestions] = useState<string[]>([]);
   const [workspaceSuggestionBusy, setWorkspaceSuggestionBusy] = useState(false);
   const [newProjectDefaultModel, setNewProjectDefaultModel] = useState('');
-  const [newProjectDefaultSandbox, setNewProjectDefaultSandbox] = useState(DEFAULT_CODEX_SANDBOX);
-  const [newProjectDefaultApprovalPolicy, setNewProjectDefaultApprovalPolicy] = useState(DEFAULT_CODEX_APPROVAL_POLICY);
+  const [newProjectExecutionMode, setNewProjectExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
   const [projectConfigName, setProjectConfigName] = useState('');
   const [projectConfigRepoPath, setProjectConfigRepoPath] = useState('');
   const [projectConfigDefaultModel, setProjectConfigDefaultModel] = useState(DEFAULT_CODEX_MODEL);
-  const [projectConfigDefaultSandbox, setProjectConfigDefaultSandbox] = useState(DEFAULT_CODEX_SANDBOX);
-  const [projectConfigDefaultApprovalPolicy, setProjectConfigDefaultApprovalPolicy] = useState(DEFAULT_CODEX_APPROVAL_POLICY);
+  const [projectConfigExecutionMode, setProjectConfigExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
   const [newSessionTitle, setNewSessionTitle] = useState('First Simulation Session');
   const [availableSkills, setAvailableSkills] = useState<SkillOption[]>([]);
   const [prompt, setPrompt] = useState('');
@@ -550,26 +551,27 @@ export default function HomePage() {
     [sessions, selectedSessionId],
   );
   const sessionInfoTurn = useMemo(
-    () => turns.find((item) => item.id === activeTurnId) ?? turns[0] ?? null,
+    () => turns.find((item) => item.id === activeTurnId) ?? turns[turns.length - 1] ?? null,
     [turns, activeTurnId],
   );
   const resolvedSessionInfo = useMemo(() => {
+    const turnRuntime = readTurnRuntimeConfig(sessionInfoTurn?.effectiveBackendConfig);
+    const effectiveBackendConfig = sessionInfoTurn?.effectiveBackendConfig ?? null;
+    const effectiveRuntimeConfig = sessionInfoTurn?.effectiveRuntimeConfig ?? null;
     const workspace =
-      sessionInfoTurn?.effectiveCwd?.trim() ||
+      turnRuntime.cwd ||
       selectedProject?.repoPath?.trim() ||
       'not set';
     const codexBackendConfig = readCodexBackendConfig(selectedProject?.backendConfig);
+    const effectiveExecutionMode =
+      typeof effectiveBackendConfig?.executionMode === 'string' && effectiveBackendConfig.executionMode.trim()
+        ? effectiveBackendConfig.executionMode.trim()
+        : codexBackendConfig.executionMode;
     const model =
-      sessionInfoTurn?.effectiveModel?.trim() ||
+      turnRuntime.model ||
       codexBackendConfig.model;
-    const approval =
-      sessionInfoTurn?.effectiveApprovalPolicy?.trim() ||
-      codexBackendConfig.approvalPolicy;
-    const sandbox =
-      sessionInfoTurn?.effectiveSandbox?.trim() ||
-      codexBackendConfig.sandbox;
-
-    return { workspace, model, approval, sandbox };
+    const runtimeEntries = effectiveRuntimeConfig ? Object.entries(effectiveRuntimeConfig) : [];
+    return { workspace, model, executionMode: effectiveExecutionMode, runtimeEntries };
   }, [sessionInfoTurn, selectedSession, selectedProject]);
   const currentSessionDebugInfo = useMemo(
     () =>
@@ -586,7 +588,7 @@ export default function HomePage() {
   );
   const activeWorkspacePath = useMemo(
     () =>
-      sessionInfoTurn?.effectiveCwd?.trim() ||
+      readTurnRuntimeConfig(sessionInfoTurn?.effectiveBackendConfig).cwd ||
       selectedProject?.repoPath?.trim() ||
       '',
     [sessionInfoTurn, selectedSession, selectedProject],
@@ -1847,8 +1849,7 @@ export default function HomePage() {
     try {
       const backendConfig = buildCodexBackendConfig({
         model: newProjectDefaultModel,
-        sandbox: newProjectDefaultSandbox,
-        approvalPolicy: newProjectDefaultApprovalPolicy,
+        executionMode: newProjectExecutionMode,
       });
       const created = await apiRequest<Project>('/api/projects', {
         method: 'POST',
@@ -2447,8 +2448,7 @@ export default function HomePage() {
     try {
       const backendConfig = buildCodexBackendConfig({
         model: projectConfigDefaultModel,
-        sandbox: projectConfigDefaultSandbox,
-        approvalPolicy: projectConfigDefaultApprovalPolicy,
+        executionMode: projectConfigExecutionMode,
       });
       await apiRequest<Project>(`/api/projects/${selectedProjectId}`, {
         method: 'PATCH',
@@ -2470,8 +2470,7 @@ export default function HomePage() {
   function openActionPanel(mode: ActionPanelMode): void {
     if (mode === 'createProject') {
       setNewProjectDefaultModel(resolveModelDefault(availableModels));
-      setNewProjectDefaultSandbox(DEFAULT_CODEX_SANDBOX);
-      setNewProjectDefaultApprovalPolicy(DEFAULT_CODEX_APPROVAL_POLICY);
+      setNewProjectExecutionMode(DEFAULT_CODEX_EXECUTION_MODE);
     }
     setActionPanelMode(mode);
   }
@@ -2501,8 +2500,7 @@ export default function HomePage() {
     setProjectConfigName(project.name);
     setProjectConfigRepoPath(project.repoPath ?? '');
     setProjectConfigDefaultModel(backendConfig.model);
-    setProjectConfigDefaultSandbox(backendConfig.sandbox);
-    setProjectConfigDefaultApprovalPolicy(backendConfig.approvalPolicy);
+    setProjectConfigExecutionMode(backendConfig.executionMode);
     openActionPanel('projectConfig');
   }
 
@@ -2639,8 +2637,7 @@ export default function HomePage() {
     setProjectConfigName('');
     setProjectConfigRepoPath('');
     setProjectConfigDefaultModel(DEFAULT_CODEX_MODEL);
-    setProjectConfigDefaultSandbox(DEFAULT_CODEX_SANDBOX);
-    setProjectConfigDefaultApprovalPolicy(DEFAULT_CODEX_APPROVAL_POLICY);
+    setProjectConfigExecutionMode(DEFAULT_CODEX_EXECUTION_MODE);
   }
 
   async function handleApplyManagedUserFromPanel(): Promise<void> {
@@ -2991,26 +2988,10 @@ export default function HomePage() {
                     </select>
                   </label>
                   <label>
-                    Default Sandbox
-                    <select
-                      value={newProjectDefaultSandbox}
-                      onChange={(event) => setNewProjectDefaultSandbox(event.target.value)}
-                    >
-                      {SANDBOX_OPTIONS.map((option) => (
-                        <option key={`project-sandbox-${option.value || 'default'}`} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Default Approval Policy
-                    <select
-                      value={newProjectDefaultApprovalPolicy}
-                      onChange={(event) => setNewProjectDefaultApprovalPolicy(event.target.value)}
-                    >
-                      {APPROVAL_POLICY_OPTIONS.map((option) => (
-                        <option key={`project-approval-${option.value || 'default'}`} value={option.value}>
+                    Execution Mode
+                    <select value={newProjectExecutionMode} onChange={(event) => setNewProjectExecutionMode(event.target.value)}>
+                      {EXECUTION_MODE_OPTIONS.map((option) => (
+                        <option key={`project-execution-mode-${option.value}`} value={option.value}>
                           {option.label}
                         </option>
                       ))}
@@ -3109,26 +3090,10 @@ export default function HomePage() {
                     </select>
                   </label>
                   <label>
-                    Default Sandbox
-                    <select
-                      value={projectConfigDefaultSandbox}
-                      onChange={(event) => setProjectConfigDefaultSandbox(event.target.value)}
-                    >
-                      {SANDBOX_OPTIONS.map((option) => (
-                        <option key={`project-config-sandbox-${option.value || 'default'}`} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Default Approval Policy
-                    <select
-                      value={projectConfigDefaultApprovalPolicy}
-                      onChange={(event) => setProjectConfigDefaultApprovalPolicy(event.target.value)}
-                    >
-                      {APPROVAL_POLICY_OPTIONS.map((option) => (
-                        <option key={`project-config-approval-${option.value || 'default'}`} value={option.value}>
+                    Execution Mode
+                    <select value={projectConfigExecutionMode} onChange={(event) => setProjectConfigExecutionMode(event.target.value)}>
+                      {EXECUTION_MODE_OPTIONS.map((option) => (
+                        <option key={`project-config-execution-mode-${option.value}`} value={option.value}>
                           {option.label}
                         </option>
                       ))}
@@ -4036,10 +4001,20 @@ export default function HomePage() {
                         <dd>{resolvedSessionInfo.workspace}</dd>
                         <dt>Model</dt>
                         <dd>{resolvedSessionInfo.model}</dd>
-                        <dt>Approval</dt>
-                        <dd>{resolvedSessionInfo.approval}</dd>
-                        <dt>Sandbox</dt>
-                        <dd>{resolvedSessionInfo.sandbox}</dd>
+                        <dt>Execution Mode</dt>
+                        <dd>{resolvedSessionInfo.executionMode}</dd>
+                        <dt>Runtime Config</dt>
+                        <dd>
+                          {resolvedSessionInfo.runtimeEntries.length > 0
+                            ? (
+                              <pre className="session-debug-lines">
+                                {resolvedSessionInfo.runtimeEntries
+                                  .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`)
+                                  .join('\n')}
+                              </pre>
+                            )
+                            : 'none'}
+                        </dd>
                         {SESSION_DEBUG_INFO_ENABLED ? (
                           <>
                             <dt>Debug</dt>

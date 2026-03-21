@@ -3,8 +3,7 @@ import { z } from 'zod';
 const BackendConfigSchema = z.record(z.unknown());
 const CodexBackendConfigSchema = z.object({
   model: z.string().trim().min(1).max(120),
-  sandbox: z.string().trim().min(1).max(120),
-  approvalPolicy: z.string().trim().min(1).max(120),
+  executionMode: z.enum(['read-only', 'safe-write', 'yolo']),
 });
 
 export const ProjectIdParamsSchema = z.object({
@@ -23,7 +22,7 @@ export const CreateProjectBodySchema = z.object({
     if (!parsed.success) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'codex backendConfig requires model, sandbox, approvalPolicy',
+        message: 'codex backendConfig requires model, executionMode',
         path: ['backendConfig'],
       });
     }
@@ -46,7 +45,7 @@ export const UpdateProjectBodySchema = z
       if (!parsedConfig.success) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'backendConfig requires model, sandbox, approvalPolicy',
+          message: 'backendConfig requires model, executionMode',
           path: ['backendConfig'],
         });
       }
@@ -56,7 +55,7 @@ export const UpdateProjectBodySchema = z
       if (!parsed.success) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'updating backend to codex requires backendConfig with model, sandbox, approvalPolicy',
+          message: 'updating backend to codex requires backendConfig with model, executionMode',
           path: ['backendConfig'],
         });
       }

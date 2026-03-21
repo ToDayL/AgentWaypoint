@@ -111,11 +111,16 @@ export class ProjectsService {
         ? (await this.runnerAdapter.ensureDirectory({ path: input.repoPath.trim() })).path
         : null;
     }
+    const resolvedBackend = typeof input.backend === 'string' ? normalizeBackend(input.backend) : project.backend;
     if (typeof input.backend === 'string') {
-      data.backend = normalizeBackend(input.backend);
+      data.backend = resolvedBackend;
     }
     if (Object.prototype.hasOwnProperty.call(input, 'backendConfig')) {
-      data.backendConfig = normalizeBackendConfigForWrite(input.backendConfig ?? {});
+      const resolvedConfig = resolveBackendConfigForCreate(
+        resolvedBackend,
+        (input.backendConfig as Record<string, unknown> | undefined) ?? {},
+      );
+      data.backendConfig = normalizeBackendConfigForWrite(resolvedConfig);
     }
 
     return this.prisma.project.update({

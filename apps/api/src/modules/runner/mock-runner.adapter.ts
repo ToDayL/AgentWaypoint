@@ -57,18 +57,25 @@ export class MockRunnerAdapter implements RunnerAdapter {
         ? input.backendConfig
         : null;
     const model = readOptionalString(backendConfig?.model);
-    const sandbox = readOptionalString(backendConfig?.sandbox);
-    const approvalPolicy = readOptionalString(backendConfig?.approvalPolicy);
+    const executionMode = readOptionalString(backendConfig?.executionMode) ?? 'safe-write';
+    const runtimeConfig = mapExecutionModeToRuntime(executionMode);
 
     await this.prisma.turn.update({
       where: { id: input.turnId },
       data: {
         status: 'running',
         startedAt: new Date(),
-        effectiveCwd: input.cwd ?? null,
-        effectiveModel: model,
-        effectiveSandbox: sandbox,
-        effectiveApprovalPolicy: approvalPolicy,
+        effectiveBackendConfig: buildEffectiveBackendConfig({
+          cwd: input.cwd,
+          model,
+          executionMode,
+        }),
+        effectiveRuntimeConfig: buildEffectiveRuntimeConfig({
+          cwd: input.cwd,
+          model,
+          sandbox: runtimeConfig.sandbox,
+          approvalPolicy: runtimeConfig.approvalPolicy,
+        }),
       },
     });
     const threadId = `mock-thread-${input.sessionId}`;
@@ -76,8 +83,8 @@ export class MockRunnerAdapter implements RunnerAdapter {
       threadId,
       ...(model ? { model } : {}),
       ...(input.cwd ? { cwd: input.cwd } : {}),
-      ...(sandbox ? { sandbox } : {}),
-      ...(approvalPolicy ? { approvalPolicy } : {}),
+      ...(runtimeConfig.sandbox ? { sandbox: runtimeConfig.sandbox } : {}),
+      ...(runtimeConfig.approvalPolicy ? { approvalPolicy: runtimeConfig.approvalPolicy } : {}),
     });
 
     const assistantText = `Echo: ${input.content}`;
@@ -407,6 +414,62 @@ export class MockRunnerAdapter implements RunnerAdapter {
     }
     this.logger.error(message);
   }
+}
+
+function mapExecutionModeToRuntime(executionMode: string): { sandbox: string; approvalPolicy: string } {
+  if (executionMode === 'read-only') {
+    return { sandbox: 'read-only', approvalPolicy: 'on-request' };
+  }
+  if (executionMode === 'yolo') {
+    return { sandbox: 'danger-full-access', approvalPolicy: 'never' };
+  }
+  return { sandbox: 'workspace-write', approvalPolicy: 'on-request' };
+}
+
+function buildEffectiveRuntimeConfig(input: {
+  cwd?: string | null;
+  model?: string | null;
+  sandbox?: string | null;
+  approvalPolicy?: string | null;
+}): Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput {
+  const payload: Record<string, unknown> = {};
+  if (typeof input.cwd === 'string' && input.cwd.trim().length > 0) {
+    payload.cwd = input.cwd.trim();
+  }
+  if (typeof input.model === 'string' && input.model.trim().length > 0) {
+    payload.model = input.model.trim();
+  }
+  if (typeof input.sandbox === 'string' && input.sandbox.trim().length > 0) {
+    payload.sandbox = input.sandbox.trim();
+  }
+  if (typeof input.approvalPolicy === 'string' && input.approvalPolicy.trim().length > 0) {
+    payload.approvalPolicy = input.approvalPolicy.trim();
+  }
+  if (Object.keys(payload).length === 0) {
+    return Prisma.JsonNull;
+  }
+  return payload as Prisma.InputJsonValue;
+}
+
+function buildEffectiveBackendConfig(input: {
+  cwd?: string | null;
+  model?: string | null;
+  executionMode?: string | null;
+}): Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput {
+  const payload: Record<string, unknown> = {};
+  if (typeof input.cwd === 'string' && input.cwd.trim().length > 0) {
+    payload.cwd = input.cwd.trim();
+  }
+  if (typeof input.model === 'string' && input.model.trim().length > 0) {
+    payload.model = input.model.trim();
+  }
+  if (typeof input.executionMode === 'string' && input.executionMode.trim().length > 0) {
+    payload.executionMode = input.executionMode.trim();
+  }
+  if (Object.keys(payload).length === 0) {
+    return Prisma.JsonNull;
+  }
+  return payload as Prisma.InputJsonValue;
 }
 
 function expandHomeToken(inputPath: string): string {

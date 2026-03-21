@@ -17,6 +17,8 @@ import type {
   SteerTurnBody,
 } from './types.js';
 
+const DEFAULT_CODEX_EXECUTION_MODE = 'safe-write';
+
 type CodexBackendConfig = {
   codexBin: string;
   codexDefaultCwd: string;
@@ -887,9 +889,27 @@ function resolveCodexExecutionConfig(
 ): { model: string | null; sandbox: string | null; approvalPolicy: string } {
   const config = backendConfig ?? {};
   const model = readOptionalString(config.model) ?? defaults.codexDefaultModel;
-  const sandbox = readOptionalString(config.sandbox) ?? defaults.codexSandboxMode;
-  const approvalPolicy = readOptionalString(config.approvalPolicy) ?? defaults.codexApprovalPolicy;
+  const executionMode = readOptionalString(config.executionMode) ?? DEFAULT_CODEX_EXECUTION_MODE;
+  const modeDefaults = mapCodexExecutionModeToRuntimeConfig(executionMode);
+  const sandbox = modeDefaults.sandbox ?? defaults.codexSandboxMode;
+  const approvalPolicy = modeDefaults.approvalPolicy ?? defaults.codexApprovalPolicy;
   return { model, sandbox, approvalPolicy };
+}
+
+function mapCodexExecutionModeToRuntimeConfig(executionMode: string | null): {
+  sandbox: string | null;
+  approvalPolicy: string | null;
+} {
+  if (executionMode === 'read-only') {
+    return { sandbox: 'read-only', approvalPolicy: 'on-request' };
+  }
+  if (executionMode === 'safe-write') {
+    return { sandbox: 'workspace-write', approvalPolicy: 'on-request' };
+  }
+  if (executionMode === 'yolo') {
+    return { sandbox: 'danger-full-access', approvalPolicy: 'never' };
+  }
+  return { sandbox: null, approvalPolicy: null };
 }
 
 function extractAssistantTextFromTurn(params: Record<string, unknown>): string | null {

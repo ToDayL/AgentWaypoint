@@ -75,8 +75,7 @@ describe('API e2e', () => {
         backend: 'codex',
         backendConfig: {
           model: 'gpt-5-codex',
-          sandbox: 'workspace-write',
-          approvalPolicy: 'on-request',
+          executionMode: 'safe-write',
         },
       },
     });
@@ -86,8 +85,7 @@ describe('API e2e', () => {
     expect(project.backend).toBe('codex');
     expect(project.backendConfig).toMatchObject({
       model: 'gpt-5-codex',
-      sandbox: 'workspace-write',
-      approvalPolicy: 'on-request',
+          executionMode: 'safe-write',
     });
     expect(project.ownerUserId).toBeTypeOf('string');
     expect(project.id).toBeTypeOf('string');
@@ -170,8 +168,7 @@ describe('API e2e', () => {
         backend: 'codex',
         backendConfig: {
           model: 'gpt-5-codex',
-          sandbox: 'workspace-write',
-          approvalPolicy: 'on-request',
+          executionMode: 'safe-write',
         },
       },
     });
@@ -192,8 +189,7 @@ describe('API e2e', () => {
       data: {
         backendConfig: {
           model: 'gpt-5-mini',
-          sandbox: 'workspace-write',
-          approvalPolicy: 'on-request',
+          executionMode: 'safe-write',
         },
       },
     });
@@ -216,7 +212,9 @@ describe('API e2e', () => {
     });
     expect(turnStatusResponse.statusCode).toBe(200);
     expect(turnStatusResponse.json()).toMatchObject({
-      effectiveModel: 'gpt-5-mini',
+      effectiveBackendConfig: {
+        model: 'gpt-5-mini',
+      },
     });
   });
 
@@ -233,8 +231,7 @@ describe('API e2e', () => {
         backend: 'codex',
         backendConfig: {
           model: 'gpt-5-codex',
-          sandbox: 'workspace-write',
-          approvalPolicy: 'on-request',
+          executionMode: 'safe-write',
         },
       },
     });
@@ -258,8 +255,7 @@ describe('API e2e', () => {
         name: 'Project Config Updated',
         backendConfig: {
           model: 'gpt-5-mini',
-          sandbox: 'workspace-write',
-          approvalPolicy: 'on-request',
+          executionMode: 'safe-write',
         },
       },
     });
@@ -269,8 +265,7 @@ describe('API e2e', () => {
       name: 'Project Config Updated',
       backendConfig: {
         model: 'gpt-5-mini',
-        sandbox: 'workspace-write',
-        approvalPolicy: 'on-request',
+          executionMode: 'safe-write',
       },
     });
 
@@ -589,8 +584,12 @@ describe('API e2e', () => {
     expect(turnStatusResponse.json()).toMatchObject({
       id: turnId,
       status: 'completed',
-      requestedCwd: TEST_REPO_PATH,
-      effectiveCwd: TEST_REPO_PATH,
+      requestedBackendConfig: {
+        cwd: TEST_REPO_PATH,
+      },
+      effectiveBackendConfig: {
+        cwd: TEST_REPO_PATH,
+      },
       failureCode: null,
       failureMessage: null,
     });
@@ -603,7 +602,11 @@ describe('API e2e', () => {
     expect(historyResponse.statusCode).toBe(200);
     const history = historyResponse.json() as {
       messages: Array<{ role: string; content: string }>;
-      turns: Array<{ id: string; requestedCwd: string | null; effectiveCwd: string | null }>;
+      turns: Array<{
+        id: string;
+        requestedBackendConfig: Record<string, unknown> | null;
+        effectiveBackendConfig: Record<string, unknown> | null;
+      }>;
       activeTurnId: string | null;
     };
     expect(history.messages.length).toBeGreaterThanOrEqual(2);
@@ -613,8 +616,8 @@ describe('API e2e', () => {
       expect.arrayContaining([
         expect.objectContaining({
           id: turnId,
-          requestedCwd: TEST_REPO_PATH,
-          effectiveCwd: TEST_REPO_PATH,
+          requestedBackendConfig: expect.objectContaining({ cwd: TEST_REPO_PATH }),
+          effectiveBackendConfig: expect.objectContaining({ cwd: TEST_REPO_PATH }),
         }),
       ]),
     );

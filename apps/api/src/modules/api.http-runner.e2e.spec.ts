@@ -59,6 +59,16 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function mapExecutionModeToRuntime(executionMode: string): { sandbox: string; approvalPolicy: string } {
+  if (executionMode === 'read-only') {
+    return { sandbox: 'read-only', approvalPolicy: 'on-request' };
+  }
+  if (executionMode === 'yolo') {
+    return { sandbox: 'danger-full-access', approvalPolicy: 'never' };
+  }
+  return { sandbox: 'workspace-write', approvalPolicy: 'on-request' };
+}
+
 function readRequiredString(record: Record<string, unknown>, key: string): string {
   const value = record[key];
   if (typeof value !== 'string' || value.trim().length === 0) {
@@ -238,14 +248,11 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
             : {};
         const model =
           typeof backendConfig.model === 'string' && backendConfig.model.trim().length > 0 ? backendConfig.model.trim() : null;
-        const sandbox =
-          typeof backendConfig.sandbox === 'string' && backendConfig.sandbox.trim().length > 0
-            ? backendConfig.sandbox.trim()
-            : null;
-        const approvalPolicy =
-          typeof backendConfig.approvalPolicy === 'string' && backendConfig.approvalPolicy.trim().length > 0
-            ? backendConfig.approvalPolicy.trim()
-            : null;
+        const executionMode =
+          typeof backendConfig.executionMode === 'string' && backendConfig.executionMode.trim().length > 0
+            ? backendConfig.executionMode.trim()
+            : 'safe-write';
+        const runtimeConfig = mapExecutionModeToRuntime(executionMode);
         const threadId = `thread-${sessionId}`;
         ensureBufferedTurn(turnId);
 
@@ -257,8 +264,8 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
           threadId,
           ...(model ? { model } : {}),
           ...(cwd ? { cwd } : {}),
-          ...(sandbox ? { sandbox } : {}),
-          ...(approvalPolicy ? { approvalPolicy } : {}),
+          ...(runtimeConfig.sandbox ? { sandbox: runtimeConfig.sandbox } : {}),
+          ...(runtimeConfig.approvalPolicy ? { approvalPolicy: runtimeConfig.approvalPolicy } : {}),
         });
 
         if (content.includes('[approval]')) {
@@ -538,8 +545,7 @@ describe.sequential('API e2e (http runner)', () => {
         backend: 'codex',
         backendConfig: {
           model: 'gpt-5-codex',
-          sandbox: 'workspace-write',
-          approvalPolicy: 'on-request',
+          executionMode: 'safe-write',
         },
       }),
     });
@@ -570,7 +576,9 @@ describe.sequential('API e2e (http runner)', () => {
     expect(turnStatusResponse.status).toBe(200);
     expect(await turnStatusResponse.json()).toMatchObject({
       id: turn.turnId,
-      effectiveModel: 'gpt-5-codex',
+      effectiveBackendConfig: {
+        model: 'gpt-5-codex',
+      },
     });
 
     const streamResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/stream?since=0`, {
@@ -616,8 +624,12 @@ describe.sequential('API e2e (http runner)', () => {
     expect(turnStatusResponse.status).toBe(200);
     expect(await turnStatusResponse.json()).toMatchObject({
       id: turn.turnId,
-      requestedCwd: TEST_REPO_PATH,
-      effectiveCwd: TEST_REPO_PATH,
+      requestedBackendConfig: {
+        cwd: TEST_REPO_PATH,
+      },
+      effectiveBackendConfig: {
+        cwd: TEST_REPO_PATH,
+      },
     });
 
     const streamResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/stream?since=0`, {
@@ -650,7 +662,7 @@ describe.sequential('API e2e (http runner)', () => {
     expect(session.projectId).toBe(project.id);
   });
 
-  it('uses project sandbox and approval policy defaults when dispatching a turn', async () => {
+  it('uses project execution mode defaults when dispatching a turn', async () => {
     const email = randomEmail('http-runner-exec-defaults');
 
     const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
@@ -662,8 +674,7 @@ describe.sequential('API e2e (http runner)', () => {
         backend: 'codex',
         backendConfig: {
           model: 'gpt-5-codex',
-          sandbox: 'workspace-write',
-          approvalPolicy: 'on-request',
+          executionMode: 'safe-write',
         },
       }),
     });
@@ -694,8 +705,12 @@ describe.sequential('API e2e (http runner)', () => {
     expect(turnStatusResponse.status).toBe(200);
     expect(await turnStatusResponse.json()).toMatchObject({
       id: turn.turnId,
-      effectiveSandbox: 'workspace-write',
-      effectiveApprovalPolicy: 'on-request',
+      effectiveBackendConfig: {
+        executionMode: 'safe-write',
+      },
+      effectiveRuntimeConfig: {
+        sandbox: 'workspace-write',
+      },
     });
 
     const streamResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/stream?since=0`, {
