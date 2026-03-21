@@ -129,7 +129,18 @@ export type ActiveCodexTurn = ActiveTurnBase & {
   completionReject: ((error: Error) => void) | null;
 };
 
-export type ActiveTurn = ActiveMockTurn | ActiveCodexTurn;
+export type ActiveClaudeTurn = ActiveTurnBase & {
+  backend: 'claude';
+  query: {
+    interrupt: () => Promise<void>;
+    close: () => void;
+  } | null;
+  assistantText: string;
+  completionResolve: (() => void) | null;
+  completionReject: ((error: Error) => void) | null;
+};
+
+export type ActiveTurn = ActiveMockTurn | ActiveCodexTurn | ActiveClaudeTurn;
 
 export type BufferedRunnerEvent = {
   turnId: string;

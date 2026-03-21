@@ -1,7 +1,19 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { ModelListItem } from './types.js';
+import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { ActiveClaudeTurn, ActiveTurn, ModelListItem, RunnerEventType, StartTurnBody } from './types.js';
+
+const DEFAULT_CLAUDE_MAX_TURNS = 12;
+
+type ClaudeBackendDeps = {
+  activeTurns: Map<string, ActiveTurn>;
+  appendTurnEvent: (turnId: string, type: RunnerEventType, payload: Record<string, unknown>) => Promise<void>;
+  finalizeTurn: (turnId: string, type: RunnerEventType, payload: Record<string, unknown>) => Promise<void>;
+  failTurn: (turnId: string, message: string) => Promise<void>;
+};
 
 export class ClaudeBackend {
+  constructor(private readonly deps: ClaudeBackendDeps) {}
+
   async listModels(): Promise<ModelListItem[]> {
     const stream = query({
       prompt: emptyPromptStream(),
@@ -41,8 +53,241 @@ export class ClaudeBackend {
       stream.close();
     }
   }
+
+  async startTurn(input: StartTurnBody): Promise<void> {
+    let completionResolve: (() => void) | null = null;
+    let completionReject: ((error: Error) => void) | null = null;
+    const completionPromise = new Promise<void>((resolve, reject) => {
+      completionResolve = resolve;
+      completionReject = reject;
+    });
+
+    const turn: ActiveClaudeTurn = {
+      backend: 'claude',
+      turnId: input.turnId,
+      sessionId: input.sessionId,
+      content: input.content,
+      startedAt: new Date().toISOString(),
+      finalized: false,
+      query: null,
+      assistantText: '',
+      completionResolve,
+      completionReject,
+    };
+    this.deps.activeTurns.set(input.turnId, turn);
+
+    try {
+      const cwd = input.cwd?.trim() || process.cwd();
+      const config = readBackendConfig(input.backendConfig);
+      const inputQueue = new AsyncInputQueue();
+      inputQueue.push({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: input.content,
+        },
+        parent_tool_use_id: null,
+        session_id: input.sessionId,
+      });
+      inputQueue.close();
+
+      const q = query({
+        prompt: inputQueue.stream(),
+        options: {
+          cwd,
+          model: config.model ?? undefined,
+          systemPrompt: {
+            type: 'preset',
+            preset: 'claude_code',
+          },
+          settingSources: ['user', 'project', 'local'],
+          maxTurns: DEFAULT_CLAUDE_MAX_TURNS,
+        },
+      });
+      turn.query = q;
+
+      await this.deps.appendTurnEvent(turn.turnId, 'turn.started', {
+        cwd,
+        ...(config.model ? { model: config.model } : {}),
+        ...(config.executionMode ? { executionMode: config.executionMode } : {}),
+      });
+
+      let sawResult = false;
+      for await (const message of q) {
+        if (turn.finalized) {
+          break;
+        }
+        if (!message || typeof message !== 'object') {
+          continue;
+        }
+
+        const msg = message as Record<string, unknown>;
+        if (msg.type === 'assistant') {
+          const text = extractAssistantText(msg);
+          if (text.length > 0) {
+            turn.assistantText += text;
+            await this.deps.appendTurnEvent(turn.turnId, 'assistant.delta', { text });
+          }
+          continue;
+        }
+
+        if (msg.type === 'result') {
+          sawResult = true;
+          const subtype = typeof msg.subtype === 'string' ? msg.subtype : '';
+          if (subtype === 'error') {
+            const errorText = readNonEmptyString(msg.result) ?? readFirstString(msg.errors) ?? 'Claude query failed';
+            await this.deps.failTurn(turn.turnId, errorText);
+          } else {
+            const content = turn.assistantText || readNonEmptyString(msg.result) || '';
+            await this.deps.finalizeTurn(turn.turnId, 'turn.completed', { content });
+          }
+          break;
+        }
+      }
+
+      if (!turn.finalized && !sawResult) {
+        await this.deps.finalizeTurn(turn.turnId, 'turn.completed', { content: turn.assistantText });
+      }
+
+      await completionPromise;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'unknown claude execution error';
+      await this.deps.failTurn(turn.turnId, message);
+    }
+  }
+
+  async cancelTurn(turn: ActiveClaudeTurn): Promise<void> {
+    if (turn.query) {
+      try {
+        await turn.query.interrupt();
+      } catch {
+        // Best-effort interrupt.
+      }
+      turn.query.close();
+    }
+    await this.deps.finalizeTurn(turn.turnId, 'turn.cancelled', {});
+  }
+
+  silentlyDisposeTurn(turnId: string): void {
+    const turn = this.deps.activeTurns.get(turnId);
+    if (!turn || turn.backend !== 'claude' || turn.finalized) {
+      return;
+    }
+    turn.finalized = true;
+    turn.query?.close();
+    this.deps.activeTurns.delete(turnId);
+    turn.completionResolve?.();
+  }
+}
+
+function readBackendConfig(
+  config: Record<string, unknown> | null | undefined,
+): { model: string | null; executionMode: string | null } {
+  const model =
+    config && typeof config.model === 'string' && config.model.trim().length > 0 ? config.model.trim() : null;
+  const executionMode =
+    config && typeof config.executionMode === 'string' && config.executionMode.trim().length > 0
+      ? config.executionMode.trim()
+      : null;
+  return { model, executionMode };
+}
+
+function extractAssistantText(message: Record<string, unknown>): string {
+  const payload = message.message;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return '';
+  }
+  const content = (payload as Record<string, unknown>).content;
+  if (!Array.isArray(content)) {
+    return '';
+  }
+  const chunks: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) {
+      continue;
+    }
+    const record = block as Record<string, unknown>;
+    if (record.type !== 'text') {
+      continue;
+    }
+    const text = typeof record.text === 'string' ? record.text : '';
+    if (text.length > 0) {
+      chunks.push(text);
+    }
+  }
+  return chunks.join('');
+}
+
+function readNonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function readFirstString(value: unknown): string | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  for (const item of value) {
+    const text = readNonEmptyString(item);
+    if (text) {
+      return text;
+    }
+  }
+  return null;
 }
 
 async function* emptyPromptStream(): AsyncGenerator<never, void, unknown> {
   return;
+}
+
+class AsyncInputQueue {
+  private readonly items: SDKUserMessage[] = [];
+  private closed = false;
+  private waitingResolve: ((value: IteratorResult<SDKUserMessage>) => void) | null = null;
+
+  push(item: SDKUserMessage): void {
+    if (this.closed) {
+      throw new Error('Input queue is closed');
+    }
+    if (this.waitingResolve) {
+      const resolve = this.waitingResolve;
+      this.waitingResolve = null;
+      resolve({ value: item, done: false });
+      return;
+    }
+    this.items.push(item);
+  }
+
+  close(): void {
+    this.closed = true;
+    if (this.waitingResolve) {
+      const resolve = this.waitingResolve;
+      this.waitingResolve = null;
+      resolve({ value: undefined, done: true });
+    }
+  }
+
+  stream(): AsyncIterable<SDKUserMessage> {
+    const self = this;
+    return {
+      [Symbol.asyncIterator]() {
+        return {
+          async next(): Promise<IteratorResult<SDKUserMessage>> {
+            if (self.items.length > 0) {
+              const value = self.items.shift();
+              if (!value) {
+                return { value: undefined, done: true };
+              }
+              return { value, done: false };
+            }
+            if (self.closed) {
+              return { value: undefined, done: true };
+            }
+            return await new Promise<IteratorResult<SDKUserMessage>>((resolve) => {
+              self.waitingResolve = resolve;
+            });
+          },
+        };
+      },
+    };
+  }
 }

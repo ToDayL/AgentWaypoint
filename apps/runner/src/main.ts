@@ -57,7 +57,12 @@ const codexBackend = new CodexBackend(
     failTurn,
   },
 );
-const claudeBackend = new ClaudeBackend();
+const claudeBackend = new ClaudeBackend({
+  activeTurns,
+  appendTurnEvent,
+  finalizeTurn,
+  failTurn,
+});
 
 const server = createServer(async (request, response) => {
   try {
@@ -255,6 +260,11 @@ const server = createServer(async (request, response) => {
       }
 
       if (requestedBackend !== 'codex') {
+        if (requestedBackend === 'claude') {
+          ensureTurnStreamState(payload.turnId, payload.sessionId, 'queued');
+          void claudeBackend.startTurn(payload);
+          return;
+        }
         throw new Error(`Unsupported backend: ${requestedBackend}`);
       }
       ensureTurnStreamState(payload.turnId, payload.sessionId, 'queued');
@@ -345,6 +355,12 @@ const server = createServer(async (request, response) => {
       if (!turn || turn.finalized) {
         sendJson(response, 404, {
           error: { code: 'NOT_FOUND', message: 'Active turn not found' },
+        });
+        return;
+      }
+      if (turn.backend === 'claude') {
+        sendJson(response, 409, {
+          error: { code: 'CONFLICT', message: 'Steer is not supported for claude backend yet' },
         });
         return;
       }
@@ -876,6 +892,9 @@ async function finalizeTurn(turnId: string, type: RunnerEventType, payload: Reco
 
   if (turn.backend === 'mock') {
     clearTurnTimers(turn.timers);
+  } else if (turn.backend === 'claude') {
+    turn.query?.close();
+    turn.completionResolve?.();
   } else {
     turn.completionResolve?.();
   }
@@ -893,6 +912,10 @@ async function cancelActiveTurn(turn: ActiveTurn, options: { emitCancelEvent: bo
     await finalizeTurn(turn.turnId, 'turn.cancelled', {});
     return;
   }
+  if (turn.backend === 'claude') {
+    await claudeBackend.cancelTurn(turn);
+    return;
+  }
 
   await codexBackend.cancelTurn(turn, options);
 }
@@ -905,6 +928,10 @@ function silentlyDisposeTurn(turn: ActiveTurn): void {
   if (turn.backend === 'mock') {
     activeTurns.delete(turn.turnId);
     clearTurnTimers(turn.timers);
+    return;
+  }
+  if (turn.backend === 'claude') {
+    claudeBackend.silentlyDisposeTurn(turn.turnId);
     return;
   }
   codexBackend.silentlyDisposeTurn(turn.turnId);
