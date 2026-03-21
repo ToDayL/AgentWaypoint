@@ -11,6 +11,7 @@ import {
   ForkThreadInput,
   ForkThreadResult,
   ResolveTurnApprovalInput,
+  ModelListInput,
   SkillListInput,
   WorkspaceFileInput,
   WorkspaceFileContentInput,
@@ -203,10 +204,14 @@ export class HttpRunnerAdapter implements RunnerAdapter {
     };
   }
 
-  async listModels(): Promise<AvailableModel[]> {
+  async listModels(input: ModelListInput): Promise<AvailableModel[]> {
+    const query = new URLSearchParams();
+    if (typeof input.backend === 'string' && input.backend.trim()) {
+      query.set('backend', input.backend.trim());
+    }
     const response = await this.request({
       method: 'GET',
-      path: '/runner/models',
+      path: query.size > 0 ? `/runner/models?${query.toString()}` : '/runner/models',
     });
     if (!response || typeof response !== 'object' || !Array.isArray((response as { data?: unknown }).data)) {
       throw new Error('Runner model list response is invalid');
@@ -216,13 +221,19 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
       .map((item) => ({
         id: typeof item.id === 'string' ? item.id : '',
+        backend:
+          typeof item.backend === 'string' && item.backend.trim().length > 0
+            ? item.backend.trim()
+            : typeof input.backend === 'string' && input.backend.trim().length > 0
+              ? input.backend.trim()
+              : '',
         model: typeof item.model === 'string' ? item.model : '',
         displayName: typeof item.displayName === 'string' ? item.displayName : (typeof item.model === 'string' ? item.model : ''),
         description: typeof item.description === 'string' ? item.description : '',
         hidden: item.hidden === true,
         isDefault: item.isDefault === true,
       }))
-      .filter((item) => item.id.length > 0 && item.model.length > 0);
+      .filter((item) => item.id.length > 0 && item.model.length > 0 && item.backend.length > 0);
   }
 
   async listSkills(input: SkillListInput): Promise<AvailableSkill[]> {

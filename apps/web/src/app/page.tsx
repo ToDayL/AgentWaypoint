@@ -71,6 +71,7 @@ type Session = {
 
 type AvailableModel = {
   id: string;
+  backend: string;
   model: string;
   displayName: string;
   description: string;

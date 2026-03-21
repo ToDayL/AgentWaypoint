@@ -171,11 +171,15 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
         return;
       }
 
-      if (request.method === 'GET' && request.url === '/runner/models') {
+      if (request.method === 'GET' && request.url?.startsWith('/runner/models')) {
+        const requestUrl = new URL(request.url ?? '/runner/models', 'http://127.0.0.1');
+        const requestedBackend = (requestUrl.searchParams.get('backend') ?? '').trim().toLowerCase();
+        const backend = requestedBackend || 'codex';
         sendJson(response, 200, {
           data: [
             {
               id: 'model-gpt-5-codex',
+              backend,
               model: 'gpt-5-codex',
               displayName: 'GPT-5 Codex',
               description: 'Primary coding model',
@@ -184,6 +188,7 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
             },
             {
               id: 'model-gpt-5-mini',
+              backend,
               model: 'gpt-5-mini',
               displayName: 'GPT-5 Mini',
               description: 'Smaller faster model',
@@ -515,17 +520,19 @@ describe.sequential('API e2e (http runner)', () => {
   it('lists models through the http runner adapter', async () => {
     const email = randomEmail('http-model-list');
 
-    const response = await fetch(`${apiBaseUrl}/api/models`, {
+    const response = await fetch(`${apiBaseUrl}/api/models?backend=codex`, {
       headers: { 'x-user-email': email },
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
       data: expect.arrayContaining([
         expect.objectContaining({
+          backend: 'codex',
           model: 'gpt-5-codex',
           displayName: 'GPT-5 Codex',
         }),
         expect.objectContaining({
+          backend: 'codex',
           model: 'gpt-5-mini',
           displayName: 'GPT-5 Mini',
         }),

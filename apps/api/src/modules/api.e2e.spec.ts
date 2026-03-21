@@ -357,7 +357,7 @@ describe('API e2e', () => {
 
     const response = await app.inject({
       method: 'GET',
-      url: '/api/models',
+      url: '/api/models?backend=codex',
       headers: { 'x-user-email': email },
     });
 
@@ -365,6 +365,7 @@ describe('API e2e', () => {
     expect(response.json()).toMatchObject({
       data: expect.arrayContaining([
         expect.objectContaining({
+          backend: 'codex',
           model: expect.any(String),
           displayName: expect.any(String),
         }),

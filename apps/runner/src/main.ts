@@ -76,8 +76,12 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === 'GET' && pathname === '/runner/models') {
+      const requestedBackendParam = (url.searchParams.get('backend') ?? '').trim();
+      const requestedBackend = requestedBackendParam
+        ? parseRunnerBackend(requestedBackendParam, 'backend')
+        : null;
       sendJson(response, 200, {
-        data: await listModels(),
+        data: await listModels(requestedBackend),
       });
       return;
     }
@@ -675,12 +679,17 @@ async function startMockExecution(turn: ActiveMockTurn): Promise<void> {
   turn.timers.push(finalizeTimer);
 }
 
-async function listModels(): Promise<ModelListItem[]> {
+async function listModels(requestedBackend: RunnerBackend | null): Promise<ModelListItem[]> {
+  if (requestedBackend && requestedBackend !== runnerBackend) {
+    return [];
+  }
+
   if (runnerBackend === 'mock') {
     const model = codexDefaultModel || 'gpt-5-codex';
     return [
       {
         id: model,
+        backend: 'mock',
         model,
         displayName: model,
         description: 'Configured mock/default model',

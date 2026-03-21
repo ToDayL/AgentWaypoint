@@ -79,6 +79,7 @@ export class CodexBackend {
         }
         items.push({
           id,
+          backend: 'codex',
           model,
           displayName: readOptionalString(record.displayName) ?? model,
           description: readOptionalString(record.description) ?? '',

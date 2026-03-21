@@ -13,6 +13,7 @@ export type StartTurnBody = {
 
 export type ModelListItem = {
   id: string;
+  backend: string;
   model: string;
   displayName: string;
   description: string;

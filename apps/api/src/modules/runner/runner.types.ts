@@ -10,11 +10,16 @@ export type StartTurnInput = {
 
 export type AvailableModel = {
   id: string;
+  backend: string;
   model: string;
   displayName: string;
   description: string;
   hidden: boolean;
   isDefault: boolean;
+};
+
+export type ModelListInput = {
+  backend?: string | null;
 };
 
 export type AvailableSkill = {
@@ -199,7 +204,7 @@ export interface RunnerAdapter {
   cancelTurn(input: CancelTurnInput): Promise<void>;
   resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void>;
   readCodexRateLimits(): Promise<CodexRateLimits>;
-  listModels(): Promise<AvailableModel[]>;
+  listModels(input: ModelListInput): Promise<AvailableModel[]>;
   listSkills(input: SkillListInput): Promise<AvailableSkill[]>;
   forkThread(input: ForkThreadInput): Promise<ForkThreadResult>;
   closeThread(input: CloseThreadInput): Promise<void>;
