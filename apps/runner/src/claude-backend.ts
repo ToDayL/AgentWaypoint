@@ -13,6 +13,8 @@ type ClaudeBackendDeps = {
 };
 
 export class ClaudeBackend {
+  private readonly cancellingTurns = new Set<string>();
+
   constructor(private readonly deps: ClaudeBackendDeps) {}
 
   async listModels(): Promise<ModelListItem[]> {
@@ -168,6 +170,10 @@ export class ClaudeBackend {
 
         if (msg.type === 'result') {
           sawResult = true;
+          if (this.cancellingTurns.has(turn.turnId)) {
+            await this.deps.finalizeTurn(turn.turnId, 'turn.cancelled', {});
+            break;
+          }
           const subtype = typeof msg.subtype === 'string' ? msg.subtype : '';
           if (subtype === 'error') {
             const errorText = readNonEmptyString(msg.result) ?? readFirstString(msg.errors) ?? 'Claude query failed';
@@ -181,26 +187,45 @@ export class ClaudeBackend {
       }
 
       if (!turn.finalized && !sawResult) {
-        await this.deps.finalizeTurn(turn.turnId, 'turn.completed', { content: turn.assistantText });
+        if (this.cancellingTurns.has(turn.turnId)) {
+          await this.deps.finalizeTurn(turn.turnId, 'turn.cancelled', {});
+        } else {
+          await this.deps.finalizeTurn(turn.turnId, 'turn.completed', { content: turn.assistantText });
+        }
       }
 
       await completionPromise;
     } catch (error: unknown) {
+      if (this.cancellingTurns.has(turn.turnId)) {
+        await this.deps.finalizeTurn(turn.turnId, 'turn.cancelled', {});
+        return;
+      }
       const message = error instanceof Error ? error.message : 'unknown claude execution error';
       await this.deps.failTurn(turn.turnId, message);
+    } finally {
+      this.cancellingTurns.delete(turn.turnId);
     }
   }
 
   async cancelTurn(turn: ActiveClaudeTurn): Promise<void> {
-    if (turn.query) {
-      try {
-        await turn.query.interrupt();
-      } catch {
-        // Best-effort interrupt.
-      }
-      turn.query.close();
+    this.cancellingTurns.add(turn.turnId);
+    if (!turn.finalized) {
+      await this.deps.finalizeTurn(turn.turnId, 'turn.cancelled', {});
     }
-    await this.deps.finalizeTurn(turn.turnId, 'turn.cancelled', {});
+    // Do not block HTTP cancel response on SDK interrupt; best-effort in background.
+    if (turn.query) {
+      void Promise.resolve()
+        .then(async () => {
+          try {
+            await turn.query?.interrupt();
+          } catch {
+            // Best-effort interrupt.
+          }
+        })
+        .finally(() => {
+          turn.query?.close();
+        });
+    }
   }
 
   silentlyDisposeTurn(turnId: string): void {
@@ -208,6 +233,7 @@ export class ClaudeBackend {
     if (!turn || turn.backend !== 'claude' || turn.finalized) {
       return;
     }
+    this.cancellingTurns.delete(turnId);
     turn.finalized = true;
     turn.query?.close();
     this.deps.activeTurns.delete(turnId);
