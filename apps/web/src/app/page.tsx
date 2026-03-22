@@ -354,6 +354,11 @@ const EXECUTION_MODE_OPTIONS = [
   { value: 'yolo', label: 'yolo' },
 ];
 
+const PROJECT_BACKEND_OPTIONS = [
+  { value: 'codex', label: 'codex' },
+  { value: 'claude', label: 'claude' },
+];
+
 const STREAM_EVENTS = [
   'turn.started',
   'assistant.delta',
@@ -448,12 +453,14 @@ export default function HomePage() {
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
   const [newProjectName, setNewProjectName] = useState('Simulation Workspace');
   const [newProjectRepoPath, setNewProjectRepoPath] = useState('');
+  const [newProjectBackend, setNewProjectBackend] = useState('codex');
   const [workspaceSuggestions, setWorkspaceSuggestions] = useState<string[]>([]);
   const [workspaceSuggestionBusy, setWorkspaceSuggestionBusy] = useState(false);
   const [newProjectDefaultModel, setNewProjectDefaultModel] = useState('');
   const [newProjectExecutionMode, setNewProjectExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
   const [projectConfigName, setProjectConfigName] = useState('');
   const [projectConfigRepoPath, setProjectConfigRepoPath] = useState('');
+  const [projectConfigBackend, setProjectConfigBackend] = useState('codex');
   const [projectConfigDefaultModel, setProjectConfigDefaultModel] = useState(DEFAULT_CODEX_MODEL);
   const [projectConfigExecutionMode, setProjectConfigExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
   const [newSessionTitle, setNewSessionTitle] = useState('First Simulation Session');
@@ -1236,7 +1243,7 @@ export default function HomePage() {
         } else {
           setAdminUsers([]);
         }
-        await loadAvailableModels();
+        await loadAvailableModels('codex', { target: 'both' });
         const preferredProjectId = readLastProjectId(userEmail) ?? undefined;
         await loadProjects({
           preferredProjectId,
@@ -1466,16 +1473,42 @@ export default function HomePage() {
     }
   }
 
-  async function loadAvailableModels(): Promise<void> {
+  async function loadAvailableModels(
+    backend = 'codex',
+    options?: { target?: 'new' | 'config' | 'both'; preferredModel?: string | null },
+  ): Promise<void> {
     try {
-      const response = await apiRequest<{ data: AvailableModel[] }>('/api/models', {
+      const query = new URLSearchParams();
+      if (backend.trim()) {
+        query.set('backend', backend.trim());
+      }
+      const response = await apiRequest<{ data: AvailableModel[] }>(
+        query.size > 0 ? `/api/models?${query.toString()}` : '/api/models',
+        {
         method: 'GET',
-      });
+        },
+      );
       const models = response.data ?? [];
       setAvailableModels(models);
       const modelDefault = resolveModelDefault(models);
-      setNewProjectDefaultModel((current) => (current.trim() ? current : modelDefault));
-      setProjectConfigDefaultModel((current) => (current.trim() ? current : modelDefault));
+      const target = options?.target ?? 'both';
+      const preferredModel =
+        typeof options?.preferredModel === 'string' && options.preferredModel.trim().length > 0
+          ? options.preferredModel.trim()
+          : null;
+      const resolvePreferredModel = (current: string): string => {
+        const preferred = preferredModel ?? current.trim();
+        if (preferred && models.some((item) => item.model === preferred)) {
+          return preferred;
+        }
+        return modelDefault;
+      };
+      if (target === 'both' || target === 'new') {
+        setNewProjectDefaultModel((current) => resolvePreferredModel(current));
+      }
+      if (target === 'both' || target === 'config') {
+        setProjectConfigDefaultModel((current) => resolvePreferredModel(current));
+      }
     } catch (requestError) {
       setError(extractMessage(requestError));
     }
@@ -1856,7 +1889,7 @@ export default function HomePage() {
         method: 'POST',
         body: {
           name: newProjectName.trim(),
-          backend: 'codex',
+          backend: newProjectBackend,
           backendConfig,
           ...(newProjectRepoPath.trim() ? { repoPath: newProjectRepoPath.trim() } : {}),
         },
@@ -2456,6 +2489,7 @@ export default function HomePage() {
         body: {
           name: projectConfigName.trim(),
           repoPath: projectConfigRepoPath.trim() || null,
+          backend: projectConfigBackend,
           backendConfig,
         },
       });
@@ -2470,8 +2504,9 @@ export default function HomePage() {
 
   function openActionPanel(mode: ActionPanelMode): void {
     if (mode === 'createProject') {
-      setNewProjectDefaultModel(resolveModelDefault(availableModels));
+      setNewProjectBackend('codex');
       setNewProjectExecutionMode(DEFAULT_CODEX_EXECUTION_MODE);
+      void loadAvailableModels('codex', { target: 'new' });
     }
     setActionPanelMode(mode);
   }
@@ -2497,11 +2532,14 @@ export default function HomePage() {
 
   function openProjectConfigPanel(project: Project): void {
     const backendConfig = readCodexBackendConfig(project.backendConfig);
+    const backend = project.backend?.trim() || 'codex';
     setSelectedProjectId(project.id);
     setProjectConfigName(project.name);
     setProjectConfigRepoPath(project.repoPath ?? '');
+    setProjectConfigBackend(backend);
     setProjectConfigDefaultModel(backendConfig.model);
     setProjectConfigExecutionMode(backendConfig.executionMode);
+    void loadAvailableModels(backend, { target: 'config', preferredModel: backendConfig.model });
     openActionPanel('projectConfig');
   }
 
@@ -2976,6 +3014,23 @@ export default function HomePage() {
                     </span>
                   </label>
                   <label>
+                    Backend
+                    <select
+                      value={newProjectBackend}
+                      onChange={(event) => {
+                        const nextBackend = event.target.value.trim() || 'codex';
+                        setNewProjectBackend(nextBackend);
+                        void loadAvailableModels(nextBackend, { target: 'new' });
+                      }}
+                    >
+                      {PROJECT_BACKEND_OPTIONS.map((option) => (
+                        <option key={`project-backend-${option.value}`} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
                     Default Model
                     <select
                       value={newProjectDefaultModel}
@@ -3076,6 +3131,23 @@ export default function HomePage() {
                     <span className="sim-input-hint">
                       {workspaceSuggestionBusy ? 'Loading suggestions…' : 'Directory suggestions by prefix.'}
                     </span>
+                  </label>
+                  <label>
+                    Backend
+                    <select
+                      value={projectConfigBackend}
+                      onChange={(event) => {
+                        const nextBackend = event.target.value.trim() || 'codex';
+                        setProjectConfigBackend(nextBackend);
+                        void loadAvailableModels(nextBackend, { target: 'config' });
+                      }}
+                    >
+                      {PROJECT_BACKEND_OPTIONS.map((option) => (
+                        <option key={`project-config-backend-${option.value}`} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                   <label>
                     Default Model

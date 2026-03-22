@@ -11,20 +11,20 @@ Last updated: 2026-03-21
     - [x] `curl -k "https://127.0.0.1:3000/api/models?backend=codex"` returns only codex models.
     - [x] Every model item includes `backend`.
 
-- [ ] 2. Web project form backend-driven model loading (moved earlier)
-  - [ ] Select backend first in create/edit project flow.
-  - [ ] Query model list by selected backend.
-  - [ ] Default selected model = `isDefault` or first model.
-  - [ ] Verification:
-    - [ ] Switching backend refreshes model list.
-    - [ ] Submit stores exact `project.backendConfig` (`model + executionMode`).
+- [x] 2. Web project form backend-driven model loading (moved earlier)
+  - [x] Select backend first in create/edit project flow.
+  - [x] Query model list by selected backend.
+  - [x] Default selected model = `isDefault` or first model.
+  - [x] Verification:
+    - [x] Switching backend refreshes model list.
+    - [x] Submit stores exact `project.backendConfig` (`model + executionMode`).
 
-- [ ] 3. Project schema validation for claude
-  - [ ] Add `backend=claude` validation in `projects.schemas.ts`.
-  - [ ] Require `backendConfig` fields: `model + executionMode`.
-  - [ ] Verification:
-    - [ ] Create claude project missing fields => `400`.
-    - [ ] Create claude project with complete fields => `200/201`.
+- [x] 3. Project schema validation for claude
+  - [x] Add `backend=claude` validation in `projects.schemas.ts`.
+  - [x] Require `backendConfig` fields: `model + executionMode`.
+  - [x] Verification:
+    - [x] Create claude project missing fields => `400`.
+    - [x] Create claude project with complete fields => `200/201`.
 
 - [ ] 4. Runner claude backend skeleton + routing
   - [ ] Add `claude-backend` module skeleton.

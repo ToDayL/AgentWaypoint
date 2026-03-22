@@ -352,6 +352,62 @@ describe('API e2e', () => {
     });
   });
 
+  it('validates claude backendConfig and allows creating claude project/session', async () => {
+    const email = randomEmail('claude-project');
+
+    const invalidResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Claude Invalid Project',
+        backend: 'claude',
+        backendConfig: {
+          executionMode: 'safe-write',
+        },
+      },
+    });
+    expect(invalidResponse.statusCode).toBe(400);
+    expect(invalidResponse.json()).toMatchObject({
+      error: {
+        code: 'BAD_REQUEST',
+        message: 'Validation failed',
+      },
+    });
+
+    const createProjectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Claude Valid Project',
+        backend: 'claude',
+        repoPath: TEST_REPO_PATH,
+        backendConfig: {
+          model: 'claude-sonnet-4',
+          executionMode: 'safe-write',
+        },
+      },
+    });
+    expect(createProjectResponse.statusCode).toBe(201);
+    const project = createProjectResponse.json() as { id: string; backend: string; backendConfig: Record<string, unknown> };
+    expect(project.backend).toBe('claude');
+    expect(project.backendConfig).toMatchObject({
+      model: 'claude-sonnet-4',
+      executionMode: 'safe-write',
+    });
+
+    const createSessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: {
+        title: 'Claude Session',
+      },
+    });
+    expect(createSessionResponse.statusCode).toBe(201);
+  });
+
   it('lists available models', async () => {
     const email = randomEmail('models');
 

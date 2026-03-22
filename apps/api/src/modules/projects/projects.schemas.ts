@@ -5,6 +5,10 @@ const CodexBackendConfigSchema = z.object({
   model: z.string().trim().min(1).max(120),
   executionMode: z.enum(['read-only', 'safe-write', 'yolo']),
 });
+const ClaudeBackendConfigSchema = z.object({
+  model: z.string().trim().min(1).max(120),
+  executionMode: z.enum(['read-only', 'safe-write', 'yolo']),
+});
 
 export const ProjectIdParamsSchema = z.object({
   id: z.string().trim().min(1),
@@ -23,6 +27,16 @@ export const CreateProjectBodySchema = z.object({
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'codex backendConfig requires model, executionMode',
+        path: ['backendConfig'],
+      });
+    }
+  }
+  if (backend === 'claude') {
+    const parsed = ClaudeBackendConfigSchema.safeParse(input.backendConfig);
+    if (!parsed.success) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'claude backendConfig requires model, executionMode',
         path: ['backendConfig'],
       });
     }
@@ -56,6 +70,16 @@ export const UpdateProjectBodySchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: 'updating backend to codex requires backendConfig with model, executionMode',
+          path: ['backendConfig'],
+        });
+      }
+    }
+    if (typeof input.backend === 'string' && input.backend.trim().toLowerCase() === 'claude') {
+      const parsed = ClaudeBackendConfigSchema.safeParse(input.backendConfig);
+      if (!parsed.success) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'updating backend to claude requires backendConfig with model, executionMode',
           path: ['backendConfig'],
         });
       }
