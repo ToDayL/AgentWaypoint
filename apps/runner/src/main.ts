@@ -363,9 +363,16 @@ const server = createServer(async (request, response) => {
         return;
       }
       if (turn.backend === 'claude') {
-        sendJson(response, 409, {
-          error: { code: 'CONFLICT', message: 'Steer is not supported for claude backend yet' },
-        });
+        try {
+          await claudeBackend.steerTurn(turn, payload.content);
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : 'Failed to steer claude turn';
+          sendJson(response, 409, {
+            error: { code: 'CONFLICT', message },
+          });
+          return;
+        }
+        sendJson(response, 202, { accepted: true, runnerRequestId: randomUUID() });
         return;
       }
       if (turn.backend !== 'codex') {

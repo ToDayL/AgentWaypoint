@@ -778,9 +778,17 @@ function buildEffectiveRuntimeConfig(
   }
   if (typeof payload.sandbox === 'string' && payload.sandbox.trim().length > 0) {
     runtime.sandbox = payload.sandbox.trim();
+  } else if (payload.sandbox && typeof payload.sandbox === 'object' && !Array.isArray(payload.sandbox)) {
+    runtime.sandbox = JSON.parse(JSON.stringify(payload.sandbox)) as Record<string, unknown>;
   }
   if (typeof payload.approvalPolicy === 'string' && payload.approvalPolicy.trim().length > 0) {
     runtime.approvalPolicy = payload.approvalPolicy.trim();
+  }
+  if (typeof payload.permissionMode === 'string' && payload.permissionMode.trim().length > 0) {
+    runtime.permissionMode = payload.permissionMode.trim();
+  }
+  if (payload.allowDangerouslySkipPermissions === true) {
+    runtime.allowDangerouslySkipPermissions = true;
   }
   if (Object.keys(runtime).length === 0) {
     return Prisma.JsonNull;

@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { PermissionMode, SandboxSettings, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { ActiveClaudeTurn, ActiveTurn, ModelListItem, RunnerEventType, StartTurnBody } from './types.js';
 
 const DEFAULT_CLAUDE_MAX_TURNS = 12;
+const STEER_GRACE_WINDOW_MS = 1500;
+const DEFAULT_CLAUDE_EXECUTION_MODE = 'safe-write';
 
 type ClaudeBackendDeps = {
   activeTurns: Map<string, ActiveTurn>;
@@ -14,6 +16,7 @@ type ClaudeBackendDeps = {
 
 export class ClaudeBackend {
   private readonly cancellingTurns = new Set<string>();
+  private readonly turnInputs = new Map<string, AsyncInputQueue>();
 
   constructor(private readonly deps: ClaudeBackendDeps) {}
 
@@ -82,9 +85,11 @@ export class ClaudeBackend {
     try {
       const cwd = input.cwd?.trim() || process.cwd();
       const config = readBackendConfig(input.backendConfig);
+      const runtimePolicy = resolveClaudeRuntimePolicy(config.executionMode, cwd);
       const resumedSessionId = readNonEmptyString(input.threadId);
       const activeSessionId = resumedSessionId ?? randomUUID();
       const inputQueue = new AsyncInputQueue();
+      this.turnInputs.set(turn.turnId, inputQueue);
       inputQueue.push({
         type: 'user',
         message: {
@@ -94,7 +99,6 @@ export class ClaudeBackend {
         parent_tool_use_id: null,
         session_id: input.sessionId,
       });
-      inputQueue.close();
 
       const queryOptions: {
         cwd: string;
@@ -103,6 +107,9 @@ export class ClaudeBackend {
         settingSources: Array<'user' | 'project' | 'local'>;
         includePartialMessages: true;
         maxTurns: number;
+        permissionMode: PermissionMode;
+        allowDangerouslySkipPermissions: boolean;
+        sandbox: SandboxSettings;
         resume?: string;
         sessionId?: string;
       } = {
@@ -115,6 +122,9 @@ export class ClaudeBackend {
         settingSources: ['user', 'project', 'local'],
         includePartialMessages: true,
         maxTurns: DEFAULT_CLAUDE_MAX_TURNS,
+        permissionMode: runtimePolicy.permissionMode,
+        allowDangerouslySkipPermissions: runtimePolicy.allowDangerouslySkipPermissions,
+        sandbox: runtimePolicy.sandbox,
       };
       if (resumedSessionId) {
         queryOptions.resume = resumedSessionId;
@@ -132,7 +142,11 @@ export class ClaudeBackend {
         threadId: activeSessionId,
         cwd,
         ...(config.model ? { model: config.model } : {}),
-        ...(config.executionMode ? { executionMode: config.executionMode } : {}),
+        executionMode: runtimePolicy.executionMode,
+        approvalPolicy: runtimePolicy.approvalPolicy,
+        permissionMode: runtimePolicy.permissionMode,
+        ...(runtimePolicy.allowDangerouslySkipPermissions ? { allowDangerouslySkipPermissions: true } : {}),
+        sandbox: runtimePolicy.sandbox,
       });
 
       let sawResult = false;
@@ -174,7 +188,15 @@ export class ClaudeBackend {
             await this.deps.finalizeTurn(turn.turnId, 'turn.cancelled', {});
             break;
           }
+          let hasPendingInput = inputQueue.hasPendingItems();
+          if (!hasPendingInput) {
+            hasPendingInput = await inputQueue.waitForPendingItems(STEER_GRACE_WINDOW_MS);
+          }
           const subtype = typeof msg.subtype === 'string' ? msg.subtype : '';
+          if (hasPendingInput) {
+            sawPartialAssistantDelta = false;
+            continue;
+          }
           if (subtype === 'error') {
             const errorText = readNonEmptyString(msg.result) ?? readFirstString(msg.errors) ?? 'Claude query failed';
             await this.deps.failTurn(turn.turnId, errorText);
@@ -203,12 +225,16 @@ export class ClaudeBackend {
       const message = error instanceof Error ? error.message : 'unknown claude execution error';
       await this.deps.failTurn(turn.turnId, message);
     } finally {
+      this.turnInputs.get(turn.turnId)?.close();
+      this.turnInputs.delete(turn.turnId);
       this.cancellingTurns.delete(turn.turnId);
     }
   }
 
   async cancelTurn(turn: ActiveClaudeTurn): Promise<void> {
     this.cancellingTurns.add(turn.turnId);
+    const inputQueue = this.turnInputs.get(turn.turnId);
+    inputQueue?.close();
     if (!turn.finalized) {
       await this.deps.finalizeTurn(turn.turnId, 'turn.cancelled', {});
     }
@@ -234,10 +260,35 @@ export class ClaudeBackend {
       return;
     }
     this.cancellingTurns.delete(turnId);
+    this.turnInputs.get(turnId)?.close();
+    this.turnInputs.delete(turnId);
     turn.finalized = true;
     turn.query?.close();
     this.deps.activeTurns.delete(turnId);
     turn.completionResolve?.();
+  }
+
+  async steerTurn(turn: ActiveClaudeTurn, content: string): Promise<void> {
+    if (turn.finalized) {
+      throw new Error('Turn is already finalized');
+    }
+    const trimmed = content.trim();
+    if (!trimmed) {
+      throw new Error('Steer content is required');
+    }
+    const inputQueue = this.turnInputs.get(turn.turnId);
+    if (!inputQueue) {
+      throw new Error('Steer input queue is unavailable');
+    }
+    inputQueue.push({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: trimmed,
+      },
+      parent_tool_use_id: null,
+      session_id: turn.sessionId,
+    });
   }
 }
 
@@ -249,8 +300,61 @@ function readBackendConfig(
   const executionMode =
     config && typeof config.executionMode === 'string' && config.executionMode.trim().length > 0
       ? config.executionMode.trim()
-      : null;
+      : DEFAULT_CLAUDE_EXECUTION_MODE;
   return { model, executionMode };
+}
+
+function resolveClaudeRuntimePolicy(executionMode: string | null, cwd: string): {
+  executionMode: 'read-only' | 'safe-write' | 'yolo';
+  approvalPolicy: 'on-request' | 'never';
+  permissionMode: PermissionMode;
+  allowDangerouslySkipPermissions: boolean;
+  sandbox: SandboxSettings;
+} {
+  if (executionMode === 'read-only') {
+    return {
+      executionMode: 'read-only',
+      approvalPolicy: 'on-request',
+      permissionMode: 'default',
+      allowDangerouslySkipPermissions: false,
+      sandbox: {
+        enabled: true,
+        autoAllowBashIfSandboxed: false,
+        allowUnsandboxedCommands: false,
+        filesystem: {
+          allowRead: [cwd],
+          allowWrite: [],
+        },
+      },
+    };
+  }
+  if (executionMode === 'yolo') {
+    return {
+      executionMode: 'yolo',
+      approvalPolicy: 'never',
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+      sandbox: {
+        enabled: false,
+        allowUnsandboxedCommands: true,
+      },
+    };
+  }
+  return {
+    executionMode: 'safe-write',
+    approvalPolicy: 'on-request',
+    permissionMode: 'acceptEdits',
+    allowDangerouslySkipPermissions: false,
+    sandbox: {
+      enabled: true,
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false,
+      filesystem: {
+        allowRead: [cwd],
+        allowWrite: [cwd],
+      },
+    },
+  };
 }
 
 function extractAssistantText(message: Record<string, unknown>): string {
@@ -328,11 +432,14 @@ class AsyncInputQueue {
   private readonly items: SDKUserMessage[] = [];
   private closed = false;
   private waitingResolve: ((value: IteratorResult<SDKUserMessage>) => void) | null = null;
+  private readonly pendingWaiters = new Set<(pending: boolean) => void>();
 
   push(item: SDKUserMessage): void {
     if (this.closed) {
       throw new Error('Input queue is closed');
     }
+    this.pendingWaiters.forEach((resolve) => resolve(true));
+    this.pendingWaiters.clear();
     if (this.waitingResolve) {
       const resolve = this.waitingResolve;
       this.waitingResolve = null;
@@ -344,6 +451,9 @@ class AsyncInputQueue {
 
   close(): void {
     this.closed = true;
+    this.items.length = 0;
+    this.pendingWaiters.forEach((resolve) => resolve(false));
+    this.pendingWaiters.clear();
     if (this.waitingResolve) {
       const resolve = this.waitingResolve;
       this.waitingResolve = null;
@@ -374,5 +484,30 @@ class AsyncInputQueue {
         };
       },
     };
+  }
+
+  hasPendingItems(): boolean {
+    return this.items.length > 0;
+  }
+
+  async waitForPendingItems(timeoutMs: number): Promise<boolean> {
+    if (this.items.length > 0) {
+      return true;
+    }
+    if (this.closed || timeoutMs <= 0) {
+      return false;
+    }
+    return await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingWaiters.delete(onPending);
+        resolve(false);
+      }, timeoutMs);
+      const onPending = (pending: boolean): void => {
+        clearTimeout(timer);
+        this.pendingWaiters.delete(onPending);
+        resolve(pending);
+      };
+      this.pendingWaiters.add(onPending);
+    });
   }
 }
