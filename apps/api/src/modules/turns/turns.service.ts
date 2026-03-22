@@ -39,6 +39,7 @@ type PendingApprovalSummary = {
 export class TurnsService implements OnModuleInit {
   private readonly logger = new Logger(TurnsService.name);
   private readonly runnerConsumers = new Map<string, Promise<void>>();
+  private readonly reasoningOpenTurns = new Set<string>();
 
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
@@ -275,6 +276,10 @@ export class TurnsService implements OnModuleInit {
       throw new NotFoundException({ message: 'Turn not found' });
     }
 
+    if (type !== 'reasoning.delta' && type !== 'turn.started') {
+      await this.closeReasoningBlockIfOpen(turnId);
+    }
+
     switch (type) {
       case 'turn.started': {
         const threadId = payload.threadId;
@@ -315,6 +320,19 @@ export class TurnsService implements OnModuleInit {
           throw new ConflictException({ message: 'assistant.delta requires payload.text' });
         }
         await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text }));
+        return;
+      }
+      case 'reasoning.delta': {
+        if (TERMINAL_STATUSES.includes(turn.status)) {
+          return;
+        }
+        const delta = typeof payload.delta === 'string' ? payload.delta : '';
+        if (delta.length === 0) {
+          return;
+        }
+        await this.openReasoningBlockIfNeeded(turnId);
+        await this.appendEvent(turnId, 'reasoning.delta', this.normalizePayload({ delta }));
+        await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: delta }));
         return;
       }
       case 'turn.approval.requested': {
@@ -397,7 +415,6 @@ export class TurnsService implements OnModuleInit {
         return;
       }
       case 'plan.updated':
-      case 'reasoning.delta':
       case 'diff.updated':
       case 'tool.started':
       case 'tool.output':
@@ -434,11 +451,13 @@ export class TurnsService implements OnModuleInit {
         }
 
         await this.prisma.$transaction(async (tx) => {
+          const assistantContentFromEvents = await this.collectAssistantDeltaContent(tx, turnId);
+          const assistantContent = assistantContentFromEvents.length > 0 ? assistantContentFromEvents : content;
           const assistantMessage = await tx.message.create({
             data: {
               sessionId: turn.sessionId,
               role: 'assistant',
-              content,
+              content: assistantContent,
             },
           });
 
@@ -522,6 +541,22 @@ export class TurnsService implements OnModuleInit {
 
   private normalizePayload(payload: Record<string, unknown>): Prisma.InputJsonValue {
     return JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue;
+  }
+
+  private async openReasoningBlockIfNeeded(turnId: string): Promise<void> {
+    if (this.reasoningOpenTurns.has(turnId)) {
+      return;
+    }
+    this.reasoningOpenTurns.add(turnId);
+    await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: '<think>' }));
+  }
+
+  private async closeReasoningBlockIfOpen(turnId: string): Promise<void> {
+    if (!this.reasoningOpenTurns.has(turnId)) {
+      return;
+    }
+    this.reasoningOpenTurns.delete(turnId);
+    await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: '</think>' }));
   }
 
   private async collectAssistantDeltaContent(tx: Prisma.TransactionClient, turnId: string): Promise<string> {

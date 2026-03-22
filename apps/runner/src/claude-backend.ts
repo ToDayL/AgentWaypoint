@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type {
+  HookCallbackMatcher,
+  HookEvent,
   PermissionMode,
   PermissionResult,
   PermissionUpdate,
@@ -25,6 +27,8 @@ export class ClaudeBackend {
   private readonly turnInputs = new Map<string, AsyncInputQueue>();
   private readonly pendingApprovals = new Map<string, PendingClaudeApproval>();
   private readonly pendingApprovalsByTurn = new Map<string, Set<string>>();
+  private readonly startedToolCallsByTurn = new Map<string, Set<string>>();
+  private readonly aggregatedDiffsByTurn = new Map<string, Map<string, AggregatedDiffFile>>();
 
   constructor(private readonly deps: ClaudeBackendDeps) {}
 
@@ -133,6 +137,7 @@ export class ClaudeBackend {
             agentID?: string;
           },
         ) => Promise<PermissionResult>;
+        hooks: Partial<Record<HookEvent, HookCallbackMatcher[]>>;
         resume?: string;
         sessionId?: string;
       } = {
@@ -149,6 +154,7 @@ export class ClaudeBackend {
         allowDangerouslySkipPermissions: runtimePolicy.allowDangerouslySkipPermissions,
         sandbox: runtimePolicy.sandbox,
         canUseTool: (toolName, toolInput, options) => this.requestToolApproval(turn, cwd, toolName, toolInput, options),
+        hooks: this.buildClaudeHooks(turn.turnId),
       };
       if (resumedSessionId) {
         queryOptions.resume = resumedSessionId;
@@ -191,10 +197,225 @@ export class ClaudeBackend {
             turn.assistantText += text;
             await this.deps.appendTurnEvent(turn.turnId, 'assistant.delta', { text });
           }
+          const thinkingDelta = extractPartialThinkingText(msg);
+          if (thinkingDelta.length > 0) {
+            await this.deps.appendTurnEvent(turn.turnId, 'reasoning.delta', { delta: thinkingDelta });
+          }
+          const startedTool = extractToolStartFromStreamEvent(msg);
+          if (startedTool) {
+            await this.emitToolStarted(turn.turnId, startedTool);
+          }
+          continue;
+        }
+
+        if (msg.type === 'tool_progress') {
+          const toolCallId = readNonEmptyString(msg.tool_use_id) ?? `tool-${turn.turnId}-${Date.now()}`;
+          const title = readNonEmptyString(msg.tool_name) ?? 'tool';
+          await this.emitToolStarted(turn.turnId, {
+            toolCallId,
+            title,
+            kind: title,
+          });
+          const elapsed = typeof msg.elapsed_time_seconds === 'number' && Number.isFinite(msg.elapsed_time_seconds)
+            ? msg.elapsed_time_seconds
+            : null;
+          const taskId = readNonEmptyString(msg.task_id);
+          await this.deps.appendTurnEvent(turn.turnId, 'tool.output', {
+            toolCallId,
+            title,
+            kind: title,
+            output: elapsed === null ? 'Running' : `Running (${elapsed.toFixed(1)}s)`,
+            ...(taskId ? { taskId } : {}),
+          });
+          continue;
+        }
+
+        if (msg.type === 'tool_use_summary') {
+          const summary = readNonEmptyString(msg.summary);
+          const ids = Array.isArray(msg.preceding_tool_use_ids) ? msg.preceding_tool_use_ids : [];
+          const toolCallId = ids.map(readNonEmptyString).find((id): id is string => !!id) ?? `tool-${turn.turnId}-${Date.now()}`;
+          if (summary && summary.length > 0) {
+            await this.deps.appendTurnEvent(turn.turnId, 'tool.output', {
+              toolCallId,
+              title: 'tool',
+              kind: 'tool',
+              output: summary,
+            });
+          }
+          await this.deps.appendTurnEvent(turn.turnId, 'tool.completed', {
+            toolCallId,
+            title: 'tool',
+            kind: 'tool',
+            summary: summary ?? '',
+          });
+          continue;
+        }
+
+        if (msg.type === 'system') {
+          const subtype = readNonEmptyString(msg.subtype);
+          if (subtype === 'task_started') {
+            const taskId = readNonEmptyString(msg.task_id) ?? `task-${turn.turnId}-${Date.now()}`;
+            const description = readNonEmptyString(msg.description) ?? 'task';
+            await this.emitToolStarted(turn.turnId, {
+              toolCallId: taskId,
+              title: 'Task',
+              kind: 'task',
+            });
+            await this.deps.appendTurnEvent(turn.turnId, 'tool.output', {
+              toolCallId: taskId,
+              title: 'Task',
+              kind: 'task',
+              output: description,
+            });
+            continue;
+          }
+          if (subtype === 'task_progress') {
+            const taskId = readNonEmptyString(msg.task_id) ?? `task-${turn.turnId}-${Date.now()}`;
+            const description = readNonEmptyString(msg.description);
+            if (description) {
+              await this.deps.appendTurnEvent(turn.turnId, 'reasoning.delta', { delta: `${description}\n` });
+              await this.deps.appendTurnEvent(turn.turnId, 'tool.output', {
+                toolCallId: taskId,
+                title: 'Task',
+                kind: 'task',
+                output: description,
+              });
+            }
+            continue;
+          }
+          if (subtype === 'task_notification') {
+            const taskId = readNonEmptyString(msg.task_id) ?? `task-${turn.turnId}-${Date.now()}`;
+            const summary = readNonEmptyString(msg.summary) ?? 'task completed';
+            await this.deps.appendTurnEvent(turn.turnId, 'tool.completed', {
+              toolCallId: taskId,
+              title: 'Task',
+              kind: 'task',
+              summary,
+            });
+            continue;
+          }
+          if (subtype === 'local_command_output') {
+            const content = readNonEmptyString(msg.content);
+            if (content) {
+              await this.deps.appendTurnEvent(turn.turnId, 'tool.output', {
+                toolCallId: `local-command-${turn.turnId}`,
+                title: 'Local Command',
+                kind: 'local_command',
+                output: content,
+              });
+            }
+            continue;
+          }
+          if (subtype === 'hook_started') {
+            const hookId = readNonEmptyString(msg.hook_id) ?? `hook-${turn.turnId}-${Date.now()}`;
+            const hookName = readNonEmptyString(msg.hook_name) ?? 'hook';
+            const hookEvent = readNonEmptyString(msg.hook_event) ?? '';
+            await this.emitToolStarted(turn.turnId, {
+              toolCallId: hookId,
+              title: `Hook: ${hookName}`,
+              kind: 'hook',
+            });
+            if (hookEvent) {
+              await this.deps.appendTurnEvent(turn.turnId, 'tool.output', {
+                toolCallId: hookId,
+                title: `Hook: ${hookName}`,
+                kind: 'hook',
+                output: `Event: ${hookEvent}`,
+              });
+            }
+            continue;
+          }
+          if (subtype === 'hook_progress') {
+            const hookId = readNonEmptyString(msg.hook_id) ?? `hook-${turn.turnId}-${Date.now()}`;
+            const hookName = readNonEmptyString(msg.hook_name) ?? 'hook';
+            const output = readNonEmptyString(msg.output);
+            const stdout = readNonEmptyString(msg.stdout);
+            const stderr = readNonEmptyString(msg.stderr);
+            const detail = output ?? stdout ?? stderr;
+            if (detail) {
+              await this.deps.appendTurnEvent(turn.turnId, 'tool.output', {
+                toolCallId: hookId,
+                title: `Hook: ${hookName}`,
+                kind: 'hook',
+                output: detail,
+              });
+            }
+            continue;
+          }
+          if (subtype === 'hook_response') {
+            const hookId = readNonEmptyString(msg.hook_id) ?? `hook-${turn.turnId}-${Date.now()}`;
+            const hookName = readNonEmptyString(msg.hook_name) ?? 'hook';
+            const outcome = readNonEmptyString(msg.outcome) ?? 'completed';
+            const output = readNonEmptyString(msg.output);
+            const stderr = readNonEmptyString(msg.stderr);
+            const summary = output ?? stderr ?? `Outcome: ${outcome}`;
+            await this.deps.appendTurnEvent(turn.turnId, 'tool.completed', {
+              toolCallId: hookId,
+              title: `Hook: ${hookName}`,
+              kind: 'hook',
+              summary,
+              outcome,
+            });
+            continue;
+          }
+          if (subtype === 'status') {
+            const status = readNonEmptyString(msg.status);
+            if (status) {
+              await this.deps.appendTurnEvent(turn.turnId, 'reasoning.delta', {
+                delta: `[status] ${status}\n`,
+              });
+            }
+            continue;
+          }
+          if (subtype === 'api_retry') {
+            const attempt = typeof msg.attempt === 'number' ? msg.attempt : null;
+            const maxRetries = typeof msg.max_retries === 'number' ? msg.max_retries : null;
+            const delayMs = typeof msg.retry_delay_ms === 'number' ? msg.retry_delay_ms : null;
+            const status = typeof msg.error_status === 'number' ? String(msg.error_status) : 'connection';
+            const retryText = `API retry (${status})${attempt && maxRetries ? ` ${attempt}/${maxRetries}` : ''}${delayMs ? ` in ${delayMs}ms` : ''}`;
+            await this.deps.appendTurnEvent(turn.turnId, 'tool.output', {
+              toolCallId: `api-retry-${turn.turnId}`,
+              title: 'API Retry',
+              kind: 'system',
+              output: retryText,
+            });
+            continue;
+          }
+          if (subtype === 'init') {
+            const model = readNonEmptyString(msg.model);
+            const tools = Array.isArray(msg.tools) ? msg.tools.length : null;
+            await this.deps.appendTurnEvent(turn.turnId, 'tool.output', {
+              toolCallId: `session-init-${turn.turnId}`,
+              title: 'Session Init',
+              kind: 'system',
+              output: `Initialized${model ? ` model=${model}` : ''}${tools === null ? '' : ` tools=${tools}`}`,
+            });
+            continue;
+          }
+        }
+
+        if (msg.type === 'rate_limit_event') {
+          const info =
+            msg.rate_limit_info && typeof msg.rate_limit_info === 'object' && !Array.isArray(msg.rate_limit_info)
+              ? (msg.rate_limit_info as Record<string, unknown>)
+              : null;
+          const status = info ? readNonEmptyString(info.status) : null;
+          const utilization = info && typeof info.utilization === 'number' ? info.utilization : null;
+          const text = `Rate limit${status ? `: ${status}` : ''}${utilization === null ? '' : ` (${Math.round(utilization * 100)}%)`}`;
+          await this.deps.appendTurnEvent(turn.turnId, 'tool.output', {
+            toolCallId: `rate-limit-${turn.turnId}`,
+            title: 'Rate Limit',
+            kind: 'system',
+            output: text,
+          });
           continue;
         }
 
         if (msg.type === 'assistant') {
+          const startedTools = extractToolStartsFromAssistantMessage(msg);
+          for (const startedTool of startedTools) {
+            await this.emitToolStarted(turn.turnId, startedTool);
+          }
           if (sawPartialAssistantDelta) {
             continue;
           }
@@ -223,10 +444,28 @@ export class ClaudeBackend {
           }
           if (subtype === 'error') {
             const errorText = readNonEmptyString(msg.result) ?? readFirstString(msg.errors) ?? 'Claude query failed';
+            const errors = Array.isArray(msg.errors)
+              ? msg.errors.map((item) => (typeof item === 'string' ? item.trim() : '')).filter((item) => item.length > 0)
+              : [];
+            if (errors.length > 0) {
+              await this.deps.appendTurnEvent(turn.turnId, 'tool.output', {
+                toolCallId: `result-${turn.turnId}`,
+                title: 'Execution Error',
+                kind: 'system',
+                output: errors.join('\n'),
+              });
+            }
             await this.deps.failTurn(turn.turnId, errorText);
           } else {
             const content = turn.assistantText || readNonEmptyString(msg.result) || '';
-            await this.deps.finalizeTurn(turn.turnId, 'turn.completed', { content });
+            const usage = msg.usage;
+            const usagePayload =
+              usage && typeof usage === 'object' && !Array.isArray(usage)
+                ? {
+                    usage: usage as Record<string, unknown>,
+                  }
+                : {};
+            await this.deps.finalizeTurn(turn.turnId, 'turn.completed', { content, ...usagePayload });
           }
           break;
         }
@@ -252,6 +491,8 @@ export class ClaudeBackend {
       this.disposePendingApprovalsForTurn(input.turnId, 'decline');
       this.turnInputs.get(turn.turnId)?.close();
       this.turnInputs.delete(turn.turnId);
+      this.startedToolCallsByTurn.delete(input.turnId);
+      this.aggregatedDiffsByTurn.delete(input.turnId);
       this.cancellingTurns.delete(turn.turnId);
     }
   }
@@ -289,6 +530,8 @@ export class ClaudeBackend {
     this.disposePendingApprovalsForTurn(turnId, 'decline');
     this.turnInputs.get(turnId)?.close();
     this.turnInputs.delete(turnId);
+    this.startedToolCallsByTurn.delete(turnId);
+    this.aggregatedDiffsByTurn.delete(turnId);
     turn.finalized = true;
     turn.query?.close();
     this.deps.activeTurns.delete(turnId);
@@ -507,6 +750,169 @@ export class ClaudeBackend {
       this.pendingApprovalsByTurn.delete(turnId);
     }
   }
+
+  private async emitToolStarted(
+    turnId: string,
+    input: { toolCallId: string; title: string; kind: string; input?: Record<string, unknown> | null },
+  ): Promise<void> {
+    const toolCallId = input.toolCallId.trim();
+    if (!toolCallId) {
+      return;
+    }
+    const startedSet = this.startedToolCallsByTurn.get(turnId) ?? new Set<string>();
+    if (startedSet.has(toolCallId)) {
+      return;
+    }
+    startedSet.add(toolCallId);
+    this.startedToolCallsByTurn.set(turnId, startedSet);
+    await this.deps.appendTurnEvent(turnId, 'tool.started', {
+      toolCallId,
+      title: input.title || 'tool',
+      kind: input.kind || 'tool',
+      ...(input.input ? { input: input.input } : {}),
+    });
+  }
+
+  private buildClaudeHooks(turnId: string): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+    return {
+      PostToolUse: [
+        {
+          hooks: [
+            async (hookInput) => {
+              if (!hookInput || typeof hookInput !== 'object' || Array.isArray(hookInput)) {
+                return { continue: true };
+              }
+              const input = hookInput as Record<string, unknown>;
+              const hookEventName = readNonEmptyString(input.hook_event_name);
+              if (hookEventName !== 'PostToolUse') {
+                return { continue: true };
+              }
+              const toolName = readNonEmptyString(input.tool_name) ?? 'tool';
+              const toolUseId = readNonEmptyString(input.tool_use_id) ?? `post-tool-${turnId}-${Date.now()}`;
+              const toolInput =
+                input.tool_input && typeof input.tool_input === 'object' && !Array.isArray(input.tool_input)
+                  ? (input.tool_input as Record<string, unknown>)
+                  : null;
+              const toolResponse = input.tool_response;
+
+              await this.emitToolStarted(turnId, {
+                toolCallId: toolUseId,
+                title: toolName,
+                kind: toolName,
+                input: toolInput,
+              });
+
+              if (toolName === 'Bash') {
+                const output = extractBashOutput(toolResponse);
+                if (output) {
+                  await this.deps.appendTurnEvent(turnId, 'tool.output', {
+                    toolCallId: toolUseId,
+                    title: toolName,
+                    kind: toolName,
+                    output,
+                  });
+                }
+              }
+
+              if (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit') {
+                const diffPayload = buildDiffPayloadFromTool(toolName, toolInput, toolResponse);
+                if (diffPayload && diffPayload.files.length > 0 && diffPayload.byFile.length > 0) {
+                  const merged = this.mergeTurnDiffPayload(turnId, diffPayload);
+                  await this.deps.appendTurnEvent(turnId, 'diff.updated', merged);
+                }
+              }
+
+              await this.deps.appendTurnEvent(turnId, 'tool.completed', {
+                toolCallId: toolUseId,
+                title: toolName,
+                kind: toolName,
+                summary: 'completed',
+              });
+              return { continue: true };
+            },
+          ],
+        },
+      ],
+      PostToolUseFailure: [
+        {
+          hooks: [
+            async (hookInput) => {
+              if (!hookInput || typeof hookInput !== 'object' || Array.isArray(hookInput)) {
+                return { continue: true };
+              }
+              const input = hookInput as Record<string, unknown>;
+              const hookEventName = readNonEmptyString(input.hook_event_name);
+              if (hookEventName !== 'PostToolUseFailure') {
+                return { continue: true };
+              }
+              const toolName = readNonEmptyString(input.tool_name) ?? 'tool';
+              const toolUseId = readNonEmptyString(input.tool_use_id) ?? `post-tool-failure-${turnId}-${Date.now()}`;
+              const error = readNonEmptyString(input.error) ?? 'tool failed';
+
+              await this.emitToolStarted(turnId, {
+                toolCallId: toolUseId,
+                title: toolName,
+                kind: toolName,
+              });
+              await this.deps.appendTurnEvent(turnId, 'tool.output', {
+                toolCallId: toolUseId,
+                title: toolName,
+                kind: toolName,
+                output: error,
+              });
+              await this.deps.appendTurnEvent(turnId, 'tool.completed', {
+                toolCallId: toolUseId,
+                title: toolName,
+                kind: toolName,
+                summary: 'failed',
+              });
+              return { continue: true };
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  private mergeTurnDiffPayload(turnId: string, payload: ToolDiffPayload): Record<string, unknown> {
+    const filesByPath = this.aggregatedDiffsByTurn.get(turnId) ?? new Map<string, AggregatedDiffFile>();
+    if (!this.aggregatedDiffsByTurn.has(turnId)) {
+      this.aggregatedDiffsByTurn.set(turnId, filesByPath);
+    }
+
+    for (const file of payload.byFile) {
+      const existing = filesByPath.get(file.path);
+      if (existing) {
+        existing.structuredPatch.push(...file.structuredPatch);
+        if (file.oldPath) {
+          existing.oldPath = file.oldPath;
+        }
+        if (file.newPath) {
+          existing.newPath = file.newPath;
+        }
+      } else {
+        filesByPath.set(file.path, {
+          path: file.path,
+          oldPath: file.oldPath,
+          newPath: file.newPath,
+          structuredPatch: file.structuredPatch.map((hunk) => ({ ...hunk, lines: [...hunk.lines] })),
+        });
+      }
+    }
+
+    const orderedFiles = Array.from(filesByPath.values());
+    const unifiedDiff = renderUnifiedDiffByFiles(orderedFiles);
+    return {
+      files: orderedFiles.map((file) => file.path),
+      byFile: orderedFiles.map((file) => ({
+        path: file.path,
+        oldPath: file.oldPath,
+        newPath: file.newPath,
+        structuredPatch: file.structuredPatch,
+      })),
+      unifiedDiff,
+    };
+  }
 }
 
 type PendingClaudeApproval = {
@@ -516,6 +922,33 @@ type PendingClaudeApproval = {
   toolInput: Record<string, unknown>;
   suggestions: PermissionUpdate[];
   resolve: (result: PermissionResult) => void;
+};
+
+type StructuredPatchEntry = {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: string[];
+};
+
+type ToolDiffFile = {
+  path: string;
+  oldPath: string;
+  newPath: string;
+  structuredPatch: StructuredPatchEntry[];
+};
+
+type ToolDiffPayload = {
+  files: string[];
+  byFile: ToolDiffFile[];
+};
+
+type AggregatedDiffFile = {
+  path: string;
+  oldPath: string;
+  newPath: string;
+  structuredPatch: StructuredPatchEntry[];
 };
 
 function readBackendConfig(
@@ -663,6 +1096,406 @@ function extractPartialAssistantText(message: Record<string, unknown>): string {
     return deltaRecord.text;
   }
   return '';
+}
+
+function extractPartialThinkingText(message: Record<string, unknown>): string {
+  const event = message.event;
+  if (!event || typeof event !== 'object' || Array.isArray(event)) {
+    return '';
+  }
+  const record = event as Record<string, unknown>;
+  if (record.type !== 'content_block_delta') {
+    return '';
+  }
+  const delta = record.delta;
+  if (!delta || typeof delta !== 'object' || Array.isArray(delta)) {
+    return '';
+  }
+  const deltaRecord = delta as Record<string, unknown>;
+  const thinking = readNonEmptyString(deltaRecord.thinking);
+  if (thinking) {
+    return thinking;
+  }
+  return deltaRecord.type === 'thinking_delta' ? readNonEmptyString(deltaRecord.text) ?? '' : '';
+}
+
+function extractToolStartFromStreamEvent(
+  message: Record<string, unknown>,
+): { toolCallId: string; title: string; kind: string; input?: Record<string, unknown> | null } | null {
+  const event = message.event;
+  if (!event || typeof event !== 'object' || Array.isArray(event)) {
+    return null;
+  }
+  const record = event as Record<string, unknown>;
+  if (record.type !== 'content_block_start') {
+    return null;
+  }
+  const block = record.content_block;
+  if (!block || typeof block !== 'object' || Array.isArray(block)) {
+    return null;
+  }
+  const blockRecord = block as Record<string, unknown>;
+  if (blockRecord.type !== 'tool_use') {
+    return null;
+  }
+  const toolCallId = readNonEmptyString(blockRecord.id);
+  const name = readNonEmptyString(blockRecord.name);
+  if (!toolCallId || !name) {
+    return null;
+  }
+  const toolInput =
+    blockRecord.input && typeof blockRecord.input === 'object' && !Array.isArray(blockRecord.input)
+      ? (blockRecord.input as Record<string, unknown>)
+      : null;
+  return {
+    toolCallId,
+    title: name,
+    kind: name,
+    input: toolInput,
+  };
+}
+
+function extractToolStartsFromAssistantMessage(
+  message: Record<string, unknown>,
+): Array<{ toolCallId: string; title: string; kind: string; input?: Record<string, unknown> | null }> {
+  const payload = message.message;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return [];
+  }
+  const content = (payload as Record<string, unknown>).content;
+  if (!Array.isArray(content)) {
+    return [];
+  }
+  const startedTools: Array<{ toolCallId: string; title: string; kind: string; input?: Record<string, unknown> | null }> = [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) {
+      continue;
+    }
+    const blockRecord = block as Record<string, unknown>;
+    if (blockRecord.type !== 'tool_use') {
+      continue;
+    }
+    const toolCallId = readNonEmptyString(blockRecord.id);
+    const name = readNonEmptyString(blockRecord.name);
+    if (!toolCallId || !name) {
+      continue;
+    }
+    const toolInput =
+      blockRecord.input && typeof blockRecord.input === 'object' && !Array.isArray(blockRecord.input)
+        ? (blockRecord.input as Record<string, unknown>)
+        : null;
+    startedTools.push({
+      toolCallId,
+      title: name,
+      kind: name,
+      input: toolInput,
+    });
+  }
+  return startedTools;
+}
+
+function extractBashOutput(toolResponse: unknown): string | null {
+  if (!toolResponse || typeof toolResponse !== 'object' || Array.isArray(toolResponse)) {
+    return null;
+  }
+  const response = toolResponse as Record<string, unknown>;
+  const stdout = readNonEmptyString(response.stdout);
+  const stderr = readNonEmptyString(response.stderr);
+  const combined = [stdout, stderr].filter((item): item is string => !!item).join('\n');
+  if (combined.length > 0) {
+    return combined;
+  }
+  return readNonEmptyString(response.output) ?? null;
+}
+
+function buildDiffPayloadFromTool(
+  toolName: string,
+  toolInput: Record<string, unknown> | null,
+  toolResponse: unknown,
+): ToolDiffPayload | null {
+  const inputPath = readPathFromInput(toolInput);
+  const fromResponse = buildDiffFilesFromResponse(toolResponse, inputPath);
+  if (fromResponse.length > 0) {
+    return {
+      files: fromResponse.map((item) => item.path),
+      byFile: fromResponse,
+    };
+  }
+
+  const path = inputPath;
+  if (!path) {
+    return null;
+  }
+
+  if (toolName === 'Write' && toolInput) {
+    const content = typeof toolInput.content === 'string' ? toolInput.content : '';
+    if (content.length > 0) {
+      return {
+        files: [path],
+        byFile: [
+          {
+            path,
+            oldPath: path,
+            newPath: path,
+            structuredPatch: [
+              {
+                oldStart: 1,
+                oldLines: 0,
+                newStart: 1,
+                newLines: countPatchLines(content),
+                lines: prefixPatchLines(content, '+'),
+              },
+            ],
+          },
+        ],
+      };
+    }
+  }
+
+  if (toolName === 'Edit' && toolInput) {
+    const oldString = typeof toolInput.old_string === 'string' ? toolInput.old_string : '';
+    const newString = typeof toolInput.new_string === 'string' ? toolInput.new_string : '';
+    if (oldString.length > 0 || newString.length > 0) {
+      return {
+        files: [path],
+        byFile: [
+          {
+            path,
+            oldPath: path,
+            newPath: path,
+            structuredPatch: [
+              {
+                oldStart: 1,
+                oldLines: countPatchLines(oldString),
+                newStart: 1,
+                newLines: countPatchLines(newString),
+                lines: [...prefixPatchLines(oldString, '-'), ...prefixPatchLines(newString, '+')],
+              },
+            ],
+          },
+        ],
+      };
+    }
+  }
+
+  if (toolName === 'MultiEdit' && toolInput) {
+    const edits = Array.isArray(toolInput.edits) ? toolInput.edits : [];
+    if (edits.length > 0) {
+      const hunks = edits
+        .map((edit) => {
+          if (!edit || typeof edit !== 'object' || Array.isArray(edit)) {
+            return null;
+          }
+          const record = edit as Record<string, unknown>;
+          const oldString = typeof record.old_string === 'string' ? record.old_string : '';
+          const newString = typeof record.new_string === 'string' ? record.new_string : '';
+          return {
+            oldStart: 1,
+            oldLines: countPatchLines(oldString),
+            newStart: 1,
+            newLines: countPatchLines(newString),
+            lines: [...prefixPatchLines(oldString, '-'), ...prefixPatchLines(newString, '+')],
+          };
+        })
+        .filter((hunk): hunk is StructuredPatchEntry => !!hunk && hunk.lines.length > 0);
+      if (hunks.length > 0) {
+        return {
+          files: [path],
+          byFile: [
+            {
+              path,
+              oldPath: path,
+              newPath: path,
+              structuredPatch: hunks,
+            },
+          ],
+        };
+      }
+    }
+  }
+  void toolResponse;
+  return null;
+}
+
+function buildDiffFilesFromResponse(toolResponse: unknown, fallbackPath: string | null): ToolDiffFile[] {
+  const records = collectObjectRecords(toolResponse);
+  if (records.length === 0) {
+    return [];
+  }
+  const byPath = new Map<string, ToolDiffFile>();
+
+  for (const record of records) {
+    const path =
+      readPathFromRecord(record, ['filePath', 'file_path', 'path']) ??
+      readPathFromRecord(record, ['targetFilePath', 'target_file_path']) ??
+      fallbackPath;
+    if (!path) {
+      continue;
+    }
+    const structuredPatch = readStructuredPatch(record);
+    if (structuredPatch.length === 0) {
+      continue;
+    }
+    const oldPath = readPathFromRecord(record, ['oldPath', 'old_path']) ?? path;
+    const newPath = readPathFromRecord(record, ['newPath', 'new_path']) ?? path;
+    const existing = byPath.get(path);
+    if (existing) {
+      existing.structuredPatch.push(...structuredPatch);
+      existing.oldPath = oldPath;
+      existing.newPath = newPath;
+      continue;
+    }
+    byPath.set(path, {
+      path,
+      oldPath,
+      newPath,
+      structuredPatch,
+    });
+  }
+
+  return Array.from(byPath.values());
+}
+
+function collectObjectRecords(value: unknown): Record<string, unknown>[] {
+  if (!value) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
+      .flatMap((item) => [item, ...collectNestedRecordCandidates(item)]);
+  }
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return [record, ...collectNestedRecordCandidates(record)];
+  }
+  return [];
+}
+
+function collectNestedRecordCandidates(record: Record<string, unknown>): Record<string, unknown>[] {
+  const nested: Record<string, unknown>[] = [];
+  const keys = ['result', 'response', 'data', 'output'];
+  for (const key of keys) {
+    const candidate = record[key];
+    if (!candidate) {
+      continue;
+    }
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) {
+        if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+          nested.push(entry as Record<string, unknown>);
+        }
+      }
+      continue;
+    }
+    if (typeof candidate === 'object' && !Array.isArray(candidate)) {
+      nested.push(candidate as Record<string, unknown>);
+    }
+  }
+  return nested;
+}
+
+function readPathFromInput(toolInput: Record<string, unknown> | null): string | null {
+  if (!toolInput) {
+    return null;
+  }
+  return (
+    readPathFromRecord(toolInput, ['filePath', 'file_path', 'path']) ??
+    readPathFromRecord(toolInput, ['targetFilePath', 'target_file_path'])
+  );
+}
+
+function readPathFromRecord(record: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const path = readNonEmptyString(record[key]);
+    if (path) {
+      return path;
+    }
+  }
+  return null;
+}
+
+function readStructuredPatch(record: Record<string, unknown>): StructuredPatchEntry[] {
+  const rawPatch = record.structuredPatch ?? record.structured_patch;
+  if (!Array.isArray(rawPatch)) {
+    return [];
+  }
+  const entries: StructuredPatchEntry[] = [];
+  for (const item of rawPatch) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      continue;
+    }
+    const entryRecord = item as Record<string, unknown>;
+    const oldStart = readPatchNumber(entryRecord.oldStart ?? entryRecord.old_start);
+    const oldLines = readPatchNumber(entryRecord.oldLines ?? entryRecord.old_lines);
+    const newStart = readPatchNumber(entryRecord.newStart ?? entryRecord.new_start);
+    const newLines = readPatchNumber(entryRecord.newLines ?? entryRecord.new_lines);
+    const lines = Array.isArray(entryRecord.lines)
+      ? entryRecord.lines
+          .map((line) => (typeof line === 'string' ? line : ''))
+          .filter((line) => line.length > 0)
+      : [];
+    if (oldStart === null || oldLines === null || newStart === null || newLines === null || lines.length === 0) {
+      continue;
+    }
+    entries.push({
+      oldStart,
+      oldLines,
+      newStart,
+      newLines,
+      lines,
+    });
+  }
+  return entries;
+}
+
+function readPatchNumber(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  return Math.trunc(value);
+}
+
+function countPatchLines(content: string): number {
+  if (content.length === 0) {
+    return 0;
+  }
+  return content.split('\n').length;
+}
+
+function prefixPatchLines(content: string, prefix: '+' | '-'): string[] {
+  if (content.length === 0) {
+    return [];
+  }
+  return content.split('\n').map((line) => `${prefix}${line}`);
+}
+
+function renderUnifiedDiffByFiles(files: AggregatedDiffFile[]): string {
+  const chunks: string[] = [];
+  for (const file of files) {
+    const oldLabel = normalizeGitDiffPath(file.oldPath, 'a');
+    const newLabel = normalizeGitDiffPath(file.newPath, 'b');
+    chunks.push(`diff --git ${oldLabel} ${newLabel}`);
+    chunks.push(`--- ${oldLabel}`);
+    chunks.push(`+++ ${newLabel}`);
+    for (const hunk of file.structuredPatch) {
+      chunks.push(`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`);
+      chunks.push(...hunk.lines);
+    }
+    chunks.push('');
+  }
+  while (chunks.length > 0 && chunks[chunks.length - 1] === '') {
+    chunks.pop();
+  }
+  return chunks.join('\n');
+}
+
+function normalizeGitDiffPath(path: string, side: 'a' | 'b'): string {
+  const normalized = path.replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!normalized) {
+    return `${side}/unknown`;
+  }
+  return `${side}/${normalized}`;
 }
 
 function readNonEmptyString(value: unknown): string | null {

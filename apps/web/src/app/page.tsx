@@ -683,7 +683,11 @@ export default function HomePage() {
     if (insightsTab !== 'diff' || !latestDiffSummary) {
       return [] as ParsedDiffFile[];
     }
-    return parseDiff(latestDiffSummary);
+    try {
+      return parseDiff(latestDiffSummary);
+    } catch {
+      return [] as ParsedDiffFile[];
+    }
   }, [insightsTab, latestDiffSummary]);
   const renderedDiff = useMemo(() => {
     if (!latestDiffSummary) {
@@ -3846,7 +3850,9 @@ export default function HomePage() {
                       ) : null}
                     </header>
                     <div className="chat-markdown">
-                      <ReactMarkdown remarkPlugins={CHAT_MARKDOWN_REMARK_PLUGINS}>{message.content}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={CHAT_MARKDOWN_REMARK_PLUGINS}>
+                        {renderChatMessageMarkdown(message.content)}
+                      </ReactMarkdown>
                     </div>
                   </article>
                 ))}
@@ -4841,6 +4847,23 @@ function appendOrMergeDetail(details: string[], text: string): string[] {
   const last = details[details.length - 1];
   const merged = `${last}${text}`;
   return [...details.slice(0, -1), merged];
+}
+
+function renderChatMessageMarkdown(content: string): string {
+  if (!content.includes('<think>')) {
+    return content;
+  }
+  return content.replace(/<think>([\s\S]*?)<\/think>/gi, (_full, inner: string) => {
+    const normalized = inner.trim();
+    if (!normalized) {
+      return '';
+    }
+    const italicLines = normalized
+      .split('\n')
+      .map((line) => `> _${line.trim()}_`)
+      .join('\n');
+    return `\n${italicLines}\n`;
+  });
 }
 
 function resolveToolKey(envelope: StreamEnvelope): string {
