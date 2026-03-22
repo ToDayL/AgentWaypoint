@@ -4087,7 +4087,7 @@ export default function HomePage() {
                         <dd>
                           {resolvedSessionInfo.runtimeEntries.length > 0
                             ? (
-                              <pre className="session-debug-lines">
+                              <pre className="session-debug-lines session-runtime-lines-capped">
                                 {resolvedSessionInfo.runtimeEntries
                                   .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`)
                                   .join('\n')}
@@ -4099,7 +4099,7 @@ export default function HomePage() {
                           <>
                             <dt>Debug</dt>
                             <dd>
-                              <pre className="session-debug-lines">{currentSessionDebugInfo}</pre>
+                              <pre className="session-debug-lines session-debug-lines-capped">{currentSessionDebugInfo}</pre>
                             </dd>
                           </>
                         ) : null}

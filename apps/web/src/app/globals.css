@@ -1504,6 +1504,16 @@ button:disabled {
   word-break: break-word;
 }
 
+.session-runtime-lines-capped {
+  max-height: 8rem;
+  overflow: auto;
+}
+
+.session-debug-lines-capped {
+  max-height: 10rem;
+  overflow: auto;
+}
+
 .session-info-toggle {
   position: absolute;
   right: 0.5rem;
