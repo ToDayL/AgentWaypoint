@@ -121,6 +121,7 @@ export type WorkspaceUploadResult = {
 
 export type SkillListInput = {
   cwd?: string | null;
+  backend?: string | null;
 };
 
 export type RateLimitWindow = {

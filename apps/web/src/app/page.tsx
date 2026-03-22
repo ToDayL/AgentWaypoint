@@ -994,8 +994,15 @@ export default function HomePage() {
     }
 
     const controller = new AbortController();
+    const backend = typeof selectedProject?.backend === 'string' && selectedProject.backend.trim()
+      ? selectedProject.backend.trim()
+      : 'codex';
+    const query = new URLSearchParams({
+      cwd: activeWorkspacePath,
+      backend,
+    });
     void apiRequest<{ data?: Array<{ name?: string; description?: string; enabled?: boolean }> }>(
-      `/api/skills?${new URLSearchParams({ cwd: activeWorkspacePath }).toString()}`,
+      `/api/skills?${query.toString()}`,
       { method: 'GET', signal: controller.signal },
     )
       .then((response) => {
@@ -1028,7 +1035,7 @@ export default function HomePage() {
     return () => {
       controller.abort();
     };
-  }, [mounted, authenticated, activeWorkspacePath]);
+  }, [mounted, authenticated, activeWorkspacePath, selectedProject?.backend]);
 
   useEffect(() => {
     setSkillSuggestionIndex(0);

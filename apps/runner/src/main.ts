@@ -102,8 +102,12 @@ const server = createServer(async (request, response) => {
 
     if (request.method === 'GET' && pathname === '/runner/skills') {
       const cwd = (url.searchParams.get('cwd') ?? '').trim() || null;
+      const requestedBackendParam = (url.searchParams.get('backend') ?? '').trim();
+      const requestedBackend = requestedBackendParam
+        ? parseRunnerBackend(requestedBackendParam, 'backend')
+        : null;
       sendJson(response, 200, {
-        data: await listSkills(cwd),
+        data: await listSkills(cwd, requestedBackend),
       });
       return;
     }
@@ -761,10 +765,23 @@ async function listModels(requestedBackend: RunnerBackend | null): Promise<Model
   return models;
 }
 
-async function listSkills(cwd: string | null): Promise<SkillListItem[]> {
+async function listSkills(cwd: string | null, requestedBackend: RunnerBackend | null): Promise<SkillListItem[]> {
+  if (requestedBackend && !isBackendSupported(requestedBackend)) {
+    return [];
+  }
+
+  if (requestedBackend === 'codex') {
+    return isBackendSupported('codex') ? codexBackend.listSkills(cwd?.trim() || codexDefaultCwd) : [];
+  }
+
+  if (requestedBackend === 'claude' || requestedBackend === 'mock') {
+    return [];
+  }
+
   if (!isBackendSupported('codex')) {
     return [];
   }
+
   return codexBackend.listSkills(cwd?.trim() || codexDefaultCwd);
 }
 

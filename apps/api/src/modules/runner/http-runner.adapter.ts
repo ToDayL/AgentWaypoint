@@ -241,6 +241,9 @@ export class HttpRunnerAdapter implements RunnerAdapter {
     if (typeof input.cwd === 'string' && input.cwd.trim()) {
       query.set('cwd', input.cwd.trim());
     }
+    if (typeof input.backend === 'string' && input.backend.trim()) {
+      query.set('backend', input.backend.trim());
+    }
     const response = await this.request({
       method: 'GET',
       path: query.size > 0 ? `/runner/skills?${query.toString()}` : '/runner/skills',

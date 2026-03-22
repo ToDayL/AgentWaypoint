@@ -15,6 +15,7 @@ export class SkillsController {
     return {
       data: await this.runnerAdapter.listSkills({
         cwd: input.cwd ?? null,
+        backend: input.backend ?? null,
       }),
     };
   }
