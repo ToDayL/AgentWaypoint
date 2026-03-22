@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { ActiveClaudeTurn, ActiveTurn, ModelListItem, RunnerEventType, StartTurnBody } from './types.js';
@@ -79,6 +80,8 @@ export class ClaudeBackend {
     try {
       const cwd = input.cwd?.trim() || process.cwd();
       const config = readBackendConfig(input.backendConfig);
+      const resumedSessionId = readNonEmptyString(input.threadId);
+      const activeSessionId = resumedSessionId ?? randomUUID();
       const inputQueue = new AsyncInputQueue();
       inputQueue.push({
         type: 'user',
@@ -91,23 +94,40 @@ export class ClaudeBackend {
       });
       inputQueue.close();
 
+      const queryOptions: {
+        cwd: string;
+        model?: string;
+        systemPrompt: { type: 'preset'; preset: 'claude_code' };
+        settingSources: Array<'user' | 'project' | 'local'>;
+        includePartialMessages: true;
+        maxTurns: number;
+        resume?: string;
+        sessionId?: string;
+      } = {
+        cwd,
+        model: config.model ?? undefined,
+        systemPrompt: {
+          type: 'preset',
+          preset: 'claude_code',
+        },
+        settingSources: ['user', 'project', 'local'],
+        includePartialMessages: true,
+        maxTurns: DEFAULT_CLAUDE_MAX_TURNS,
+      };
+      if (resumedSessionId) {
+        queryOptions.resume = resumedSessionId;
+      } else {
+        queryOptions.sessionId = activeSessionId;
+      }
+
       const q = query({
         prompt: inputQueue.stream(),
-        options: {
-          cwd,
-          model: config.model ?? undefined,
-          systemPrompt: {
-            type: 'preset',
-            preset: 'claude_code',
-          },
-          settingSources: ['user', 'project', 'local'],
-          includePartialMessages: true,
-          maxTurns: DEFAULT_CLAUDE_MAX_TURNS,
-        },
+        options: queryOptions,
       });
       turn.query = q;
 
       await this.deps.appendTurnEvent(turn.turnId, 'turn.started', {
+        threadId: activeSessionId,
         cwd,
         ...(config.model ? { model: config.model } : {}),
         ...(config.executionMode ? { executionMode: config.executionMode } : {}),
