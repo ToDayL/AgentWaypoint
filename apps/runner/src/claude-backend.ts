@@ -101,6 +101,7 @@ export class ClaudeBackend {
             preset: 'claude_code',
           },
           settingSources: ['user', 'project', 'local'],
+          includePartialMessages: true,
           maxTurns: DEFAULT_CLAUDE_MAX_TURNS,
         },
       });
@@ -113,6 +114,7 @@ export class ClaudeBackend {
       });
 
       let sawResult = false;
+      let sawPartialAssistantDelta = false;
       for await (const message of q) {
         if (turn.finalized) {
           break;
@@ -122,7 +124,20 @@ export class ClaudeBackend {
         }
 
         const msg = message as Record<string, unknown>;
+        if (msg.type === 'stream_event') {
+          const text = extractPartialAssistantText(msg);
+          if (text.length > 0) {
+            sawPartialAssistantDelta = true;
+            turn.assistantText += text;
+            await this.deps.appendTurnEvent(turn.turnId, 'assistant.delta', { text });
+          }
+          continue;
+        }
+
         if (msg.type === 'assistant') {
+          if (sawPartialAssistantDelta) {
+            continue;
+          }
           const text = extractAssistantText(msg);
           if (text.length > 0) {
             turn.assistantText += text;
@@ -216,6 +231,30 @@ function extractAssistantText(message: Record<string, unknown>): string {
     }
   }
   return chunks.join('');
+}
+
+function extractPartialAssistantText(message: Record<string, unknown>): string {
+  const event = message.event;
+  if (!event || typeof event !== 'object' || Array.isArray(event)) {
+    return '';
+  }
+  const record = event as Record<string, unknown>;
+  if (record.type !== 'content_block_delta') {
+    return '';
+  }
+  const delta = record.delta;
+  if (!delta || typeof delta !== 'object' || Array.isArray(delta)) {
+    return '';
+  }
+  const deltaRecord = delta as Record<string, unknown>;
+  const directText = typeof deltaRecord.text === 'string' ? deltaRecord.text : '';
+  if (directText.length > 0) {
+    return directText;
+  }
+  if (deltaRecord.type === 'text_delta' && typeof deltaRecord.text === 'string') {
+    return deltaRecord.text;
+  }
+  return '';
 }
 
 function readNonEmptyString(value: unknown): string | null {
