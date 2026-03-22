@@ -402,7 +402,12 @@ const server = createServer(async (request, response) => {
 
     if (pathname === '/runner/turns/approval') {
       const payload = parseResolveApprovalBody(await readJsonBody(request));
-      await codexBackend.resolvePendingApproval(payload);
+      const turn = activeTurns.get(payload.turnId);
+      if (turn?.backend === 'claude') {
+        await claudeBackend.resolvePendingApproval(payload);
+      } else {
+        await codexBackend.resolvePendingApproval(payload);
+      }
       sendJson(response, 202, {
         accepted: true,
         runnerRequestId: randomUUID(),
@@ -917,6 +922,7 @@ async function finalizeTurn(turnId: string, type: RunnerEventType, payload: Reco
   if (turn.backend === 'mock') {
     clearTurnTimers(turn.timers);
   } else if (turn.backend === 'claude') {
+    claudeBackend.disposePendingApprovalsForTurn(turnId, 'decline');
     turn.query?.close();
     turn.completionResolve?.();
   } else {
@@ -955,6 +961,7 @@ function silentlyDisposeTurn(turn: ActiveTurn): void {
     return;
   }
   if (turn.backend === 'claude') {
+    claudeBackend.disposePendingApprovalsForTurn(turn.turnId, 'decline');
     claudeBackend.silentlyDisposeTurn(turn.turnId);
     return;
   }

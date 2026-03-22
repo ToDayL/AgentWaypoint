@@ -1,7 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { PermissionMode, SandboxSettings, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { ActiveClaudeTurn, ActiveTurn, ModelListItem, RunnerEventType, StartTurnBody } from './types.js';
+import type {
+  PermissionMode,
+  PermissionResult,
+  PermissionUpdate,
+  SandboxSettings,
+  SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk';
+import type { ActiveClaudeTurn, ActiveTurn, ModelListItem, ResolveApprovalBody, RunnerEventType, StartTurnBody } from './types.js';
 
 const DEFAULT_CLAUDE_MAX_TURNS = 12;
 const STEER_GRACE_WINDOW_MS = 1500;
@@ -17,6 +23,8 @@ type ClaudeBackendDeps = {
 export class ClaudeBackend {
   private readonly cancellingTurns = new Set<string>();
   private readonly turnInputs = new Map<string, AsyncInputQueue>();
+  private readonly pendingApprovals = new Map<string, PendingClaudeApproval>();
+  private readonly pendingApprovalsByTurn = new Map<string, Set<string>>();
 
   constructor(private readonly deps: ClaudeBackendDeps) {}
 
@@ -110,6 +118,21 @@ export class ClaudeBackend {
         permissionMode: PermissionMode;
         allowDangerouslySkipPermissions: boolean;
         sandbox: SandboxSettings;
+        canUseTool: (
+          toolName: string,
+          input: Record<string, unknown>,
+          options: {
+            signal: AbortSignal;
+            suggestions?: PermissionUpdate[];
+            blockedPath?: string;
+            decisionReason?: string;
+            title?: string;
+            displayName?: string;
+            description?: string;
+            toolUseID: string;
+            agentID?: string;
+          },
+        ) => Promise<PermissionResult>;
         resume?: string;
         sessionId?: string;
       } = {
@@ -125,6 +148,7 @@ export class ClaudeBackend {
         permissionMode: runtimePolicy.permissionMode,
         allowDangerouslySkipPermissions: runtimePolicy.allowDangerouslySkipPermissions,
         sandbox: runtimePolicy.sandbox,
+        canUseTool: (toolName, toolInput, options) => this.requestToolApproval(turn, cwd, toolName, toolInput, options),
       };
       if (resumedSessionId) {
         queryOptions.resume = resumedSessionId;
@@ -225,6 +249,7 @@ export class ClaudeBackend {
       const message = error instanceof Error ? error.message : 'unknown claude execution error';
       await this.deps.failTurn(turn.turnId, message);
     } finally {
+      this.disposePendingApprovalsForTurn(input.turnId, 'decline');
       this.turnInputs.get(turn.turnId)?.close();
       this.turnInputs.delete(turn.turnId);
       this.cancellingTurns.delete(turn.turnId);
@@ -235,6 +260,7 @@ export class ClaudeBackend {
     this.cancellingTurns.add(turn.turnId);
     const inputQueue = this.turnInputs.get(turn.turnId);
     inputQueue?.close();
+    this.disposePendingApprovalsForTurn(turn.turnId, 'cancel');
     if (!turn.finalized) {
       await this.deps.finalizeTurn(turn.turnId, 'turn.cancelled', {});
     }
@@ -260,12 +286,95 @@ export class ClaudeBackend {
       return;
     }
     this.cancellingTurns.delete(turnId);
+    this.disposePendingApprovalsForTurn(turnId, 'decline');
     this.turnInputs.get(turnId)?.close();
     this.turnInputs.delete(turnId);
     turn.finalized = true;
     turn.query?.close();
     this.deps.activeTurns.delete(turnId);
     turn.completionResolve?.();
+  }
+
+  async resolvePendingApproval(input: ResolveApprovalBody): Promise<void> {
+    const pending = this.pendingApprovals.get(input.requestId);
+    if (!pending || pending.turnId !== input.turnId) {
+      throw new Error('Pending approval not found');
+    }
+    this.pendingApprovals.delete(input.requestId);
+    this.removeApprovalFromTurnIndex(pending.turnId, input.requestId);
+
+    const decision = normalizeApprovalDecision(input.decision);
+    let permissionResult: PermissionResult;
+    if (decision === 'accept') {
+      permissionResult = {
+        behavior: 'allow',
+        updatedInput: pending.toolInput,
+        toolUseID: pending.toolUseId,
+      };
+    } else if (decision === 'acceptForSession') {
+      permissionResult =
+        pending.suggestions.length > 0
+          ? {
+              behavior: 'allow',
+              updatedInput: pending.toolInput,
+              updatedPermissions: pending.suggestions.map((suggestion) => ({ ...suggestion, destination: 'session' })),
+              toolUseID: pending.toolUseId,
+            }
+          : {
+              behavior: 'allow',
+              updatedInput: pending.toolInput,
+              toolUseID: pending.toolUseId,
+            };
+    } else if (decision === 'cancel') {
+      this.cancellingTurns.add(input.turnId);
+      permissionResult = {
+        behavior: 'deny',
+        message: 'User rejected and cancelled this turn.',
+        interrupt: true,
+        toolUseID: pending.toolUseId,
+      };
+    } else {
+      permissionResult = {
+        behavior: 'deny',
+        message: 'User rejected this operation.',
+        toolUseID: pending.toolUseId,
+      };
+    }
+
+    await this.deps.appendTurnEvent(input.turnId, 'turn.approval.resolved', {
+      requestId: input.requestId,
+      decision,
+    });
+    pending.resolve(permissionResult);
+  }
+
+  disposePendingApprovalsForTurn(turnId: string, decision: 'decline' | 'cancel'): void {
+    const requestIds = this.pendingApprovalsByTurn.get(turnId);
+    if (!requestIds || requestIds.size === 0) {
+      return;
+    }
+    this.pendingApprovalsByTurn.delete(turnId);
+    requestIds.forEach((requestId) => {
+      const pending = this.pendingApprovals.get(requestId);
+      if (!pending) {
+        return;
+      }
+      this.pendingApprovals.delete(requestId);
+      pending.resolve(
+        decision === 'cancel'
+          ? {
+              behavior: 'deny',
+              message: 'Turn was cancelled while waiting for approval.',
+              interrupt: true,
+              toolUseID: pending.toolUseId,
+            }
+          : {
+              behavior: 'deny',
+              message: 'Turn ended before approval was provided.',
+              toolUseID: pending.toolUseId,
+            },
+      );
+    });
   }
 
   async steerTurn(turn: ActiveClaudeTurn, content: string): Promise<void> {
@@ -290,7 +399,124 @@ export class ClaudeBackend {
       session_id: turn.sessionId,
     });
   }
+
+  private async requestToolApproval(
+    turn: ActiveClaudeTurn,
+    cwd: string,
+    toolName: string,
+    input: Record<string, unknown>,
+    options: {
+      signal: AbortSignal;
+      suggestions?: PermissionUpdate[];
+      blockedPath?: string;
+      decisionReason?: string;
+      title?: string;
+      displayName?: string;
+      description?: string;
+      toolUseID: string;
+      agentID?: string;
+    },
+  ): Promise<PermissionResult> {
+    if (turn.finalized || this.cancellingTurns.has(turn.turnId)) {
+      return {
+        behavior: 'deny',
+        message: 'Turn is already terminating.',
+        interrupt: true,
+        toolUseID: options.toolUseID,
+      };
+    }
+
+    const requestId = `claude-${turn.turnId}-${options.toolUseID}`;
+    const suggestions = Array.isArray(options.suggestions) ? options.suggestions : [];
+    const kind = mapToolNameToApprovalKind(toolName);
+    const reason = options.title ?? options.description ?? options.decisionReason ?? `Permission required for ${toolName}`;
+    const command = extractApprovalCommand(toolName, input);
+
+    await this.deps.appendTurnEvent(turn.turnId, 'turn.approval.requested', {
+      requestId,
+      kind,
+      reason,
+      cwd,
+      ...(command ? { command } : {}),
+      toolName,
+      toolUseId: options.toolUseID,
+      ...(options.blockedPath ? { blockedPath: options.blockedPath } : {}),
+      ...(options.agentID ? { agentId: options.agentID } : {}),
+      availableDecisions: suggestions.length > 0 ? ['accept', 'acceptForSession', 'decline', 'cancel'] : ['accept', 'decline', 'cancel'],
+    });
+
+    return await new Promise<PermissionResult>((resolve) => {
+      let settled = false;
+      const settle = (result: PermissionResult): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        options.signal.removeEventListener('abort', onAbort);
+        resolve(result);
+      };
+      const pending: PendingClaudeApproval = {
+        turnId: turn.turnId,
+        requestId,
+        toolUseId: options.toolUseID,
+        toolInput: input,
+        suggestions,
+        resolve: settle,
+      };
+      this.pendingApprovals.set(requestId, pending);
+      this.addApprovalToTurnIndex(turn.turnId, requestId);
+
+      const onAbort = () => {
+        if (!this.pendingApprovals.has(requestId)) {
+          return;
+        }
+        this.pendingApprovals.delete(requestId);
+        this.removeApprovalFromTurnIndex(turn.turnId, requestId);
+        void this.deps.appendTurnEvent(turn.turnId, 'turn.approval.resolved', {
+          requestId,
+          decision: 'cancel',
+        });
+        settle({
+          behavior: 'deny',
+          message: 'Approval request was interrupted.',
+          interrupt: true,
+          toolUseID: options.toolUseID,
+        });
+      };
+
+      options.signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  private addApprovalToTurnIndex(turnId: string, requestId: string): void {
+    const ids = this.pendingApprovalsByTurn.get(turnId);
+    if (ids) {
+      ids.add(requestId);
+      return;
+    }
+    this.pendingApprovalsByTurn.set(turnId, new Set([requestId]));
+  }
+
+  private removeApprovalFromTurnIndex(turnId: string, requestId: string): void {
+    const ids = this.pendingApprovalsByTurn.get(turnId);
+    if (!ids) {
+      return;
+    }
+    ids.delete(requestId);
+    if (ids.size === 0) {
+      this.pendingApprovalsByTurn.delete(turnId);
+    }
+  }
 }
+
+type PendingClaudeApproval = {
+  turnId: string;
+  requestId: string;
+  toolUseId: string;
+  toolInput: Record<string, unknown>;
+  suggestions: PermissionUpdate[];
+  resolve: (result: PermissionResult) => void;
+};
 
 function readBackendConfig(
   config: Record<string, unknown> | null | undefined,
@@ -320,11 +546,7 @@ function resolveClaudeRuntimePolicy(executionMode: string | null, cwd: string): 
       sandbox: {
         enabled: true,
         autoAllowBashIfSandboxed: false,
-        allowUnsandboxedCommands: false,
-        filesystem: {
-          allowRead: [cwd],
-          allowWrite: [],
-        },
+        allowUnsandboxedCommands: true,
       },
     };
   }
@@ -348,11 +570,7 @@ function resolveClaudeRuntimePolicy(executionMode: string | null, cwd: string): 
     sandbox: {
       enabled: true,
       autoAllowBashIfSandboxed: true,
-      allowUnsandboxedCommands: false,
-      filesystem: {
-        allowRead: [cwd],
-        allowWrite: [cwd],
-      },
+      allowUnsandboxedCommands: true,
     },
   };
 }
@@ -381,6 +599,46 @@ function extractAssistantText(message: Record<string, unknown>): string {
     }
   }
   return chunks.join('');
+}
+
+function extractApprovalCommand(toolName: string, input: Record<string, unknown>): string | null {
+  if (toolName === 'Bash') {
+    const command = readNonEmptyString(input.command);
+    if (command) {
+      return command;
+    }
+  }
+  const argv = input.argv;
+  if (Array.isArray(argv)) {
+    const command = argv
+      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+      .filter((entry) => entry.length > 0)
+      .join(' ');
+    if (command.length > 0) {
+      return command;
+    }
+  }
+  return null;
+}
+
+function mapToolNameToApprovalKind(toolName: string): string {
+  if (toolName === 'Bash') {
+    return 'command_execution';
+  }
+  if (toolName === 'Edit' || toolName === 'Write' || toolName === 'NotebookEdit') {
+    return 'file_change';
+  }
+  return 'permission';
+}
+
+
+function normalizeApprovalDecision(
+  decision: ResolveApprovalBody['decision'],
+): 'accept' | 'acceptForSession' | 'decline' | 'cancel' {
+  if (decision === 'accept' || decision === 'acceptForSession' || decision === 'decline' || decision === 'cancel') {
+    return decision;
+  }
+  throw new Error('Claude backend only supports accept/acceptForSession/decline/cancel approval decisions');
 }
 
 function extractPartialAssistantText(message: Record<string, unknown>): string {
