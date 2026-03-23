@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
   CodexRateLimits,
+  RunnerHealth,
   AvailableSkill,
   AvailableModel,
   CancelTurnInput,
@@ -11,6 +12,7 @@ import {
   ForkThreadInput,
   ForkThreadResult,
   ResolveTurnApprovalInput,
+  ModelListInput,
   SkillListInput,
   WorkspaceFileInput,
   WorkspaceFileContentInput,
@@ -203,10 +205,33 @@ export class HttpRunnerAdapter implements RunnerAdapter {
     };
   }
 
-  async listModels(): Promise<AvailableModel[]> {
+  async getHealth(): Promise<RunnerHealth> {
     const response = await this.request({
       method: 'GET',
-      path: '/runner/models',
+      path: '/runner/health',
+    });
+    if (!response || typeof response !== 'object') {
+      throw new Error('Runner health response is invalid');
+    }
+    const record = response as Record<string, unknown>;
+    const supportedBackends = Array.isArray(record.supportedBackends)
+      ? record.supportedBackends
+          .map((item) => (typeof item === 'string' ? item.trim() : ''))
+          .filter((item) => item.length > 0)
+      : [];
+    return {
+      supportedBackends,
+    };
+  }
+
+  async listModels(input: ModelListInput): Promise<AvailableModel[]> {
+    const query = new URLSearchParams();
+    if (typeof input.backend === 'string' && input.backend.trim()) {
+      query.set('backend', input.backend.trim());
+    }
+    const response = await this.request({
+      method: 'GET',
+      path: query.size > 0 ? `/runner/models?${query.toString()}` : '/runner/models',
     });
     if (!response || typeof response !== 'object' || !Array.isArray((response as { data?: unknown }).data)) {
       throw new Error('Runner model list response is invalid');
@@ -216,19 +241,28 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
       .map((item) => ({
         id: typeof item.id === 'string' ? item.id : '',
+        backend:
+          typeof item.backend === 'string' && item.backend.trim().length > 0
+            ? item.backend.trim()
+            : typeof input.backend === 'string' && input.backend.trim().length > 0
+              ? input.backend.trim()
+              : '',
         model: typeof item.model === 'string' ? item.model : '',
         displayName: typeof item.displayName === 'string' ? item.displayName : (typeof item.model === 'string' ? item.model : ''),
         description: typeof item.description === 'string' ? item.description : '',
         hidden: item.hidden === true,
         isDefault: item.isDefault === true,
       }))
-      .filter((item) => item.id.length > 0 && item.model.length > 0);
+      .filter((item) => item.id.length > 0 && item.model.length > 0 && item.backend.length > 0);
   }
 
   async listSkills(input: SkillListInput): Promise<AvailableSkill[]> {
     const query = new URLSearchParams();
     if (typeof input.cwd === 'string' && input.cwd.trim()) {
       query.set('cwd', input.cwd.trim());
+    }
+    if (typeof input.backend === 'string' && input.backend.trim()) {
+      query.set('backend', input.backend.trim());
     }
     const response = await this.request({
       method: 'GET',
@@ -278,6 +312,8 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       path: '/runner/threads/close',
       body: {
         threadId: input.threadId,
+        backend: input.backend ?? null,
+        cwd: input.cwd ?? null,
       },
     });
   }

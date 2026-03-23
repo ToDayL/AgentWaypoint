@@ -14,13 +14,17 @@ export class SettingsService {
   ) {}
 
   async getAppSettings(userId: string) {
-    return this.prisma.user.findUniqueOrThrow({
+    const settings = await this.prisma.user.findUniqueOrThrow({
       where: { id: userId },
       select: {
         turnSteerEnabled: true,
         defaultWorkspaceRoot: true,
       },
     });
+    return {
+      ...settings,
+      supportedBackends: await this.readSupportedBackends(),
+    };
   }
 
   async updateAppSettings(userId: string, input: UpdateAppSettingsBody) {
@@ -35,7 +39,7 @@ export class SettingsService {
       data.defaultWorkspaceRoot = input.defaultWorkspaceRoot?.trim() || null;
     }
 
-    return this.prisma.user.update({
+    const settings = await this.prisma.user.update({
       where: { id: userId },
       data,
       select: {
@@ -43,9 +47,20 @@ export class SettingsService {
         defaultWorkspaceRoot: true,
       },
     });
+    return {
+      ...settings,
+      supportedBackends: await this.readSupportedBackends(),
+    };
   }
 
   async getCodexRateLimits() {
+    const supportedBackends = await this.readSupportedBackends();
+    if (!supportedBackends.includes('codex')) {
+      return {
+        rateLimits: null,
+        rateLimitsByLimitId: null,
+      };
+    }
     try {
       return await this.runnerAdapter.readCodexRateLimits();
     } catch (error: unknown) {
@@ -55,6 +70,23 @@ export class SettingsService {
         rateLimits: null,
         rateLimitsByLimitId: null,
       };
+    }
+  }
+
+  private async readSupportedBackends(): Promise<string[]> {
+    try {
+      const health = await this.runnerAdapter.getHealth();
+      const supportedBackends = Array.isArray(health.supportedBackends)
+        ? health.supportedBackends
+            .map((item) => item.trim().toLowerCase())
+            .filter((item) => item.length > 0)
+        : [];
+      const unique = Array.from(new Set(supportedBackends));
+      return unique.length > 0 ? unique : ['codex'];
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'unknown runner error';
+      this.logger.warn(`Failed to read runner health for backend capabilities: ${message}`);
+      return ['codex'];
     }
   }
 

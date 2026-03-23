@@ -7,6 +7,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   CodexRateLimits,
+  RunnerHealth,
   AvailableSkill,
   AvailableModel,
   CancelTurnInput,
@@ -16,6 +17,7 @@ import {
   EnsureDirectoryResult,
   ForkThreadInput,
   ForkThreadResult,
+  ModelListInput,
   ResolveTurnApprovalInput,
   SkillListInput,
   RunnerStreamEvent,
@@ -177,11 +179,22 @@ export class MockRunnerAdapter implements RunnerAdapter {
     };
   }
 
-  async listModels(): Promise<AvailableModel[]> {
+  async getHealth(): Promise<RunnerHealth> {
+    return {
+      supportedBackends: ['codex'],
+    };
+  }
+
+  async listModels(input: ModelListInput): Promise<AvailableModel[]> {
+    const requestedBackend = typeof input.backend === 'string' ? input.backend.trim().toLowerCase() : '';
+    if (requestedBackend && requestedBackend !== 'mock' && requestedBackend !== 'codex') {
+      return [];
+    }
     const configuredModel = process.env.RUNNER_CODEX_MODEL?.trim() || 'gpt-5-codex';
     return [
       {
         id: configuredModel,
+        backend: requestedBackend || 'mock',
         model: configuredModel,
         displayName: configuredModel,
         description: 'Configured mock/default model',

@@ -21,6 +21,7 @@ export const WorkspaceFileContentQuerySchema = z.object({
 
 export const SkillsQuerySchema = z.object({
   cwd: z.string().trim().min(1).max(4096).optional(),
+  backend: z.enum(['codex', 'claude', 'mock']).optional(),
 });
 
 export type WorkspaceSuggestionQuery = z.infer<typeof WorkspaceSuggestionQuerySchema>;

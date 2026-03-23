@@ -1,4 +1,4 @@
-import { Controller, Get, Inject, UseGuards } from '@nestjs/common';
+import { Controller, Get, Inject, Query, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '../auth/auth.guard';
 import { RUNNER_ADAPTER, RunnerAdapter } from './runner.types';
 
@@ -8,9 +8,9 @@ export class ModelsController {
   constructor(@Inject(RUNNER_ADAPTER) private readonly runnerAdapter: RunnerAdapter) {}
 
   @Get()
-  async listModels() {
+  async listModels(@Query('backend') backend?: string) {
     return {
-      data: await this.runnerAdapter.listModels(),
+      data: await this.runnerAdapter.listModels({ backend }),
     };
   }
 }

@@ -13,6 +13,7 @@ export type StartTurnBody = {
 
 export type ModelListItem = {
   id: string;
+  backend: string;
   model: string;
   displayName: string;
   description: string;
@@ -45,6 +46,8 @@ export type ForkThreadBody = {
 
 export type CloseThreadBody = {
   threadId: string;
+  backend?: string | null;
+  cwd?: string | null;
 };
 
 export type CompactThreadBody = {
@@ -103,7 +106,7 @@ export type RunnerEventType =
   | 'turn.failed'
   | 'turn.cancelled';
 
-export type RunnerBackend = 'codex' | 'mock';
+export type RunnerBackend = 'codex' | 'claude' | 'mock';
 
 export type ActiveTurnBase = {
   turnId: string;
@@ -128,7 +131,18 @@ export type ActiveCodexTurn = ActiveTurnBase & {
   completionReject: ((error: Error) => void) | null;
 };
 
-export type ActiveTurn = ActiveMockTurn | ActiveCodexTurn;
+export type ActiveClaudeTurn = ActiveTurnBase & {
+  backend: 'claude';
+  query: {
+    interrupt: () => Promise<void>;
+    close: () => void;
+  } | null;
+  assistantText: string;
+  completionResolve: (() => void) | null;
+  completionReject: ((error: Error) => void) | null;
+};
+
+export type ActiveTurn = ActiveMockTurn | ActiveCodexTurn | ActiveClaudeTurn;
 
 export type BufferedRunnerEvent = {
   turnId: string;

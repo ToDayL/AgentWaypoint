@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import Busboy from 'busboy';
+import { ClaudeBackend } from './claude-backend.js';
 import { CodexBackend } from './codex-backend.js';
 import { FilesystemBackend } from './filesystem-backend.js';
 import type {
@@ -25,7 +26,9 @@ import type {
 const port = Number(process.env.RUNNER_PORT ?? 4700);
 const host = process.env.RUNNER_HOST ?? '127.0.0.1';
 const authToken = process.env.RUNNER_AUTH_TOKEN?.trim() || null;
-const runnerBackend: RunnerBackend = (process.env.RUNNER_BACKEND ?? 'codex').trim().toLowerCase() === 'mock' ? 'mock' : 'codex';
+const defaultRunnerBackend: RunnerBackend = 'codex';
+const allRunnerBackends: RunnerBackend[] = ['codex', 'claude', 'mock'];
+const supportedBackends = parseSupportedBackends(process.env.RUNNER_SUPPORTED_BACKENDS);
 const codexBin = process.env.RUNNER_CODEX_BIN?.trim() || 'codex';
 const codexDefaultCwd = process.env.RUNNER_CODEX_CWD?.trim() || process.cwd();
 const codexDefaultModel = process.env.RUNNER_CODEX_MODEL?.trim() || null;
@@ -54,6 +57,12 @@ const codexBackend = new CodexBackend(
     failTurn,
   },
 );
+const claudeBackend = new ClaudeBackend({
+  activeTurns,
+  appendTurnEvent,
+  finalizeTurn,
+  failTurn,
+});
 
 const server = createServer(async (request, response) => {
   try {
@@ -61,7 +70,12 @@ const server = createServer(async (request, response) => {
     const pathname = url.pathname;
 
     if (request.method === 'GET' && pathname === '/runner/health') {
-      sendJson(response, 200, { status: 'ok', backend: runnerBackend, activeTurnCount: activeTurns.size });
+      sendJson(response, 200, {
+        status: 'ok',
+        backend: supportedBackends.length === 1 ? supportedBackends[0] : 'multi',
+        supportedBackends,
+        activeTurnCount: activeTurns.size,
+      });
       return;
     }
 
@@ -76,16 +90,24 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === 'GET' && pathname === '/runner/models') {
+      const requestedBackendParam = (url.searchParams.get('backend') ?? '').trim();
+      const requestedBackend = requestedBackendParam
+        ? parseRunnerBackend(requestedBackendParam, 'backend')
+        : null;
       sendJson(response, 200, {
-        data: await listModels(),
+        data: await listModels(requestedBackend),
       });
       return;
     }
 
     if (request.method === 'GET' && pathname === '/runner/skills') {
       const cwd = (url.searchParams.get('cwd') ?? '').trim() || null;
+      const requestedBackendParam = (url.searchParams.get('backend') ?? '').trim();
+      const requestedBackend = requestedBackendParam
+        ? parseRunnerBackend(requestedBackendParam, 'backend')
+        : null;
       sendJson(response, 200, {
-        data: await listSkills(cwd),
+        data: await listSkills(cwd, requestedBackend),
       });
       return;
     }
@@ -94,7 +116,7 @@ const server = createServer(async (request, response) => {
       request.method === 'GET' &&
       (pathname === '/runner/codex/rate-limits' || pathname === '/runner/account/rate-limits')
     ) {
-      if (runnerBackend === 'mock') {
+      if (!isBackendSupported('codex')) {
         sendJson(response, 200, {
           rateLimits: null,
           rateLimitsByLimitId: null,
@@ -214,7 +236,7 @@ const server = createServer(async (request, response) => {
     if (pathname === '/runner/turns/start') {
       const payload = parseStartTurnBody(await readJsonBody(request));
       payload.cwd = await filesystemBackend.resolveWorkspaceCwd(payload.cwd);
-      const requestedBackend = parseRunnerBackend(payload.backend ?? runnerBackend, 'backend');
+      const requestedBackend = resolveRequestedBackend(payload.backend, 'backend');
       const existing = activeTurns.get(payload.turnId);
       if (existing) {
         await cancelActiveTurn(existing, { emitCancelEvent: false });
@@ -242,6 +264,11 @@ const server = createServer(async (request, response) => {
       }
 
       if (requestedBackend !== 'codex') {
+        if (requestedBackend === 'claude') {
+          ensureTurnStreamState(payload.turnId, payload.sessionId, 'queued');
+          void claudeBackend.startTurn(payload);
+          return;
+        }
         throw new Error(`Unsupported backend: ${requestedBackend}`);
       }
       ensureTurnStreamState(payload.turnId, payload.sessionId, 'queued');
@@ -271,12 +298,18 @@ const server = createServer(async (request, response) => {
     if (pathname === '/runner/threads/fork') {
       const payload = parseForkThreadBody(await readJsonBody(request));
       const cwd = await filesystemBackend.resolveWorkspaceCwd(payload.cwd);
-      const requestedBackend = parseRunnerBackend(payload.backend ?? runnerBackend, 'backend');
+      const requestedBackend = resolveRequestedBackend(payload.backend, 'backend');
 
       if (requestedBackend === 'mock') {
         sendJson(response, 200, {
           threadId: `mock-fork-${randomUUID()}`,
         });
+        return;
+      }
+
+      if (requestedBackend === 'claude') {
+        const threadId = await claudeBackend.forkThread({ ...payload, cwd });
+        sendJson(response, 200, { threadId });
         return;
       }
 
@@ -290,13 +323,18 @@ const server = createServer(async (request, response) => {
 
     if (pathname === '/runner/threads/close') {
       const payload = parseCloseThreadBody(await readJsonBody(request));
-
-      if (runnerBackend === 'mock') {
+      const requestedBackend = resolveRequestedBackend(payload.backend, 'backend');
+      if (requestedBackend === 'mock') {
         response.statusCode = 204;
         response.end();
         return;
       }
-
+      if (requestedBackend === 'claude') {
+        await claudeBackend.closeThread(payload);
+        response.statusCode = 204;
+        response.end();
+        return;
+      }
       await codexBackend.closeThread(payload);
       response.statusCode = 204;
       response.end();
@@ -306,7 +344,7 @@ const server = createServer(async (request, response) => {
     if (pathname === '/runner/threads/compact') {
       const payload = parseCompactThreadBody(await readJsonBody(request));
       const cwd = await filesystemBackend.resolveWorkspaceCwd(payload.cwd);
-      const requestedBackend = parseRunnerBackend(payload.backend ?? runnerBackend, 'backend');
+      const requestedBackend = resolveRequestedBackend(payload.backend, 'backend');
 
       if (requestedBackend === 'mock') {
         sendJson(response, 202, {
@@ -317,6 +355,14 @@ const server = createServer(async (request, response) => {
       }
 
       if (requestedBackend !== 'codex') {
+        if (requestedBackend === 'claude') {
+          await claudeBackend.compactThread({ ...payload, cwd });
+          sendJson(response, 202, {
+            accepted: true,
+            runnerRequestId: randomUUID(),
+          });
+          return;
+        }
         throw new Error(`Unsupported backend: ${requestedBackend}`);
       }
       await codexBackend.compactThread({ ...payload, cwd });
@@ -334,6 +380,19 @@ const server = createServer(async (request, response) => {
         sendJson(response, 404, {
           error: { code: 'NOT_FOUND', message: 'Active turn not found' },
         });
+        return;
+      }
+      if (turn.backend === 'claude') {
+        try {
+          await claudeBackend.steerTurn(turn, payload.content);
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : 'Failed to steer claude turn';
+          sendJson(response, 409, {
+            error: { code: 'CONFLICT', message },
+          });
+          return;
+        }
+        sendJson(response, 202, { accepted: true, runnerRequestId: randomUUID() });
         return;
       }
       if (turn.backend !== 'codex') {
@@ -363,7 +422,12 @@ const server = createServer(async (request, response) => {
 
     if (pathname === '/runner/turns/approval') {
       const payload = parseResolveApprovalBody(await readJsonBody(request));
-      await codexBackend.resolvePendingApproval(payload);
+      const turn = activeTurns.get(payload.turnId);
+      if (turn?.backend === 'claude') {
+        await claudeBackend.resolvePendingApproval(payload);
+      } else {
+        await codexBackend.resolvePendingApproval(payload);
+      }
       sendJson(response, 202, {
         accepted: true,
         runnerRequestId: randomUUID(),
@@ -384,7 +448,9 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, host, () => {
   // eslint-disable-next-line no-console
-  console.log(`[agentwaypoint-runner] listening on http://${host}:${port} (backend=${runnerBackend})`);
+  console.log(
+    `[agentwaypoint-runner] listening on http://${host}:${port} (supportedBackends=${supportedBackends.join(',')})`,
+  );
 });
 
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
@@ -475,6 +541,8 @@ function parseCloseThreadBody(input: unknown): CloseThreadBody {
   const record = input as Record<string, unknown>;
   return {
     threadId: readNonEmptyString(record.threadId, 'threadId'),
+    backend: readOptionalString(record.backend),
+    cwd: readOptionalString(record.cwd),
   };
 }
 
@@ -545,10 +613,36 @@ function readOptionalRecord(value: unknown, field: string): Record<string, unkno
 
 function parseRunnerBackend(value: string, field: string): RunnerBackend {
   const normalized = value.trim().toLowerCase();
-  if (normalized === 'codex' || normalized === 'mock') {
+  if (normalized === 'codex' || normalized === 'mock' || normalized === 'claude') {
     return normalized;
   }
-  throw new Error(`${field} must be one of: codex, mock`);
+  throw new Error(`${field} must be one of: codex, claude, mock`);
+}
+
+function parseSupportedBackends(value: string | undefined): RunnerBackend[] {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) {
+    return [...allRunnerBackends];
+  }
+  const parsed = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => parseRunnerBackend(entry, 'RUNNER_SUPPORTED_BACKENDS'));
+  const unique = Array.from(new Set(parsed));
+  return unique.length > 0 ? unique : [...allRunnerBackends];
+}
+
+function isBackendSupported(backend: RunnerBackend): boolean {
+  return supportedBackends.includes(backend);
+}
+
+function resolveRequestedBackend(input: string | null | undefined, field: string): RunnerBackend {
+  const parsed = parseRunnerBackend(input ?? defaultRunnerBackend, field);
+  if (!isBackendSupported(parsed)) {
+    throw new Error(`${field} backend "${parsed}" is not enabled`);
+  }
+  return parsed;
 }
 
 async function parseWorkspaceUploadForm(
@@ -675,29 +769,71 @@ async function startMockExecution(turn: ActiveMockTurn): Promise<void> {
   turn.timers.push(finalizeTimer);
 }
 
-async function listModels(): Promise<ModelListItem[]> {
-  if (runnerBackend === 'mock') {
-    const model = codexDefaultModel || 'gpt-5-codex';
-    return [
-      {
-        id: model,
-        model,
-        displayName: model,
-        description: 'Configured mock/default model',
-        hidden: false,
-        isDefault: true,
-      },
-    ];
-  }
-
-  return codexBackend.listModels();
-}
-
-async function listSkills(cwd: string | null): Promise<SkillListItem[]> {
-  if (runnerBackend === 'mock') {
+async function listModels(requestedBackend: RunnerBackend | null): Promise<ModelListItem[]> {
+  if (requestedBackend && !isBackendSupported(requestedBackend)) {
     return [];
   }
+
+  if (requestedBackend === 'claude') {
+    return claudeBackend.listModels();
+  }
+
+  if (requestedBackend === 'mock') {
+    return [buildMockModel()];
+  }
+
+  if (requestedBackend === 'codex') {
+    return codexBackend.listModels();
+  }
+
+  const models: ModelListItem[] = [];
+  if (isBackendSupported('codex')) {
+    models.push(...(await codexBackend.listModels()));
+  }
+  if (isBackendSupported('claude')) {
+    models.push(...(await claudeBackend.listModels()));
+  }
+  if (isBackendSupported('mock')) {
+    models.push(buildMockModel());
+  }
+  return models;
+}
+
+async function listSkills(cwd: string | null, requestedBackend: RunnerBackend | null): Promise<SkillListItem[]> {
+  if (requestedBackend && !isBackendSupported(requestedBackend)) {
+    return [];
+  }
+
+  if (requestedBackend === 'codex') {
+    return isBackendSupported('codex') ? codexBackend.listSkills(cwd?.trim() || codexDefaultCwd) : [];
+  }
+
+  if (requestedBackend === 'claude') {
+    return isBackendSupported('claude') ? claudeBackend.listSkills(cwd?.trim() || process.cwd()) : [];
+  }
+
+  if (requestedBackend === 'mock') {
+    return [];
+  }
+
+  if (!isBackendSupported('codex')) {
+    return [];
+  }
+
   return codexBackend.listSkills(cwd?.trim() || codexDefaultCwd);
+}
+
+function buildMockModel(): ModelListItem {
+  const model = codexDefaultModel || 'gpt-5-codex';
+  return {
+    id: model,
+    backend: 'mock',
+    model,
+    displayName: model,
+    description: 'Configured mock/default model',
+    hidden: false,
+    isDefault: true,
+  };
 }
 
 function ensureTurnStreamState(
@@ -811,6 +947,10 @@ async function finalizeTurn(turnId: string, type: RunnerEventType, payload: Reco
 
   if (turn.backend === 'mock') {
     clearTurnTimers(turn.timers);
+  } else if (turn.backend === 'claude') {
+    claudeBackend.disposePendingApprovalsForTurn(turnId, 'decline');
+    turn.query?.close();
+    turn.completionResolve?.();
   } else {
     turn.completionResolve?.();
   }
@@ -828,6 +968,10 @@ async function cancelActiveTurn(turn: ActiveTurn, options: { emitCancelEvent: bo
     await finalizeTurn(turn.turnId, 'turn.cancelled', {});
     return;
   }
+  if (turn.backend === 'claude') {
+    await claudeBackend.cancelTurn(turn);
+    return;
+  }
 
   await codexBackend.cancelTurn(turn, options);
 }
@@ -840,6 +984,11 @@ function silentlyDisposeTurn(turn: ActiveTurn): void {
   if (turn.backend === 'mock') {
     activeTurns.delete(turn.turnId);
     clearTurnTimers(turn.timers);
+    return;
+  }
+  if (turn.backend === 'claude') {
+    claudeBackend.disposePendingApprovalsForTurn(turn.turnId, 'decline');
+    claudeBackend.silentlyDisposeTurn(turn.turnId);
     return;
   }
   codexBackend.silentlyDisposeTurn(turn.turnId);

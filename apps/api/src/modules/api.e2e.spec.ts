@@ -282,6 +282,54 @@ describe('API e2e', () => {
     });
   });
 
+  it('blocks backend switch when the project already has sessions', async () => {
+    const email = randomEmail('project-backend-switch-blocked');
+
+    const projectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Backend Switch Guard Project',
+        repoPath: TEST_REPO_PATH,
+        backend: 'codex',
+        backendConfig: {
+          model: 'gpt-5-codex',
+          executionMode: 'safe-write',
+        },
+      },
+    });
+    expect(projectResponse.statusCode).toBe(201);
+    const project = projectResponse.json() as { id: string };
+
+    const sessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Session Exists' },
+    });
+    expect(sessionResponse.statusCode).toBe(201);
+
+    const patchResponse = await app.inject({
+      method: 'PATCH',
+      url: `/api/projects/${project.id}`,
+      headers: { 'x-user-email': email },
+      payload: {
+        backend: 'claude',
+        backendConfig: {
+          model: 'claude-sonnet-4',
+          executionMode: 'safe-write',
+        },
+      },
+    });
+    expect(patchResponse.statusCode).toBe(409);
+    expect(patchResponse.json()).toMatchObject({
+      error: {
+        message: 'Cannot change backend for a project that already has sessions',
+      },
+    });
+  });
+
   it('creates project workspace automatically when repoPath is omitted', async () => {
     const email = randomEmail('workspace-default-root');
     const tempRoot = await mkdtemp(path.join(tmpdir(), 'aw-default-workspace-'));
@@ -352,12 +400,68 @@ describe('API e2e', () => {
     });
   });
 
+  it('validates claude backendConfig and allows creating claude project/session', async () => {
+    const email = randomEmail('claude-project');
+
+    const invalidResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Claude Invalid Project',
+        backend: 'claude',
+        backendConfig: {
+          executionMode: 'safe-write',
+        },
+      },
+    });
+    expect(invalidResponse.statusCode).toBe(400);
+    expect(invalidResponse.json()).toMatchObject({
+      error: {
+        code: 'BAD_REQUEST',
+        message: 'Validation failed',
+      },
+    });
+
+    const createProjectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Claude Valid Project',
+        backend: 'claude',
+        repoPath: TEST_REPO_PATH,
+        backendConfig: {
+          model: 'claude-sonnet-4',
+          executionMode: 'safe-write',
+        },
+      },
+    });
+    expect(createProjectResponse.statusCode).toBe(201);
+    const project = createProjectResponse.json() as { id: string; backend: string; backendConfig: Record<string, unknown> };
+    expect(project.backend).toBe('claude');
+    expect(project.backendConfig).toMatchObject({
+      model: 'claude-sonnet-4',
+      executionMode: 'safe-write',
+    });
+
+    const createSessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: {
+        title: 'Claude Session',
+      },
+    });
+    expect(createSessionResponse.statusCode).toBe(201);
+  });
+
   it('lists available models', async () => {
     const email = randomEmail('models');
 
     const response = await app.inject({
       method: 'GET',
-      url: '/api/models',
+      url: '/api/models?backend=codex',
       headers: { 'x-user-email': email },
     });
 
@@ -365,6 +469,7 @@ describe('API e2e', () => {
     expect(response.json()).toMatchObject({
       data: expect.arrayContaining([
         expect.objectContaining({
+          backend: 'codex',
           model: expect.any(String),
           displayName: expect.any(String),
         }),

@@ -4,6 +4,7 @@ import {
   ChangeEvent,
   CSSProperties,
   KeyboardEvent,
+  memo,
   PointerEvent as ReactPointerEvent,
   SyntheticEvent,
   useEffect,
@@ -71,6 +72,7 @@ type Session = {
 
 type AvailableModel = {
   id: string;
+  backend: string;
   model: string;
   displayName: string;
   description: string;
@@ -181,6 +183,7 @@ type PendingApproval = {
 type AppSettings = {
   turnSteerEnabled: boolean;
   defaultWorkspaceRoot: string | null;
+  supportedBackends: string[];
 };
 
 type WorkspaceTreeEntry = {
@@ -205,6 +208,7 @@ type SkillOption = {
   name: string;
   description: string;
 };
+type CommandSuggestionMode = 'codex-skill' | 'claude-slash';
 
 const DEFAULT_CODEX_MODEL = 'gpt-5-codex';
 const DEFAULT_CODEX_EXECUTION_MODE = 'safe-write';
@@ -244,6 +248,17 @@ function readCodexBackendConfig(config: Record<string, unknown> | null | undefin
 
 function resolveModelDefault(models: AvailableModel[]): string {
   return models.find((model) => model.isDefault)?.model ?? models[0]?.model ?? DEFAULT_CODEX_MODEL;
+}
+
+function normalizeSupportedBackends(input: unknown): string[] {
+  if (!Array.isArray(input)) {
+    return ['codex'];
+  }
+  const normalized = input
+    .map((item) => (typeof item === 'string' ? item.trim().toLowerCase() : ''))
+    .filter((item) => item === 'codex' || item === 'claude');
+  const unique = Array.from(new Set(normalized));
+  return unique.length > 0 ? unique : ['codex'];
 }
 
 function mapExecutionModeToRuntime(executionMode: string): { sandbox: string; approvalPolicy: string } {
@@ -353,6 +368,11 @@ const EXECUTION_MODE_OPTIONS = [
   { value: 'yolo', label: 'yolo' },
 ];
 
+const ALL_PROJECT_BACKEND_OPTIONS = [
+  { value: 'codex', label: 'codex' },
+  { value: 'claude', label: 'claude' },
+];
+
 const STREAM_EVENTS = [
   'turn.started',
   'assistant.delta',
@@ -432,6 +452,7 @@ export default function HomePage() {
   const [appSettings, setAppSettings] = useState<AppSettings>({
     turnSteerEnabled: false,
     defaultWorkspaceRoot: null,
+    supportedBackends: ['codex'],
   });
   const [accountRateLimits, setAccountRateLimits] = useState<{
     fiveHour: RateLimitWindow | null;
@@ -447,12 +468,14 @@ export default function HomePage() {
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
   const [newProjectName, setNewProjectName] = useState('Simulation Workspace');
   const [newProjectRepoPath, setNewProjectRepoPath] = useState('');
+  const [newProjectBackend, setNewProjectBackend] = useState('codex');
   const [workspaceSuggestions, setWorkspaceSuggestions] = useState<string[]>([]);
   const [workspaceSuggestionBusy, setWorkspaceSuggestionBusy] = useState(false);
   const [newProjectDefaultModel, setNewProjectDefaultModel] = useState('');
   const [newProjectExecutionMode, setNewProjectExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
   const [projectConfigName, setProjectConfigName] = useState('');
   const [projectConfigRepoPath, setProjectConfigRepoPath] = useState('');
+  const [projectConfigBackend, setProjectConfigBackend] = useState('codex');
   const [projectConfigDefaultModel, setProjectConfigDefaultModel] = useState(DEFAULT_CODEX_MODEL);
   const [projectConfigExecutionMode, setProjectConfigExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
   const [newSessionTitle, setNewSessionTitle] = useState('First Simulation Session');
@@ -538,6 +561,10 @@ export default function HomePage() {
   const canSteerTurn =
     appSettings.turnSteerEnabled && !!activeTurnId && prompt.trim().length > 0 && pendingApproval === null;
   const canManualCompact = !!selectedSessionId && !activeTurnId && !busy && !compactingContext;
+  const supportedBackends = appSettings.supportedBackends;
+  const codexBackendEnabled = supportedBackends.includes('codex');
+  const projectBackendOptions = ALL_PROJECT_BACKEND_OPTIONS.filter((option) => supportedBackends.includes(option.value));
+  const fallbackProjectBackend = projectBackendOptions[0]?.value ?? 'codex';
   const normalizedDefaultWorkspaceRootDraft = defaultWorkspaceRootInput.trim() || null;
   const appSettingsDirty =
     turnSteerDraft !== appSettings.turnSteerEnabled ||
@@ -601,7 +628,12 @@ export default function HomePage() {
     const parts = normalized.split(/[\\/]/).filter((part) => part.length > 0);
     return parts[parts.length - 1] ?? normalized;
   }, [activeWorkspacePath]);
-  const activeSkillToken = useMemo(() => findSkillTokenContext(prompt, promptCursor), [prompt, promptCursor]);
+  const commandSuggestionMode: CommandSuggestionMode = selectedProject?.backend === 'claude' ? 'claude-slash' : 'codex-skill';
+  const commandSuggestionPrefix = commandSuggestionMode === 'claude-slash' ? '/' : '$';
+  const activeSkillToken = useMemo(
+    () => findSkillTokenContext(prompt, promptCursor, commandSuggestionMode),
+    [prompt, promptCursor, commandSuggestionMode],
+  );
   const filteredSkillSuggestions = useMemo(() => {
     if (!activeSkillToken) {
       return [];
@@ -675,7 +707,11 @@ export default function HomePage() {
     if (insightsTab !== 'diff' || !latestDiffSummary) {
       return [] as ParsedDiffFile[];
     }
-    return parseDiff(latestDiffSummary);
+    try {
+      return parseDiff(latestDiffSummary);
+    } catch {
+      return [] as ParsedDiffFile[];
+    }
   }, [insightsTab, latestDiffSummary]);
   const renderedDiff = useMemo(() => {
     if (!latestDiffSummary) {
@@ -890,12 +926,44 @@ export default function HomePage() {
   }, [mounted, newProjectRepoPath, projectConfigRepoPath, actionPanelMode, authenticated]);
 
   useEffect(() => {
-    if (!mounted || !authenticated || leftSidebarTab !== 'config') {
+    if (!mounted || !authenticated || leftSidebarTab !== 'config' || !codexBackendEnabled) {
       return;
     }
     void loadAccountRateLimits();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mounted, authenticated, leftSidebarTab]);
+  }, [mounted, authenticated, leftSidebarTab, codexBackendEnabled]);
+
+  useEffect(() => {
+    if (codexBackendEnabled) {
+      return;
+    }
+    setAccountRateLimits({
+      fiveHour: null,
+      weekly: null,
+    });
+  }, [codexBackendEnabled]);
+
+  useEffect(() => {
+    if (!mounted || !authenticated) {
+      return;
+    }
+    if (!supportedBackends.includes(newProjectBackend)) {
+      const fallback = supportedBackends[0] ?? 'codex';
+      setNewProjectBackend(fallback);
+      void loadAvailableModels(fallback, { target: 'new' });
+    }
+    if (!supportedBackends.includes(projectConfigBackend)) {
+      const fallback = supportedBackends[0] ?? 'codex';
+      setProjectConfigBackend(fallback);
+      void loadAvailableModels(fallback, { target: 'config' });
+    }
+  }, [
+    mounted,
+    authenticated,
+    supportedBackends,
+    newProjectBackend,
+    projectConfigBackend,
+  ]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !authenticated || !currentUserEmail || !selectedProjectId) {
@@ -986,8 +1054,15 @@ export default function HomePage() {
     }
 
     const controller = new AbortController();
+    const backend = typeof selectedProject?.backend === 'string' && selectedProject.backend.trim()
+      ? selectedProject.backend.trim()
+      : 'codex';
+    const query = new URLSearchParams({
+      cwd: activeWorkspacePath,
+      backend,
+    });
     void apiRequest<{ data?: Array<{ name?: string; description?: string; enabled?: boolean }> }>(
-      `/api/skills?${new URLSearchParams({ cwd: activeWorkspacePath }).toString()}`,
+      `/api/skills?${query.toString()}`,
       { method: 'GET', signal: controller.signal },
     )
       .then((response) => {
@@ -1020,7 +1095,7 @@ export default function HomePage() {
     return () => {
       controller.abort();
     };
-  }, [mounted, authenticated, activeWorkspacePath]);
+  }, [mounted, authenticated, activeWorkspacePath, selectedProject?.backend]);
 
   useEffect(() => {
     setSkillSuggestionIndex(0);
@@ -1229,13 +1304,15 @@ export default function HomePage() {
         setAuthenticated(true);
         setCurrentUserEmail(userEmail);
         setCurrentUserRole(response.principal.role);
-        await loadAppSettings();
+        const settings = await loadAppSettings();
         if (response.principal.role === 'admin') {
           await loadAdminUsers();
         } else {
           setAdminUsers([]);
         }
-        await loadAvailableModels();
+        const initialBackend =
+          settings?.supportedBackends.find((backend) => backend === 'codex' || backend === 'claude') ?? 'codex';
+        await loadAvailableModels(initialBackend, { target: 'both' });
         const preferredProjectId = readLastProjectId(userEmail) ?? undefined;
         await loadProjects({
           preferredProjectId,
@@ -1247,10 +1324,20 @@ export default function HomePage() {
       setAuthenticated(false);
       setCurrentUserEmail('');
       setCurrentUserRole('user');
+      setAppSettings({
+        turnSteerEnabled: false,
+        defaultWorkspaceRoot: null,
+        supportedBackends: ['codex'],
+      });
     } catch {
       setAuthenticated(false);
       setCurrentUserEmail('');
       setCurrentUserRole('user');
+      setAppSettings({
+        turnSteerEnabled: false,
+        defaultWorkspaceRoot: null,
+        supportedBackends: ['codex'],
+      });
     }
   }
 
@@ -1317,6 +1404,11 @@ export default function HomePage() {
       setNewManagedUserDefaultWorkspaceRoot('');
       setDefaultWorkspaceRootInput('');
       setTurnSteerDraft(false);
+      setAppSettings({
+        turnSteerEnabled: false,
+        defaultWorkspaceRoot: null,
+        supportedBackends: ['codex'],
+      });
       setFileBrowserNodes({});
       setFileBrowserExpandedPaths([]);
       setFileBrowserError('');
@@ -1430,24 +1522,36 @@ export default function HomePage() {
     }
   }
 
-  async function loadAppSettings(): Promise<void> {
+  async function loadAppSettings(): Promise<AppSettings | null> {
     try {
       const response = await apiRequest<AppSettings>('/api/settings', {
         method: 'GET',
       });
       const normalizedWorkspaceRoot = response.defaultWorkspaceRoot?.trim() || null;
-      setAppSettings({
+      const supported = normalizeSupportedBackends(response.supportedBackends);
+      const nextSettings: AppSettings = {
         turnSteerEnabled: !!response.turnSteerEnabled,
         defaultWorkspaceRoot: normalizedWorkspaceRoot,
-      });
+        supportedBackends: supported,
+      };
+      setAppSettings(nextSettings);
       setTurnSteerDraft(!!response.turnSteerEnabled);
       setDefaultWorkspaceRootInput(normalizedWorkspaceRoot ?? '');
+      return nextSettings;
     } catch (requestError) {
       setError(extractMessage(requestError));
+      return null;
     }
   }
 
   async function loadAccountRateLimits(): Promise<void> {
+    if (!codexBackendEnabled) {
+      setAccountRateLimits({
+        fiveHour: null,
+        weekly: null,
+      });
+      return;
+    }
     setAccountRateLimitsBusy(true);
     try {
       const response = await apiRequest<CodexRateLimitsResponse>('/api/settings/codex/rate-limits', {
@@ -1465,16 +1569,42 @@ export default function HomePage() {
     }
   }
 
-  async function loadAvailableModels(): Promise<void> {
+  async function loadAvailableModels(
+    backend = 'codex',
+    options?: { target?: 'new' | 'config' | 'both'; preferredModel?: string | null },
+  ): Promise<void> {
     try {
-      const response = await apiRequest<{ data: AvailableModel[] }>('/api/models', {
+      const query = new URLSearchParams();
+      if (backend.trim()) {
+        query.set('backend', backend.trim());
+      }
+      const response = await apiRequest<{ data: AvailableModel[] }>(
+        query.size > 0 ? `/api/models?${query.toString()}` : '/api/models',
+        {
         method: 'GET',
-      });
+        },
+      );
       const models = response.data ?? [];
       setAvailableModels(models);
       const modelDefault = resolveModelDefault(models);
-      setNewProjectDefaultModel((current) => (current.trim() ? current : modelDefault));
-      setProjectConfigDefaultModel((current) => (current.trim() ? current : modelDefault));
+      const target = options?.target ?? 'both';
+      const preferredModel =
+        typeof options?.preferredModel === 'string' && options.preferredModel.trim().length > 0
+          ? options.preferredModel.trim()
+          : null;
+      const resolvePreferredModel = (current: string): string => {
+        const preferred = preferredModel ?? current.trim();
+        if (preferred && models.some((item) => item.model === preferred)) {
+          return preferred;
+        }
+        return modelDefault;
+      };
+      if (target === 'both' || target === 'new') {
+        setNewProjectDefaultModel((current) => resolvePreferredModel(current));
+      }
+      if (target === 'both' || target === 'config') {
+        setProjectConfigDefaultModel((current) => resolvePreferredModel(current));
+      }
     } catch (requestError) {
       setError(extractMessage(requestError));
     }
@@ -1612,9 +1742,11 @@ export default function HomePage() {
         },
       });
       const normalizedWorkspaceRoot = response.defaultWorkspaceRoot?.trim() || null;
+      const supported = normalizeSupportedBackends(response.supportedBackends);
       setAppSettings({
         turnSteerEnabled: !!response.turnSteerEnabled,
         defaultWorkspaceRoot: normalizedWorkspaceRoot,
+        supportedBackends: supported,
       });
       setTurnSteerDraft(!!response.turnSteerEnabled);
       setDefaultWorkspaceRootInput(normalizedWorkspaceRoot ?? '');
@@ -1855,7 +1987,7 @@ export default function HomePage() {
         method: 'POST',
         body: {
           name: newProjectName.trim(),
-          backend: 'codex',
+          backend: newProjectBackend,
           backendConfig,
           ...(newProjectRepoPath.trim() ? { repoPath: newProjectRepoPath.trim() } : {}),
         },
@@ -2264,6 +2396,7 @@ export default function HomePage() {
     const streamUrl = `/api/turns/${turnId}/stream`;
     const source = new EventSource(streamUrl);
     eventSourceRef.current = source;
+    let sawNonReasoningAssistantDelta = false;
 
     const appendTimelineEvent = (envelope: StreamEnvelope): void => {
       setTimelineEvents((current) => mergeTimelineEvent(current, envelope));
@@ -2292,6 +2425,10 @@ export default function HomePage() {
         if (envelope.type === 'assistant.delta') {
           const delta = envelope.payload.text;
           if (typeof delta === 'string') {
+            const isReasoningDelta = envelope.payload.isReasoning === true;
+            if (!isReasoningDelta && delta.length > 0) {
+              sawNonReasoningAssistantDelta = true;
+            }
             setAssistantText((current) => current + delta);
           }
         }
@@ -2353,6 +2490,12 @@ export default function HomePage() {
         }
 
         if (envelope.type === 'turn.completed' || envelope.type === 'turn.failed' || envelope.type === 'turn.cancelled') {
+          if (envelope.type === 'turn.completed' && !sawNonReasoningAssistantDelta) {
+            const completedContent = typeof envelope.payload.content === 'string' ? envelope.payload.content : '';
+            if (completedContent.length > 0) {
+              setAssistantText((current) => `${ensureBalancedThinkTags(current)}${completedContent}`);
+            }
+          }
           setTurnStatus(envelope.type.replace('turn.', ''));
           setStreamActive(false);
           setResumedTurnHint('');
@@ -2469,8 +2612,9 @@ export default function HomePage() {
 
   function openActionPanel(mode: ActionPanelMode): void {
     if (mode === 'createProject') {
-      setNewProjectDefaultModel(resolveModelDefault(availableModels));
+      setNewProjectBackend(fallbackProjectBackend);
       setNewProjectExecutionMode(DEFAULT_CODEX_EXECUTION_MODE);
+      void loadAvailableModels(fallbackProjectBackend, { target: 'new' });
     }
     setActionPanelMode(mode);
   }
@@ -2496,11 +2640,15 @@ export default function HomePage() {
 
   function openProjectConfigPanel(project: Project): void {
     const backendConfig = readCodexBackendConfig(project.backendConfig);
+    const backend = project.backend?.trim() || 'codex';
+    const resolvedBackend = supportedBackends.includes(backend) ? backend : fallbackProjectBackend;
     setSelectedProjectId(project.id);
     setProjectConfigName(project.name);
     setProjectConfigRepoPath(project.repoPath ?? '');
+    setProjectConfigBackend(resolvedBackend);
     setProjectConfigDefaultModel(backendConfig.model);
     setProjectConfigExecutionMode(backendConfig.executionMode);
+    void loadAvailableModels(resolvedBackend, { target: 'config', preferredModel: backendConfig.model });
     openActionPanel('projectConfig');
   }
 
@@ -2754,7 +2902,7 @@ export default function HomePage() {
     if (!activeSkillToken) {
       return;
     }
-    const replacement = `$${skill.name} `;
+    const replacement = `${commandSuggestionPrefix}${skill.name} `;
     const nextPrompt = `${prompt.slice(0, activeSkillToken.start)}${replacement}${prompt.slice(activeSkillToken.end)}`;
     const nextCursor = activeSkillToken.start + replacement.length;
     setPrompt(nextPrompt);
@@ -2975,6 +3123,23 @@ export default function HomePage() {
                     </span>
                   </label>
                   <label>
+                    Backend
+                    <select
+                      value={newProjectBackend}
+                      onChange={(event) => {
+                        const nextBackend = event.target.value.trim() || 'codex';
+                        setNewProjectBackend(nextBackend);
+                        void loadAvailableModels(nextBackend, { target: 'new' });
+                      }}
+                    >
+                      {projectBackendOptions.map((option) => (
+                        <option key={`project-backend-${option.value}`} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
                     Default Model
                     <select
                       value={newProjectDefaultModel}
@@ -3075,6 +3240,20 @@ export default function HomePage() {
                     <span className="sim-input-hint">
                       {workspaceSuggestionBusy ? 'Loading suggestions…' : 'Directory suggestions by prefix.'}
                     </span>
+                  </label>
+                  <label>
+                    Backend
+                    <select
+                      value={projectConfigBackend}
+                      disabled
+                    >
+                      {projectBackendOptions.map((option) => (
+                        <option key={`project-config-backend-${option.value}`} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="sim-input-hint">Backend is fixed after project creation.</span>
                   </label>
                   <label>
                     Default Model
@@ -3575,35 +3754,39 @@ export default function HomePage() {
                       <div className="left-config-panel">
                         <h2>Config</h2>
                         <p>Signed in as: <strong>{currentUserEmail}</strong></p>
-                        <h3>Codex Rate Limits</h3>
-                        {accountRateLimitsBusy ? <p>Loading Codex rate limits…</p> : null}
-                        {!accountRateLimitsBusy ? (
-                          <div className="rate-limit-list">
-                            <div className="rate-limit-item">
-                              <div className="rate-limit-head">
-                                <strong>5h</strong>
-                                <span>{formatRateLimitReset(accountRateLimits.fiveHour)}</span>
+                        {codexBackendEnabled ? (
+                          <>
+                            <h3>Codex Rate Limits</h3>
+                            {accountRateLimitsBusy ? <p>Loading Codex rate limits…</p> : null}
+                            {!accountRateLimitsBusy ? (
+                              <div className="rate-limit-list">
+                                <div className="rate-limit-item">
+                                  <div className="rate-limit-head">
+                                    <strong>5h</strong>
+                                    <span>{formatRateLimitReset(accountRateLimits.fiveHour)}</span>
+                                  </div>
+                                  <div className="rate-limit-track">
+                                    <div
+                                      className={`rate-limit-fill ${rateLimitFillClass(accountRateLimits.fiveHour)}`}
+                                      style={{ width: `${formatRateLimitRemainingPercent(accountRateLimits.fiveHour)}%` }}
+                                    />
+                                  </div>
+                                </div>
+                                <div className="rate-limit-item">
+                                  <div className="rate-limit-head">
+                                    <strong>Week</strong>
+                                    <span>{formatRateLimitReset(accountRateLimits.weekly)}</span>
+                                  </div>
+                                  <div className="rate-limit-track">
+                                    <div
+                                      className={`rate-limit-fill ${rateLimitFillClass(accountRateLimits.weekly)}`}
+                                      style={{ width: `${formatRateLimitRemainingPercent(accountRateLimits.weekly)}%` }}
+                                    />
+                                  </div>
+                                </div>
                               </div>
-                              <div className="rate-limit-track">
-                                <div
-                                  className={`rate-limit-fill ${rateLimitFillClass(accountRateLimits.fiveHour)}`}
-                                  style={{ width: `${formatRateLimitRemainingPercent(accountRateLimits.fiveHour)}%` }}
-                                />
-                              </div>
-                            </div>
-                            <div className="rate-limit-item">
-                              <div className="rate-limit-head">
-                                <strong>Week</strong>
-                                <span>{formatRateLimitReset(accountRateLimits.weekly)}</span>
-                              </div>
-                              <div className="rate-limit-track">
-                                <div
-                                  className={`rate-limit-fill ${rateLimitFillClass(accountRateLimits.weekly)}`}
-                                  style={{ width: `${formatRateLimitRemainingPercent(accountRateLimits.weekly)}%` }}
-                                />
-                              </div>
-                            </div>
-                          </div>
+                            ) : null}
+                          </>
                         ) : null}
                         <label className="inline-checkbox">
                           <span>Turn Steering</span>
@@ -3766,7 +3949,7 @@ export default function HomePage() {
                       ) : null}
                     </header>
                     <div className="chat-markdown">
-                      <ReactMarkdown remarkPlugins={CHAT_MARKDOWN_REMARK_PLUGINS}>{message.content}</ReactMarkdown>
+                      <ChatMessageMarkdown content={message.content} />
                     </div>
                   </article>
                 ))}
@@ -3866,7 +4049,7 @@ export default function HomePage() {
                             }}
                           >
                             <span className="composer-skill-line">
-                              <span className="composer-skill-name">${skill.name}</span>
+                              <span className="composer-skill-name">{`${commandSuggestionPrefix}${skill.name}`}</span>
                               <span className="composer-skill-description">{skill.description || 'Skill'}</span>
                             </span>
                           </button>
@@ -4007,7 +4190,7 @@ export default function HomePage() {
                         <dd>
                           {resolvedSessionInfo.runtimeEntries.length > 0
                             ? (
-                              <pre className="session-debug-lines">
+                              <pre className="session-debug-lines session-runtime-lines-capped">
                                 {resolvedSessionInfo.runtimeEntries
                                   .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`)
                                   .join('\n')}
@@ -4019,7 +4202,7 @@ export default function HomePage() {
                           <>
                             <dt>Debug</dt>
                             <dd>
-                              <pre className="session-debug-lines">{currentSessionDebugInfo}</pre>
+                              <pre className="session-debug-lines session-debug-lines-capped">{currentSessionDebugInfo}</pre>
                             </dd>
                           </>
                         ) : null}
@@ -4303,9 +4486,26 @@ function applyDirectorySuggestionSelection(value: string, suggestions: string[])
   return suggestions.includes(value) ? ensureTrailingSlash(value) : value;
 }
 
-function findSkillTokenContext(input: string, cursor: number): { start: number; end: number; prefix: string } | null {
+function findSkillTokenContext(
+  input: string,
+  cursor: number,
+  mode: CommandSuggestionMode,
+): { start: number; end: number; prefix: string } | null {
   const safeCursor = Math.max(0, Math.min(cursor, input.length));
   const beforeCursor = input.slice(0, safeCursor);
+  if (mode === 'claude-slash') {
+    const match = beforeCursor.match(/^\/([A-Za-z0-9_-]*)$/);
+    if (!match) {
+      return null;
+    }
+    const prefix = match[1] ?? '';
+    let end = safeCursor;
+    while (end < input.length && /[A-Za-z0-9_-]/.test(input[end] ?? '')) {
+      end += 1;
+    }
+    return { start: 0, end, prefix };
+  }
+
   const match = beforeCursor.match(/(?:^|\s)\$([A-Za-z0-9_-]*)$/);
   if (!match) {
     return null;
@@ -4503,19 +4703,7 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
   }
 
   if (envelope.type === 'turn.completed') {
-    const content = typeof envelope.payload.content === 'string' ? envelope.payload.content.trim() : '';
-    const next: TimelineEvent[] = [...current];
-    if (content.length > 0) {
-      next.push({
-        id: `assistant-final-${envelope.seq}`,
-        kind: 'assistant',
-        title: 'Assistant Message',
-        seqStart: envelope.seq,
-        seqEnd: envelope.seq,
-        createdAt: envelope.createdAt,
-        details: [content],
-      });
-    }
+    const next = appendOrMergeByKindWithoutDetails(current, 'assistant', 'Assistant Message', envelope);
     next.push({
       id: `turn-completed-${envelope.seq}`,
       kind: 'event',
@@ -4620,11 +4808,15 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
     if (!delta) {
       return current;
     }
-    return appendOrMergeByKind(current, 'reasoning', 'Reasoning', envelope, delta);
+    return appendOrMergeByKindWithoutDetails(current, 'reasoning', 'Reasoning', envelope);
   }
 
   if (envelope.type === 'assistant.delta') {
-    return current;
+    const text = typeof envelope.payload.text === 'string' ? envelope.payload.text : '';
+    if (!text) {
+      return current;
+    }
+    return appendOrMergeByKindWithoutDetails(current, 'assistant', 'Assistant Message', envelope);
   }
 
   if (envelope.type === 'plan.updated') {
@@ -4754,6 +4946,35 @@ function appendOrMergeByKind(
   ];
 }
 
+function appendOrMergeByKindWithoutDetails(
+  current: TimelineEvent[],
+  kind: TimelineEvent['kind'],
+  title: string,
+  envelope: StreamEnvelope,
+): TimelineEvent[] {
+  const last = current[current.length - 1];
+  if (last && last.kind === kind) {
+    const updatedLast: TimelineEvent = {
+      ...last,
+      seqEnd: Math.max(last.seqEnd, envelope.seq),
+      details: [],
+    };
+    return [...current.slice(0, -1), updatedLast];
+  }
+  return [
+    ...current,
+    {
+      id: `${kind}-${envelope.seq}`,
+      kind,
+      title,
+      seqStart: envelope.seq,
+      seqEnd: envelope.seq,
+      createdAt: envelope.createdAt,
+      details: [],
+    },
+  ];
+}
+
 function appendOrMergeDetail(details: string[], text: string): string[] {
   if (details.length === 0) {
     return [text];
@@ -4762,6 +4983,42 @@ function appendOrMergeDetail(details: string[], text: string): string[] {
   const merged = `${last}${text}`;
   return [...details.slice(0, -1), merged];
 }
+
+function renderChatMessageMarkdown(content: string): string {
+  if (!content.includes('<think>')) {
+    return content;
+  }
+  return content.replace(/<think>([\s\S]*?)<\/think>/gi, (_full, inner: string) => {
+    const normalized = inner.trim();
+    if (!normalized) {
+      return '';
+    }
+    const italicLines = normalized
+      .split('\n')
+      .map((line) => `> _${line.trim()}_`)
+      .join('\n');
+    // Ensure a blank line after blockquote so following assistant text
+    // is not treated as lazy continuation of the quote block.
+    return `\n${italicLines}\n\n`;
+  });
+}
+
+function ensureBalancedThinkTags(content: string): string {
+  if (!content.includes('<think>')) {
+    return content;
+  }
+  const openCount = (content.match(/<think>/gi) ?? []).length;
+  const closeCount = (content.match(/<\/think>/gi) ?? []).length;
+  if (openCount <= closeCount) {
+    return content;
+  }
+  return `${content}${'</think>'.repeat(openCount - closeCount)}`;
+}
+
+const ChatMessageMarkdown = memo(function ChatMessageMarkdown({ content }: { content: string }) {
+  const rendered = useMemo(() => renderChatMessageMarkdown(content), [content]);
+  return <ReactMarkdown remarkPlugins={CHAT_MARKDOWN_REMARK_PLUGINS}>{rendered}</ReactMarkdown>;
+});
 
 function resolveToolKey(envelope: StreamEnvelope): string {
   const payload = envelope.payload;

@@ -112,6 +112,19 @@ export class ProjectsService {
         : null;
     }
     const resolvedBackend = typeof input.backend === 'string' ? normalizeBackend(input.backend) : project.backend;
+    const backendSwitchRequested = typeof input.backend === 'string' && resolvedBackend !== project.backend;
+    if (backendSwitchRequested) {
+      const sessionCount = await this.prisma.session.count({
+        where: {
+          projectId: project.id,
+        },
+      });
+      if (sessionCount > 0) {
+        throw new ConflictException({
+          message: 'Cannot change backend for a project that already has sessions',
+        });
+      }
+    }
     if (typeof input.backend === 'string') {
       data.backend = resolvedBackend;
     }
@@ -135,7 +148,11 @@ export class ProjectsService {
         id: projectId,
         ownerUserId: userId,
       },
-      select: { id: true },
+      select: {
+        id: true,
+        backend: true,
+        repoPath: true,
+      },
     });
 
     if (!project) {
@@ -167,15 +184,19 @@ export class ProjectsService {
         projectId,
       },
       select: {
-        codexThreadId: true,
+        backendThreadId: true,
       },
     });
 
-    const threadIds = [...new Set(sessions.map((item) => item.codexThreadId?.trim()).filter((item): item is string => !!item))];
+    const threadIds = [...new Set(sessions.map((item) => item.backendThreadId?.trim()).filter((item): item is string => !!item))];
     await Promise.all(
       threadIds.map(async (threadId) => {
         try {
-          await this.runnerAdapter.closeThread({ threadId });
+          await this.runnerAdapter.closeThread({
+            threadId,
+            backend: project.backend?.trim() || null,
+            cwd: project.repoPath?.trim() || null,
+          });
         } catch (error: unknown) {
           if (error instanceof Error) {
             this.logger.warn(`Failed to close thread ${threadId} during project delete ${projectId}: ${error.message}`);

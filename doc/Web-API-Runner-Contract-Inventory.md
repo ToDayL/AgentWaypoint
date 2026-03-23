@@ -145,7 +145,10 @@ All `/api/*` routes below are guarded by auth unless noted.
 ### `POST /api/sessions/:id/fork`
 - Body:
   - `title?: string`
-- Purpose: clone existing session context into new session/thread.
+- Purpose: clone existing conversation context into a new session/thread branch.
+- Notes:
+  - This is a conversation fork.
+  - It does not imply filesystem/workspace snapshot isolation.
 - Response: created forked `Session`
 
 ### `POST /api/sessions/:id/compact`
@@ -173,6 +176,9 @@ All `/api/*` routes below are guarded by auth unless noted.
 - Body:
   - `content: string (1..10000)`
 - Purpose: inject steering message while turn is queued/running.
+- Notes:
+  - Backend-specific behavior is allowed.
+  - For Claude, expected implementation is interrupt + appended user input (not a native provider `turn/steer` RPC).
 - Response: `TurnStatusResponse`
 
 ### `POST /api/turns/:id/approval`
@@ -183,6 +189,9 @@ All `/api/*` routes below are guarded by auth unless noted.
     - or `acceptWithExecpolicyAmendment`
     - or `applyNetworkPolicyAmendment`
 - Purpose: resolve a pending tool/file/permission approval.
+- Notes:
+  - Current API surface has no explicit `message` field in approval body.
+  - Claude SDK can consume deny messages internally; if exposed later, API contract will need extension.
 - Response: `TurnStatusResponse`
 
 ### `GET /api/turns/:id`
@@ -200,9 +209,14 @@ All `/api/*` routes below are guarded by auth unless noted.
 
 ## Runner-backed API helpers
 
-### `GET /api/models`
+### `GET /api/models?backend=<string?>`
 - Purpose: list available models from runner.
+- Query:
+  - `backend?: string` recommended; when provided, response should be scoped to that backend.
 - Response: `{ data: AvailableModel[] }`
+- Notes:
+  - Web should query by currently selected project backend.
+  - Even when scoped, each model item should include `backend` discriminator.
 
 ### `GET /api/fs/suggestions?prefix=<string>&limit=<1..50?>`
 - Purpose: workspace directory autocomplete.
@@ -347,11 +361,10 @@ Base prefix: `/runner`.
   - `turnId: string`
   - `sessionId: string`
   - `content: string`
+  - `backend?: string|null`
+  - `backendConfig?: Record<string, unknown>|null`
   - `threadId?: string|null`
   - `cwd?: string|null`
-  - `model?: string|null`
-  - `sandbox?: string|null`
-  - `approvalPolicy?: string|null`
 - Purpose: start turn execution.
 - Response: `{ accepted: true, runnerRequestId: string }` (`202`)
 
@@ -367,6 +380,9 @@ Base prefix: `/runner`.
 ### `POST /runner/turns/steer`
 - Body: `{ turnId: string, content: string }`
 - Purpose: steer active turn.
+- Notes:
+  - Claude path should be implemented as interrupt + appended input.
+  - If unsupported in runtime path, runner should return explicit error (`400/409`).
 - Response: `{ accepted: true, runnerRequestId }` (`202`)
 
 ### `POST /runner/turns/cancel`
@@ -379,12 +395,18 @@ Base prefix: `/runner`.
   - `turnId: string`
   - `requestId: string`
   - `decision: ApprovalDecision`
-- Purpose: resolve pending approval with Codex worker.
+- Purpose: resolve pending approval with active backend worker.
+- Notes:
+  - Backend-specific decisions are allowed; unsupported variants should fail explicitly.
+  - Claude supports deny-side feedback message internally, but the current HTTP contract does not carry a custom message field.
 - Response: `{ accepted: true, runnerRequestId }` (`202`)
 
 ### `POST /runner/threads/fork`
-- Body: `{ threadId, cwd?, model?, sandbox?, approvalPolicy? }`
+- Body: `{ threadId, backend?, backendConfig?, cwd? }`
 - Purpose: fork thread.
+- Notes:
+  - For Claude, this is conversation-history branching.
+  - It does not snapshot filesystem state.
 - Response: `{ threadId: string }`
 
 ### `POST /runner/threads/close`
@@ -393,7 +415,7 @@ Base prefix: `/runner`.
 - Response: `204`
 
 ### `POST /runner/threads/compact`
-- Body: `{ threadId, cwd?, model?, sandbox?, approvalPolicy? }`
+- Body: `{ threadId, backend?, backendConfig?, cwd? }`
 - Purpose: run thread compaction.
 - Response: `{ accepted: true, runnerRequestId }` (`202`)
 
@@ -440,6 +462,7 @@ Event payload shapes emitted by runner code:
   threadId?: string;
   cwd?: string;
   model?: string;
+  executionMode?: 'read-only' | 'safe-write' | 'yolo';
   sandbox?: string;
   approvalPolicy?: string;
 }
@@ -601,6 +624,16 @@ type Project = {
   createdAt: string;
 };
 
+type AvailableModel = {
+  id: string;
+  backend: string;
+  model: string;
+  displayName: string;
+  description: string;
+  hidden: boolean;
+  isDefault: boolean; // default within this backend
+};
+
 type Session = {
   id: string;
   title: string;
@@ -611,15 +644,11 @@ type Session = {
 type TurnStatusResponse = {
   id: string;
   sessionId: string;
+  backend: string | null;
   status: string;
-  requestedCwd: string | null;
-  requestedModel: string | null;
-  requestedSandbox: string | null;
-  requestedApprovalPolicy: string | null;
-  effectiveCwd: string | null;
-  effectiveModel: string | null;
-  effectiveSandbox: string | null;
-  effectiveApprovalPolicy: string | null;
+  requestedBackendConfig: Record<string, unknown> | null;
+  effectiveBackendConfig: Record<string, unknown> | null;
+  effectiveRuntimeConfig: Record<string, unknown> | null;
   failureCode: string | null;
   failureMessage: string | null;
   contextRemainingRatio: number | null;
@@ -648,14 +677,10 @@ type SessionHistory = {
   turns: Array<{
     id: string;
     status: string;
-    requestedCwd: string | null;
-    requestedModel: string | null;
-    requestedSandbox: string | null;
-    requestedApprovalPolicy: string | null;
-    effectiveCwd: string | null;
-    effectiveModel: string | null;
-    effectiveSandbox: string | null;
-    effectiveApprovalPolicy: string | null;
+    backend: string | null;
+    requestedBackendConfig: Record<string, unknown> | null;
+    effectiveBackendConfig: Record<string, unknown> | null;
+    effectiveRuntimeConfig: Record<string, unknown> | null;
     failureCode: string | null;
     failureMessage: string | null;
     contextRemainingRatio: number | null;

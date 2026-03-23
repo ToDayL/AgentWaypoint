@@ -40,3 +40,9 @@ uploads/
 # Local TLS assets for nginx reverse proxy
 infra/docker/nginx/certs/*
 !infra/docker/nginx/certs/.gitkeep
+
+# Local agent artifacts (repo root only)
+/.agents/
+/.codex/
+/.claude/
+/schemas/

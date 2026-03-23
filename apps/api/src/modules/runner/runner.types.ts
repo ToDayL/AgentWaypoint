@@ -10,6 +10,7 @@ export type StartTurnInput = {
 
 export type AvailableModel = {
   id: string;
+  backend: string;
   model: string;
   displayName: string;
   description: string;
@@ -17,11 +18,19 @@ export type AvailableModel = {
   isDefault: boolean;
 };
 
+export type ModelListInput = {
+  backend?: string | null;
+};
+
 export type AvailableSkill = {
   name: string;
   description: string;
   path: string;
   enabled: boolean;
+};
+
+export type RunnerHealth = {
+  supportedBackends: string[];
 };
 
 export type CancelTurnInput = {
@@ -46,6 +55,8 @@ export type ForkThreadResult = {
 
 export type CloseThreadInput = {
   threadId: string;
+  backend?: string | null;
+  cwd?: string | null;
 };
 
 export type CompactThreadInput = {
@@ -116,6 +127,7 @@ export type WorkspaceUploadResult = {
 
 export type SkillListInput = {
   cwd?: string | null;
+  backend?: string | null;
 };
 
 export type RateLimitWindow = {
@@ -199,7 +211,8 @@ export interface RunnerAdapter {
   cancelTurn(input: CancelTurnInput): Promise<void>;
   resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void>;
   readCodexRateLimits(): Promise<CodexRateLimits>;
-  listModels(): Promise<AvailableModel[]>;
+  getHealth(): Promise<RunnerHealth>;
+  listModels(input: ModelListInput): Promise<AvailableModel[]>;
   listSkills(input: SkillListInput): Promise<AvailableSkill[]>;
   forkThread(input: ForkThreadInput): Promise<ForkThreadResult>;
   closeThread(input: CloseThreadInput): Promise<void>;

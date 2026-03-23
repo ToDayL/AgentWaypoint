@@ -39,6 +39,7 @@ type PendingApprovalSummary = {
 export class TurnsService implements OnModuleInit {
   private readonly logger = new Logger(TurnsService.name);
   private readonly runnerConsumers = new Map<string, Promise<void>>();
+  private readonly reasoningOpenTurns = new Set<string>();
 
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
@@ -60,7 +61,7 @@ export class TurnsService implements OnModuleInit {
       },
       select: {
         id: true,
-        codexThreadId: true,
+        backendThreadId: true,
         project: {
           select: {
             repoPath: true,
@@ -119,7 +120,7 @@ export class TurnsService implements OnModuleInit {
         content: input.content,
         backend,
         backendConfig,
-        threadId: session.codexThreadId,
+        threadId: session.backendThreadId,
         cwd,
       })
       .then(() => {
@@ -275,13 +276,17 @@ export class TurnsService implements OnModuleInit {
       throw new NotFoundException({ message: 'Turn not found' });
     }
 
+    if (type !== 'reasoning.delta' && type !== 'turn.started') {
+      await this.closeReasoningBlockIfOpen(turnId);
+    }
+
     switch (type) {
       case 'turn.started': {
         const threadId = payload.threadId;
         if (typeof threadId === 'string' && threadId.length > 0) {
           await this.prisma.session.update({
             where: { id: turn.sessionId },
-            data: { codexThreadId: threadId },
+            data: { backendThreadId: threadId },
           });
         }
         if (turn.status === 'queued') {
@@ -315,6 +320,19 @@ export class TurnsService implements OnModuleInit {
           throw new ConflictException({ message: 'assistant.delta requires payload.text' });
         }
         await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text }));
+        return;
+      }
+      case 'reasoning.delta': {
+        if (TERMINAL_STATUSES.includes(turn.status)) {
+          return;
+        }
+        const delta = typeof payload.delta === 'string' ? payload.delta : '';
+        if (delta.length === 0) {
+          return;
+        }
+        await this.openReasoningBlockIfNeeded(turnId);
+        await this.appendEvent(turnId, 'reasoning.delta', this.normalizePayload({ delta }));
+        await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: delta, isReasoning: true }));
         return;
       }
       case 'turn.approval.requested': {
@@ -397,7 +415,6 @@ export class TurnsService implements OnModuleInit {
         return;
       }
       case 'plan.updated':
-      case 'reasoning.delta':
       case 'diff.updated':
       case 'tool.started':
       case 'tool.output':
@@ -412,12 +429,17 @@ export class TurnsService implements OnModuleInit {
         const ratio = readFiniteNumber(payload.remainingRatio);
         const remainingTokens = readFiniteNumber(payload.remainingTokens);
         const windowTokens = readFiniteNumber(payload.modelContextWindow);
+        const hasAnyUsageSignal = ratio !== null || remainingTokens !== null || windowTokens !== null;
+        if (!hasAnyUsageSignal) {
+          await this.appendEvent(turnId, type, this.normalizePayload(payload));
+          return;
+        }
         await this.prisma.turn.update({
           where: { id: turnId },
           data: {
-            contextRemainingRatio: ratio,
-            contextRemainingTokens: remainingTokens === null ? null : Math.max(0, Math.round(remainingTokens)),
-            contextWindowTokens: windowTokens === null ? null : Math.max(0, Math.round(windowTokens)),
+            contextRemainingRatio: ratio === null ? undefined : ratio,
+            contextRemainingTokens: remainingTokens === null ? undefined : Math.max(0, Math.round(remainingTokens)),
+            contextWindowTokens: windowTokens === null ? undefined : Math.max(0, Math.round(windowTokens)),
             contextUpdatedAt: new Date(),
           },
         });
@@ -434,11 +456,19 @@ export class TurnsService implements OnModuleInit {
         }
 
         await this.prisma.$transaction(async (tx) => {
+          const assistantContentFromEvents = await this.collectAssistantDeltaContent(tx, turnId);
+          const assistantContent =
+            assistantContentFromEvents.full.length > 0
+              ? assistantContentFromEvents.nonReasoning.length > 0
+                ? assistantContentFromEvents.full
+                : `${assistantContentFromEvents.full}${content}`
+              : content;
+          const normalizedAssistantContent = ensureBalancedThinkTags(assistantContent);
           const assistantMessage = await tx.message.create({
             data: {
               sessionId: turn.sessionId,
               role: 'assistant',
-              content,
+              content: normalizedAssistantContent,
             },
           });
 
@@ -453,7 +483,7 @@ export class TurnsService implements OnModuleInit {
           });
         });
 
-        await this.appendEvent(turnId, 'turn.completed', this.normalizePayload({}));
+        await this.appendEvent(turnId, 'turn.completed', this.normalizePayload(payload));
         return;
       }
       case 'turn.cancelled': {
@@ -461,7 +491,7 @@ export class TurnsService implements OnModuleInit {
           return;
         }
         await this.prisma.$transaction(async (tx) => {
-          const assistantContent = await this.collectAssistantDeltaContent(tx, turnId);
+          const assistantContent = ensureBalancedThinkTags((await this.collectAssistantDeltaContent(tx, turnId)).full);
           const assistantMessage =
             assistantContent.length > 0
               ? await tx.message.create({
@@ -524,7 +554,26 @@ export class TurnsService implements OnModuleInit {
     return JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue;
   }
 
-  private async collectAssistantDeltaContent(tx: Prisma.TransactionClient, turnId: string): Promise<string> {
+  private async openReasoningBlockIfNeeded(turnId: string): Promise<void> {
+    if (this.reasoningOpenTurns.has(turnId)) {
+      return;
+    }
+    this.reasoningOpenTurns.add(turnId);
+    await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: '<think>', isReasoning: true }));
+  }
+
+  private async closeReasoningBlockIfOpen(turnId: string): Promise<void> {
+    if (!this.reasoningOpenTurns.has(turnId)) {
+      return;
+    }
+    this.reasoningOpenTurns.delete(turnId);
+    await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: '</think>', isReasoning: true }));
+  }
+
+  private async collectAssistantDeltaContent(
+    tx: Prisma.TransactionClient,
+    turnId: string,
+  ): Promise<{ full: string; nonReasoning: string }> {
     const deltaEvents = await tx.event.findMany({
       where: {
         turnId,
@@ -536,16 +585,23 @@ export class TurnsService implements OnModuleInit {
       },
     });
     if (deltaEvents.length === 0) {
-      return '';
+      return { full: '', nonReasoning: '' };
     }
-    const chunks: string[] = [];
+    const fullChunks: string[] = [];
+    const nonReasoningChunks: string[] = [];
     for (const event of deltaEvents) {
-      const text = extractAssistantDeltaText(event.payload);
+      const { text, isReasoning } = extractAssistantDelta(event.payload);
       if (text.length > 0) {
-        chunks.push(text);
+        fullChunks.push(text);
+        if (!isReasoning) {
+          nonReasoningChunks.push(text);
+        }
       }
     }
-    return chunks.join('');
+    return {
+      full: fullChunks.join(''),
+      nonReasoning: nonReasoningChunks.join(''),
+    };
   }
 
   private async reconcileInFlightTurnsOnStartup(): Promise<void> {
@@ -697,12 +753,28 @@ function readFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function extractAssistantDeltaText(payload: Prisma.JsonValue): string {
+function extractAssistantDelta(payload: Prisma.JsonValue): { text: string; isReasoning: boolean } {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    return '';
+    return { text: '', isReasoning: false };
   }
-  const text = (payload as Record<string, unknown>).text;
-  return typeof text === 'string' ? text : '';
+  const record = payload as Record<string, unknown>;
+  const text = record.text;
+  return {
+    text: typeof text === 'string' ? text : '',
+    isReasoning: record.isReasoning === true,
+  };
+}
+
+function ensureBalancedThinkTags(content: string): string {
+  if (!content.includes('<think>')) {
+    return content;
+  }
+  const openCount = (content.match(/<think>/gi) ?? []).length;
+  const closeCount = (content.match(/<\/think>/gi) ?? []).length;
+  if (openCount <= closeCount) {
+    return content;
+  }
+  return `${content}${'</think>'.repeat(openCount - closeCount)}`;
 }
 
 function normalizeJsonRecord(value: Prisma.JsonValue | null): Record<string, unknown> | null {
@@ -778,9 +850,17 @@ function buildEffectiveRuntimeConfig(
   }
   if (typeof payload.sandbox === 'string' && payload.sandbox.trim().length > 0) {
     runtime.sandbox = payload.sandbox.trim();
+  } else if (payload.sandbox && typeof payload.sandbox === 'object' && !Array.isArray(payload.sandbox)) {
+    runtime.sandbox = JSON.parse(JSON.stringify(payload.sandbox)) as Record<string, unknown>;
   }
   if (typeof payload.approvalPolicy === 'string' && payload.approvalPolicy.trim().length > 0) {
     runtime.approvalPolicy = payload.approvalPolicy.trim();
+  }
+  if (typeof payload.permissionMode === 'string' && payload.permissionMode.trim().length > 0) {
+    runtime.permissionMode = payload.permissionMode.trim();
+  }
+  if (payload.allowDangerouslySkipPermissions === true) {
+    runtime.allowDangerouslySkipPermissions = true;
   }
   if (Object.keys(runtime).length === 0) {
     return Prisma.JsonNull;
