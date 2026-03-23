@@ -26,7 +26,7 @@ docker compose -f "$COMPOSE_FILE" run --rm \
     pnpm install --no-frozen-lockfile --reporter=append-only &&
     pnpm --filter @agentwaypoint/api prisma:generate &&
     if [ \"\${CI:-}\" = \"true\" ]; then
-      pnpm --filter @agentwaypoint/api prisma migrate deploy;
+      pnpm --filter @agentwaypoint/api prisma:migrate:deploy;
     else
       pnpm --filter @agentwaypoint/api prisma:migrate:dev;
     fi
