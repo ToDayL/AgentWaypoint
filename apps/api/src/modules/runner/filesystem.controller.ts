@@ -40,6 +40,7 @@ export class FilesystemController {
         data: await this.runnerAdapter.listWorkspaceTree({
           path: input.path,
           limit: input.limit,
+          includeHidden: input.includeHidden,
         }),
       };
     } catch (error: unknown) {

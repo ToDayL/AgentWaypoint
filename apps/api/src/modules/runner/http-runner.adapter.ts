@@ -375,6 +375,7 @@ export class HttpRunnerAdapter implements RunnerAdapter {
     const query = new URLSearchParams({
       path: input.path,
       limit: String(input.limit ?? 200),
+      includeHidden: input.includeHidden ? 'true' : 'false',
     });
     const response = await this.request({
       method: 'GET',

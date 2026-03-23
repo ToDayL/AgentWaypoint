@@ -1814,7 +1814,7 @@ export default function HomePage() {
     }
     try {
       const response = await apiRequest<{ data: WorkspaceTreeEntry[] }>(
-        `/api/fs/tree?${new URLSearchParams({ path: normalizedPath, limit: '200' }).toString()}`,
+        `/api/fs/tree?${new URLSearchParams({ path: normalizedPath, limit: '200', includeHidden: 'true' }).toString()}`,
         {
           method: 'GET',
         },

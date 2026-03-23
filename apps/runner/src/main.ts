@@ -141,7 +141,8 @@ const server = createServer(async (request, response) => {
         throw new Error('path is required');
       }
       const limit = Number.parseInt(url.searchParams.get('limit') ?? '200', 10);
-      const entries = await filesystemBackend.listWorkspaceTree(treePath, limit);
+      const includeHidden = (url.searchParams.get('includeHidden') ?? '').trim().toLowerCase() === 'true';
+      const entries = await filesystemBackend.listWorkspaceTree(treePath, limit, includeHidden);
       sendJson(response, 200, { data: entries });
       return;
     }

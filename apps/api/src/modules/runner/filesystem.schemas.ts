@@ -8,6 +8,7 @@ export const WorkspaceSuggestionQuerySchema = z.object({
 export const WorkspaceTreeQuerySchema = z.object({
   path: z.string().trim().min(1).max(4096),
   limit: z.coerce.number().int().min(1).max(500).optional(),
+  includeHidden: z.coerce.boolean().optional(),
 });
 
 export const WorkspaceFileQuerySchema = z.object({
