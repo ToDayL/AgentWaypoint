@@ -1,103 +1,88 @@
 # Claude Backend Implementation Checklist
 
-Last updated: 2026-03-21
+Last updated: 2026-03-23
 
-## Checklist
+## Core Delivery
 
 - [x] 1. API models contract upgrade
-  - [x] Add `backend` query support to `GET /api/models?backend=...`.
-  - [x] Add `backend` field to `AvailableModel` response items.
-  - [x] Verification:
-    - [x] `curl -k "https://127.0.0.1:3000/api/models?backend=codex"` returns only codex models.
-    - [x] Every model item includes `backend`.
+  - Add `backend` query support to `GET /api/models?backend=...`
+  - Add `backend` field to `AvailableModel` response items
 
-- [x] 2. Web project form backend-driven model loading (moved earlier)
-  - [x] Select backend first in create/edit project flow.
-  - [x] Query model list by selected backend.
-  - [x] Default selected model = `isDefault` or first model.
-  - [x] Verification:
-    - [x] Switching backend refreshes model list.
-    - [x] Submit stores exact `project.backendConfig` (`model + executionMode`).
+- [x] 2. Web project form backend-driven model loading
+  - Select backend first in create/edit project flow
+  - Query model list by selected backend
+  - Default model = first `isDefault`, else first model
 
 - [x] 3. Project schema validation for claude
-  - [x] Add `backend=claude` validation in `projects.schemas.ts`.
-  - [x] Require `backendConfig` fields: `model + executionMode`.
-  - [x] Verification:
-    - [x] Create claude project missing fields => `400`.
-    - [x] Create claude project with complete fields => `200/201`.
+  - `backend=claude` requires `backendConfig.model + backendConfig.executionMode`
 
-- [ ] 4. Runner claude backend skeleton + routing
-  - [ ] Add `claude-backend` module skeleton.
-  - [ ] Route turn/thread endpoints by backend (`codex/mock/claude`).
-  - [ ] Verification:
-    - [ ] `backend=claude` start request returns `202 accepted` (not unsupported backend).
+- [x] 4. Runner claude backend skeleton + routing
+  - Route turns/thread endpoints by backend (`codex` / `claude` / `mock`)
 
-- [ ] 5. Claude minimal turn loop (single query + streaming input)
-  - [ ] One AgentWaypoint turn starts one `query(...)`.
-  - [ ] Support initial user input only in this step.
-  - [ ] Map minimal events:
-    - [ ] `turn.started`
-    - [ ] `assistant.delta`
-    - [ ] `turn.completed`
-  - [ ] Verification:
-    - [ ] `/api/turns/:id/stream` receives events in order.
-    - [ ] Final turn status = `completed`.
+- [x] 5. Claude turn minimal loop
+  - One turn uses one `query(...)`
+  - Initial input + streaming output mapped to normalized events
 
-- [ ] 6. Persist effective config on `turn.started`
-  - [ ] Include `model/executionMode/cwd` in `turn.started` payload.
-  - [ ] Persist to `effectiveBackendConfig` + `effectiveRuntimeConfig` in API.
-  - [ ] Verification:
-    - [ ] `GET /api/turns/:id` returns both fields non-null and correct.
+- [x] 6. Turn effective config persistence
+  - Persist `effectiveBackendConfig` and `effectiveRuntimeConfig` from `turn.started`
 
-- [ ] 7. Steer via same streaming input channel
-  - [ ] Implement steer as append to active input queue of the same query.
-  - [ ] Use interrupt control only when needed by runtime state.
-  - [ ] Verification:
-    - [ ] Steering a running turn yields new `assistant.delta` output.
-    - [ ] No second turn is created.
+- [x] 7. Steer on same query stream
+  - Append steer input to active input queue
+  - No steer-triggered new turn/query
 
-- [ ] 8. Steer FIFO + terminal protection
-  - [ ] Serialize steer requests FIFO per turn.
-  - [ ] Terminal turn steer returns `409`.
-  - [ ] Verification:
-    - [ ] Two rapid steers apply in order.
-    - [ ] Steer after completion returns `409`.
+- [x] 8. Steer terminal protection
+  - Terminal turns reject steer (`409` at API level)
 
-- [ ] 9. Approval flow (requested/resolved)
-  - [ ] Map Claude permission requests to `turn.approval.requested`.
-  - [ ] Resolve via approval endpoint and emit `turn.approval.resolved`.
-  - [ ] Verification:
-    - [ ] Turn enters `waiting_approval`.
-    - [ ] Approval call moves turn back to `running` or terminal.
+- [x] 9. Approval flow
+  - Map Claude permission request to `turn.approval.requested`
+  - Resolve via approval endpoint and emit `turn.approval.resolved`
 
-- [ ] 10. Session thread id generalization
-  - [ ] Add `Session.backendThreadId`.
-  - [ ] Backfill from existing `codexThreadId`.
-  - [ ] Switch code read/write to `backendThreadId`.
-  - [ ] Verification:
-    - [ ] Old sessions continue working.
-    - [ ] New turn/fork/compact uses `backendThreadId`.
-    - [ ] Regression tests pass.
+- [x] 10. Session thread id generalization
+  - Use `Session.backendThreadId`
+  - Remove codex-specific active schema field
 
-- [ ] 11. Fork behavior (conversation branch only)
-  - [ ] Implement/confirm Claude fork as history/context branch.
-  - [ ] Keep no-filesystem-snapshot semantics.
-  - [ ] Verification:
-    - [ ] `POST /api/sessions/:id/fork` returns new session.
-    - [ ] History exists in forked session.
-    - [ ] Workspace path unchanged.
+- [x] 11. Fork behavior
+  - Claude fork via SDK `forkSession`
+  - Conversation branch semantics (no filesystem snapshot)
 
-- [ ] 12. E2E and release gate
-  - [ ] Add/update API e2e for Claude flows:
-    - [ ] project create
-    - [ ] session create
-    - [ ] turn start
-    - [ ] steer
-    - [ ] approval
-    - [ ] fork
-  - [ ] Run validation suite.
-  - [ ] Verification:
-    - [ ] `./scripts/test-api-e2e.sh` passes.
-    - [ ] `corepack pnpm --filter @agentwaypoint/api typecheck` passes.
-    - [ ] `corepack pnpm --filter @agentwaypoint/runner typecheck` passes.
-    - [ ] `corepack pnpm --filter @agentwaypoint/web typecheck` passes.
+- [x] 12. E2E and typecheck gates
+  - `./scripts/test-api-e2e.sh`
+  - `corepack pnpm --filter @agentwaypoint/{api,runner,web} typecheck`
+
+## Additional Implemented Items
+
+- [x] 13. Claude model discovery switched to SDK
+  - Use `query(...).supportedModels()` for `/api/models?backend=claude`
+
+- [x] 14. Session reuse for multi-turn
+  - Start/resume turns using stored `backendThreadId`
+
+- [x] 15. Cancel support
+  - `POST /api/turns/:id/cancel` maps to Claude query interrupt + turn finalization
+
+- [x] 16. Timeline parity enhancements
+  - Reasoning deltas emitted (`reasoning.delta`)
+  - Tool lifecycle events enriched (`tool.started/output/completed`)
+  - Bash output forwarded when available
+
+- [x] 17. Diff payload compatibility
+  - Build frontend-compatible aggregated turn diff payload from Claude tool outputs
+  - Aggregate multiple diff updates by file within a turn
+
+- [x] 18. Context remaining estimation
+  - Fetch usage via `/context` and emit `thread.token_usage.updated`
+
+- [x] 19. Manual compact support
+  - Compact by resuming thread and sending `/Compact`
+
+- [x] 20. Slash-command suggestions (Claude-only)
+  - Populate command suggestions from `supportedCommands()`
+  - Only trigger when user input starts with `/`
+
+- [x] 21. Thread close cleanup
+  - Delete Claude session file under `~/.claude/projects/<encoded-cwd>/<threadId>.jsonl`
+
+## Notes
+
+- No documented TS V1 `deleteSession` API is currently used; close-thread is file-delete based.
+- Claude runtime semantics are configured per project via `backendConfig` (`model + executionMode`), not via many behavior env toggles.

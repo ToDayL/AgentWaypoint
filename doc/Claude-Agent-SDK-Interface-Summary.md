@@ -1,382 +1,132 @@
 # Claude Agent SDK Documentation Research and Interface Inventory
 
-Last updated: 2026-03-21
+Last updated: 2026-03-23
 
 ## 1. Scope and Outcome
 
-This summary is based on official Anthropic Agent SDK documentation (TypeScript V1, TypeScript V2 preview, Python reference, and migration/overview pages), focused on implementation-level integration details.
+This summary is based on official Anthropic Agent SDK documentation, focused on integration details required by AgentWaypoint.
 
 Key points:
-- Claude Code SDK has been renamed to Claude Agent SDK.
+- Claude Code SDK was renamed to Claude Agent SDK.
 - TypeScript package: `@anthropic-ai/claude-agent-sdk`
-- Python package: `claude-agent-sdk` (import path `claude_agent_sdk`)
-- TypeScript currently exposes both:
-  - V1: async-generator `query()` model
-  - V2 preview: session-based `send()` / `stream()` model
+- TypeScript currently provides:
+  - V1 `query()` async-iterable model (used in our implementation)
+  - V2 preview session APIs (`unstable_v2_*`)
 
 ## 2. TypeScript SDK (V1) Core Interfaces
 
-Install: `npm install @anthropic-ai/claude-agent-sdk`
+Install:
+- `npm install @anthropic-ai/claude-agent-sdk`
 
-### 2.1 Top-level Functions (Core)
+### 2.1 Core functions
 
 - `query({ prompt, options? }) => Query`
-  - `prompt`: `string | AsyncIterable<SDKUserMessage>`
-  - `options`: `Options`
-  - Returns a stream-capable `Query` object (async iterable)
-
 - `tool(name, description, inputSchema, handler, extras?)`
-  - Defines a type-safe MCP tool
-
 - `createSdkMcpServer({ name, version?, tools? })`
-  - Creates an in-process MCP server
-
 - `listSessions(options?) => Promise<SDKSessionInfo[]>`
-  - Lists prior sessions (filterable)
-
 - `getSessionMessages(sessionId, options?) => Promise<SessionMessage[]>`
-  - Reads session history
+- `forkSession(sessionId, options?) => Promise<{ sessionId: string, ... }>`
 
-### 2.2 `Options` (Important Fields)
+### 2.2 Common `Options` fields used by us
 
-The official type has many fields; commonly used fields include:
-- Model and reasoning: `model`, `fallbackModel`, `thinking`, `effort`
-- Session control: `resume`, `maxTurns`, `forkSession`
-- Permissions and tools: `permissionMode`, `canUseTool`, `allowedTools`, `disallowedTools`
-- Prompt/config loading: `systemPrompt`, `settingSources`
-- Runtime environment: `cwd`, `additionalDirectories`, `env`
-- Extensibility: `mcpServers`, `agents`, `hooks`, `plugins`
-- Security/sandbox: `sandbox`
+- Session and turn control:
+  - `resume`, `sessionId`, `maxTurns`, `forkSession`
+- Model/config sources:
+  - `model`, `systemPrompt`, `settingSources`
+- Streaming behavior:
+  - `includePartialMessages`
+- Permissions and tools:
+  - `permissionMode`, `canUseTool`
+- Runtime:
+  - `cwd`, `sandbox`
+- Hooks:
+  - `hooks`
 
-### 2.3 Message Flow and Type Groups (Official)
+### 2.3 Discovery helpers on Query object
 
-TS V1 types are documented in these groups:
-- Core config types: `Options`, `AgentDefinition`, `McpServerConfig`, `SdkPluginConfig`, etc.
-- Message types: `SDKMessage`, `SDKAssistantMessage`, `SDKUserMessage`, `SDKResultMessage`, `SDKSystemMessage`, etc.
-- Hook types: `HookEvent`, `HookCallback`, `HookInput`, `HookJSONOutput`, etc.
-- Tool input types: built-in tool schemas under `ToolInputSchemas`
-- Tool output types: built-in tool schemas under `ToolOutputSchemas`
-- Permission types: `PermissionUpdate`, `PermissionRuleValue`, etc.
-- Misc types: `ModelInfo`, `McpServerStatus`, `ModelUsage`, `SDKRateLimitEvent`, `SandboxSettings`, etc.
+Using a query stream, SDK exposes:
+- `supportedModels()`
+- `supportedCommands()`
 
-Built-in tools (input/output documented):
-- `Agent`
-- `AskUserQuestion`
-- `Bash`
-- `Edit`
-- `Read`
-- `Write`
-- `Glob`
-- `Grep`
-- `TaskStop`
-- `NotebookEdit`
-- `WebFetch`
-- `WebSearch`
-- `TodoWrite`
-- `ExitPlanMode`
-- `ListMcpResources`
-- `ReadMcpResource`
-- `Config`
-- `EnterWorktree`
+Current implementation usage:
+- Model list: `settingSources: ['user']`
+- Slash command list: `settingSources: ['user', 'project', 'local']` with workspace `cwd`
 
-## 3. TypeScript SDK (V2 Preview) Interfaces
+## 3. TypeScript SDK (V2 Preview)
 
-V2 is an unstable preview and may change.
+V2 is preview/unstable and not used in current backend.
 
-Core API:
-- `unstable_v2_createSession(options) => SDKSession`
-- `unstable_v2_resumeSession(sessionId, options) => SDKSession`
-- `unstable_v2_prompt(prompt, options) => Promise<SDKResultMessage>`
+Core APIs:
+- `unstable_v2_createSession(options)`
+- `unstable_v2_resumeSession(sessionId, options)`
+- `unstable_v2_prompt(prompt, options)`
 
-`SDKSession` interface:
-- `sessionId` (readonly)
+`SDKSession` exposes:
 - `send(message)`
 - `stream()`
 - `close()`
 
-V2 does not yet expose all V1 capabilities (for some advanced flows, use V1).
+## 4. Python SDK (Reference Only)
 
-## 4. Python SDK Core Interfaces
+Install:
+- `pip install claude-agent-sdk`
 
-Install: `pip install claude-agent-sdk`
+Useful parity concepts:
+- `query(...)`
+- `list_sessions(...)`
+- `get_session_messages(...)`
+- `fork_session` (option)
+- `interrupt()` on client abstractions
 
-### 4.1 Top-level Functions
+## 5. Message/Type Families Worth Tracking
 
-- `query(prompt, options=None, transport=None) -> AsyncIterator[Message]`
-  - Starts a new session on each call
+From official TS reference:
+- Message types:
+  - `SDKMessage`, `SDKAssistantMessage`, `SDKPartialAssistantMessage`, `SDKSystemMessage`, `SDKResultMessage`, etc.
+- Usage and limits:
+  - `ModelUsage`, `SDKRateLimitEvent`
+- Permissions:
+  - `PermissionMode`, `PermissionResult`, `PermissionUpdate`
+- Tools:
+  - built-in tool input/output schemas for `Bash`, `Read`, `Write`, `Edit`, `MultiEdit`-related flows
 
-- `tool(name, description, input_schema, annotations=None)`
-  - MCP tool decorator
+## 6. Integration Notes Confirmed by Implementation
 
-- `create_sdk_mcp_server(name, version="1.0.0", tools=None)`
+### 6.1 Long-lived turn stream
 
-- `list_sessions(directory=None, limit=None, include_worktrees=True) -> list[SDKSessionInfo]`
+A single turn can be implemented as one long-lived `query(...)` call by providing `prompt` as `AsyncIterable<SDKUserMessage>`.
+- Initial user message enters the queue at turn start.
+- Steer appends later user messages to the same queue.
+- No extra `query()` call is needed for steer.
 
-- `get_session_messages(session_id, directory=None, limit=None, offset=0) -> list[SessionMessage]`
+### 6.2 Approval callback shape constraints
 
-### 4.2 `ClaudeSDKClient` (Multi-turn Sessions)
+For `canUseTool` return values:
+- `allow` branch requires `updatedInput` in our validated flow.
+- `deny` branch should include `message`.
+- `acceptForSession` can include `updatedPermissions` when SDK suggestions are present.
 
-`ClaudeSDKClient` is intended for persistent multi-turn conversations.
+### 6.3 Session close limitation
 
-Documented methods:
-- `connect(prompt=None)`
-- `query(prompt, session_id="default")`
-- `receive_messages()`
-- `receive_response()`
-- `interrupt()`
-- `set_permission_mode(mode)`
-- `set_model(model=None)`
-- `rewind_files(user_message_id)`
-- `get_mcp_status()`
-- `add_mcp_server(name, config)`
-- `remove_mcp_server(name)`
-- `get_server_info()`
-- `disconnect()`
+Current TS V1 surface does not provide a documented direct `deleteSession` API.
+Our close-thread behavior therefore uses local Claude session file deletion by session id + encoded cwd.
 
-### 4.3 `ClaudeAgentOptions` (Important Fields)
+### 6.4 Context usage extraction
 
-Common fields (aligned conceptually with TS):
-- `model`, `fallback_model`, `thinking`, `effort`
-- `permission_mode`, `can_use_tool`, `allowed_tools`, `disallowed_tools`
-- `system_prompt`, `setting_sources`
-- `cwd`, `add_dirs`, `env`
-- `mcp_servers`, `agents`, `hooks`, `plugins`
-- `resume`, `max_turns`, `fork_session`
-- `sandbox`
+`SDKResultMessage` carries usage data, but context-window ratio is not always directly available in one canonical field.
+Current implementation computes context remaining via `/context` command output parsing (`Tokens: used / total`).
 
-Python also documents complete message types, hook types, permission types, content blocks, error types, and sandbox types.
+## 7. Practical Guidance for Runner Integrations
 
-## 5. Full Interface Index (From Official Reference TOCs)
+- Use V1 `query()` as baseline unless V2 becomes stable and feature-complete.
+- Keep API layer backend-agnostic; parse provider payloads only in runner backend.
+- Treat SDK message payloads strictly; do not infer undocumented fields.
 
-This section is for completeness so interface/type names are not missed. For exact fields and shape details, use official pages.
-
-### 5.1 TypeScript V1 TOC Index
-
-- Functions
-  - `query`
-  - `tool`
-  - `createSdkMcpServer`
-  - `listSessions`
-  - `getSessionMessages`
-- Core/Config Types
-  - `Options`
-  - `Query object`
-  - `SDKControlInitializeResponse`
-  - `AgentDefinition`
-  - `AgentMcpServerSpec`
-  - `SettingSource`
-  - `PermissionMode`
-  - `CanUseTool`
-  - `PermissionResult`
-  - `ToolConfig`
-  - `McpServerConfig`
-  - `SdkPluginConfig`
-- Message Types
-  - `SDKMessage`
-  - `SDKAssistantMessage`
-  - `SDKUserMessage`
-  - `SDKUserMessageReplay`
-  - `SDKResultMessage`
-  - `SDKSystemMessage`
-  - `SDKPartialAssistantMessage`
-  - `SDKCompactBoundaryMessage`
-  - `SDKPermissionDenial`
-- Hook Types
-  - `HookEvent`
-  - `HookCallback`
-  - `HookCallbackMatcher`
-  - `HookInput`
-  - `BaseHookInput`
-  - `HookJSONOutput`
-- Tool Input Types (`ToolInputSchemas`)
-  - `Agent`
-  - `AskUserQuestion`
-  - `Bash`
-  - `TaskOutput`
-  - `Edit`
-  - `Read`
-  - `Write`
-  - `Glob`
-  - `Grep`
-  - `TaskStop`
-  - `NotebookEdit`
-  - `WebFetch`
-  - `WebSearch`
-  - `TodoWrite`
-  - `ExitPlanMode`
-  - `ListMcpResources`
-  - `ReadMcpResource`
-  - `Config`
-  - `EnterWorktree`
-- Tool Output Types (`ToolOutputSchemas`)
-  - `Agent`
-  - `AskUserQuestion`
-  - `Bash`
-  - `Edit`
-  - `Read`
-  - `Write`
-  - `Glob`
-  - `Grep`
-  - `TaskStop`
-  - `NotebookEdit`
-  - `WebFetch`
-  - `WebSearch`
-  - `TodoWrite`
-  - `ExitPlanMode`
-  - `ListMcpResources`
-  - `ReadMcpResource`
-  - `Config`
-  - `EnterWorktree`
-- Permission Types
-  - `PermissionUpdate`
-  - `PermissionBehavior`
-  - `PermissionUpdateDestination`
-  - `PermissionRuleValue`
-- Other Types
-  - `ApiKeySource`
-  - `SdkBeta`
-  - `SlashCommand`
-  - `ModelInfo`
-  - `AgentInfo`
-  - `McpServerStatus`
-  - `McpServerStatusConfig`
-  - `AccountInfo`
-  - `ModelUsage`
-  - `ConfigScope`
-  - `NonNullableUsage`
-  - `Usage`
-  - `CallToolResult`
-  - `ThinkingConfig`
-  - `SpawnedProcess`
-  - `SpawnOptions`
-  - `McpSetServersResult`
-  - `RewindFilesResult`
-  - `SDKStatusMessage`
-  - `SDKTaskNotificationMessage`
-  - `SDKToolUseSummaryMessage`
-  - `SDKHookStartedMessage`
-  - `SDKHookProgressMessage`
-  - `SDKHookResponseMessage`
-  - `SDKToolProgressMessage`
-  - `SDKAuthStatusMessage`
-  - `SDKTaskStartedMessage`
-  - `SDKTaskProgressMessage`
-  - `SDKFilesPersistedEvent`
-  - `SDKRateLimitEvent`
-  - `SDKPromptSuggestionMessage`
-  - `AbortError`
-  - `SandboxSettings`
-  - `SandboxNetworkConfig`
-  - `SandboxFilesystemConfig`
-
-### 5.2 Python TOC Index
-
-- Functions
-  - `query`
-  - `tool`
-  - `create_sdk_mcp_server`
-  - `list_sessions`
-  - `get_session_messages`
-- Classes
-  - `ClaudeSDKClient`
-  - `Transport`
-- Core Types
-  - `ClaudeAgentOptions`
-  - `OutputFormat`
-  - `SystemPromptPreset`
-  - `SettingSource`
-  - `AgentDefinition`
-  - `PermissionMode`
-  - `CanUseTool`
-  - `ToolPermissionContext`
-  - `PermissionResult`
-  - `PermissionResultAllow`
-  - `PermissionResultDeny`
-  - `PermissionUpdate`
-  - `PermissionRuleValue`
-  - `ToolsPreset`
-  - `ThinkingConfig`
-  - `SdkBeta`
-  - `McpSdkServerConfig`
-  - `McpServerConfig`
-  - `McpServerStatus`
-  - `SdkPluginConfig`
-- Message Types
-  - `Message`
-  - `UserMessage`
-  - `AssistantMessage`
-  - `AssistantMessageError`
-  - `SystemMessage`
-  - `ResultMessage`
-  - `StreamEvent`
-  - `TaskStartedMessage`
-  - `TaskUsage`
-  - `TaskProgressMessage`
-  - `TaskNotificationMessage`
-- Content Block Types
-  - `ContentBlock`
-  - `TextBlock`
-  - `ThinkingBlock`
-  - `ToolUseBlock`
-  - `ToolResultBlock`
-- Error Types
-  - `ClaudeSDKError`
-  - `CLINotFoundError`
-  - `CLIConnectionError`
-  - `ProcessError`
-  - `CLIJSONDecodeError`
-- Hook Types
-  - `HookEvent`
-  - `HookCallback`
-  - `HookContext`
-  - `HookMatcher`
-  - `HookInput`
-  - `BaseHookInput`
-  - `PreToolUseHookInput`
-  - `PostToolUseHookInput`
-  - `PostToolUseFailureHookInput`
-  - `UserPromptSubmitHookInput`
-  - `StopHookInput`
-  - `SubagentStopHookInput`
-  - `PreCompactHookInput`
-  - `NotificationHookInput`
-  - `SubagentStartHookInput`
-  - `PermissionRequestHookInput`
-  - `HookJSONOutput`
-- Tool Input/Output Types (Built-in)
-  - `Agent`
-  - `AskUserQuestion`
-  - `Bash`
-  - `Edit`
-  - `Read`
-  - `Write`
-  - `Glob`
-  - `Grep`
-  - `NotebookEdit`
-  - `WebFetch`
-  - `WebSearch`
-  - `TodoWrite`
-  - `BashOutput`
-  - `KillBash`
-  - `ExitPlanMode`
-  - `ListMcpResources`
-  - `ReadMcpResource`
-- Sandbox
-  - `SandboxSettings`
-  - `SandboxNetworkConfig`
-  - `SandboxIgnoreViolations`
-
-## 6. Practical Guidance for Our Runner Backend
-
-- Implement against TS/Python V1 semantics first (stable and full-surface).
-- Use strict allow-listed mapping for incoming options (do not blindly passthrough unknown keys).
-- Keep session, permission, MCP, and sandbox as backend-agnostic abstractions so multiple backends can coexist cleanly.
-
-## 7. Official Sources
+## 8. Official Sources
 
 - TypeScript SDK reference (V1): https://platform.claude.com/docs/en/agent-sdk/typescript
-- TypeScript SDK V2 (preview): https://platform.claude.com/docs/en/agent-sdk/typescript-v2-preview
+- TypeScript SDK V2 preview: https://platform.claude.com/docs/en/agent-sdk/typescript-v2-preview
 - Python SDK reference: https://platform.claude.com/docs/en/agent-sdk/python
-- Agent SDK migration guide: https://platform.claude.com/docs/en/agent-sdk/migration-guide
-- Agent SDK overview: https://platform.claude.com/docs/en/agent-sdk/overview
-- TypeScript SDK repository: https://github.com/anthropics/claude-agent-sdk-typescript
+- Migration guide: https://platform.claude.com/docs/en/agent-sdk/migration-guide
+- Overview: https://platform.claude.com/docs/en/agent-sdk/overview
+- TS SDK repository: https://github.com/anthropics/claude-agent-sdk-typescript
