@@ -83,6 +83,7 @@ export type WorkspaceSuggestionInput = {
 export type WorkspaceTreeInput = {
   path: string;
   limit?: number;
+  includeHidden?: boolean;
 };
 
 export type WorkspaceTreeEntry = {

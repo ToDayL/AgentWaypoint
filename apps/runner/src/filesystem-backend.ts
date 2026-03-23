@@ -70,14 +70,18 @@ export class FilesystemBackend {
       .slice(0, sanitizedLimit);
   }
 
-  async listWorkspaceTree(inputPath: string, limit = 200): Promise<Array<{ name: string; path: string; isDirectory: boolean }>> {
+  async listWorkspaceTree(
+    inputPath: string,
+    limit = 200,
+    includeHidden = false,
+  ): Promise<Array<{ name: string; path: string; isDirectory: boolean }>> {
     const absolutePath = await this.assertExistingWorkspaceDirectory(inputPath.trim());
     const sanitizedLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 500) : 200;
 
     const entries = await readdir(absolutePath, { withFileTypes: true, encoding: 'utf8' });
     const resolvedEntries = await Promise.all(
       entries
-        .filter((entry) => !entry.name.startsWith('.'))
+        .filter((entry) => includeHidden || !entry.name.startsWith('.'))
         .map(async (entry) => {
           const entryPath = path.join(absolutePath, entry.name);
           let isDirectory = entry.isDirectory();

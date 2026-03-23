@@ -272,10 +272,11 @@ export class MockRunnerAdapter implements RunnerAdapter {
   async listWorkspaceTree(input: WorkspaceTreeInput): Promise<WorkspaceTreeEntry[]> {
     const absolutePath = path.resolve(expandHomeToken(input.path.trim()));
     const limit = Number.isFinite(input.limit) ? Math.min(Math.max(Math.trunc(input.limit ?? 200), 1), 500) : 200;
+    const includeHidden = input.includeHidden === true;
     const entries = await readdir(absolutePath, { withFileTypes: true, encoding: 'utf8' });
     const resolvedEntries = await Promise.all(
       entries
-        .filter((entry) => !entry.name.startsWith('.'))
+        .filter((entry) => includeHidden || !entry.name.startsWith('.'))
         .map(async (entry) => {
           const entryPath = path.join(absolutePath, entry.name);
           let isDirectory = entry.isDirectory();
