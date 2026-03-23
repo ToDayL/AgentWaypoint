@@ -17,6 +17,7 @@ import type {
   ModelListItem,
   ResolveApprovalBody,
   RunnerEventType,
+  SkillListItem,
   StartTurnBody,
 } from './types.js';
 
@@ -75,6 +76,37 @@ export class ClaudeBackend {
           isDefault: index === 0,
         });
       });
+      return items;
+    } finally {
+      stream.close();
+    }
+  }
+
+  async listSkills(cwd: string): Promise<SkillListItem[]> {
+    const stream = query({
+      prompt: emptyPromptStream(),
+      options: {
+        cwd,
+        settingSources: ['user', 'project', 'local'],
+      },
+    });
+    try {
+      const commands = await stream.supportedCommands();
+      const items: SkillListItem[] = [];
+      for (const command of commands) {
+        const name = typeof command.name === 'string' ? command.name.trim() : '';
+        if (!name) {
+          continue;
+        }
+        const description = typeof command.description === 'string' ? command.description.trim() : '';
+        const argumentHint = typeof command.argumentHint === 'string' ? command.argumentHint.trim() : '';
+        items.push({
+          name,
+          description: argumentHint ? `${description}${description ? ' ' : ''}${argumentHint}` : description,
+          path: '',
+          enabled: true,
+        });
+      }
       return items;
     } finally {
       stream.close();
@@ -438,12 +470,16 @@ export class ClaudeBackend {
 
         if (msg.type === 'result') {
           sawResult = true;
-          const usageSnapshot = extractContextUsageSnapshot(msg, config.model);
+          const usageSnapshot = await readContextUsageFromContextCommand({
+            threadId: activeSessionId,
+            cwd,
+            model: config.model,
+            runtimePolicy,
+          });
           if (usageSnapshot) {
             await this.deps.appendTurnEvent(turn.turnId, 'thread.token_usage.updated', {
               threadId: activeSessionId,
               turnId: turn.turnId,
-              model: usageSnapshot.model,
               modelContextWindow: usageSnapshot.modelContextWindow,
               totalTokens: usageSnapshot.totalTokens,
               remainingTokens: usageSnapshot.remainingTokens,
@@ -1541,110 +1577,148 @@ function readPatchNumber(value: unknown): number | null {
   return Math.trunc(value);
 }
 
-function extractContextUsageSnapshot(message: Record<string, unknown>, preferredModel: string | null): {
-  model: string;
+async function readContextUsageFromContextCommand(input: {
+  threadId: string;
+  cwd: string;
+  model: string | null;
+  runtimePolicy: {
+    executionMode: 'read-only' | 'safe-write' | 'yolo';
+    approvalPolicy: 'on-request' | 'never';
+    permissionMode: PermissionMode;
+    allowDangerouslySkipPermissions: boolean;
+    sandbox: SandboxSettings;
+  };
+}): Promise<{
+  modelContextWindow: number;
+  totalTokens: number;
+  remainingTokens: number;
+  remainingRatio: number;
+} | null> {
+  const stream = query({
+    prompt: '/context',
+    options: {
+      cwd: input.cwd,
+      model: input.model ?? undefined,
+      systemPrompt: {
+        type: 'preset',
+        preset: 'claude_code',
+      },
+      settingSources: ['user', 'project', 'local'],
+      includePartialMessages: true,
+      maxTurns: 1,
+      permissionMode: input.runtimePolicy.permissionMode,
+      allowDangerouslySkipPermissions: input.runtimePolicy.allowDangerouslySkipPermissions,
+      sandbox: input.runtimePolicy.sandbox,
+      resume: input.threadId,
+    },
+  });
+
+  try {
+    for await (const message of stream) {
+      if (!message || typeof message !== 'object') {
+        continue;
+      }
+      const textCandidates = extractContextTextCandidates(message as Record<string, unknown>);
+      for (const text of textCandidates) {
+        const parsed = parseContextTokenLine(text);
+        if (parsed) {
+          return parsed;
+        }
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    stream.close();
+  }
+}
+
+function extractContextTextCandidates(message: Record<string, unknown>): string[] {
+  const candidates: string[] = [];
+  if (message.type === 'stream_event') {
+    const partial = extractPartialAssistantText(message);
+    if (partial) {
+      candidates.push(partial);
+    }
+  }
+
+  if (message.type === 'system') {
+    const subtype = readNonEmptyString(message.subtype);
+    if (subtype === 'local_command_output') {
+      const content = readNonEmptyString(message.content);
+      if (content) {
+        candidates.push(content);
+      }
+    }
+  }
+
+  if (message.type === 'assistant') {
+    const assistant = extractAssistantText(message);
+    if (assistant) {
+      candidates.push(assistant);
+    }
+  }
+
+  if (message.type === 'result') {
+    const resultText = readNonEmptyString(message.result);
+    if (resultText) {
+      candidates.push(resultText);
+    }
+  }
+
+  return candidates;
+}
+
+function parseContextTokenLine(text: string): {
   modelContextWindow: number;
   totalTokens: number;
   remainingTokens: number;
   remainingRatio: number;
 } | null {
-  const modelUsageMap = readModelUsageMap(message.modelUsage);
-  if (!modelUsageMap) {
+  const match =
+    text.match(/tokens:\s*([0-9][0-9.,]*\s*[kKmM]?)\s*\/\s*([0-9][0-9.,]*\s*[kKmM]?)/i) ??
+    text.match(/\b([0-9][0-9.,]*\s*[kKmM]?)\s*\/\s*([0-9][0-9.,]*\s*[kKmM]?)\b/);
+  if (!match) {
     return null;
   }
-  const selected = selectModelUsageEntry(modelUsageMap, preferredModel);
-  if (!selected) {
+  const totalTokens = parseHumanTokenCount(match[1] ?? '');
+  const modelContextWindow = parseHumanTokenCount(match[2] ?? '');
+  if (totalTokens === null || modelContextWindow === null || modelContextWindow <= 0) {
     return null;
   }
-  const totalTokens = selected.usage.inputTokens;
-  const clampedTotal = Math.max(0, totalTokens);
-  const remainingTokens = Math.max(selected.usage.contextWindow - clampedTotal, 0);
-  const remainingRatio = selected.usage.contextWindow > 0 ? remainingTokens / selected.usage.contextWindow : 0;
-
+  const remainingTokens = Math.max(modelContextWindow - totalTokens, 0);
+  const remainingRatio = remainingTokens / modelContextWindow;
   return {
-    model: selected.model,
-    modelContextWindow: selected.usage.contextWindow,
-    totalTokens: clampedTotal,
+    modelContextWindow,
+    totalTokens,
     remainingTokens,
     remainingRatio,
   };
 }
 
-function readModelUsageMap(value: unknown): Record<string, ModelUsageSnapshot> | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+function parseHumanTokenCount(raw: string): number | null {
+  const normalized = raw.trim().toLowerCase().replace(/,/g, '');
+  if (!normalized) {
     return null;
   }
-  const raw = value as Record<string, unknown>;
-  const parsedEntries = Object.entries(raw)
-    .map(([model, usage]) => {
-      const parsed = parseModelUsage(usage);
-      return parsed ? [model, parsed] : null;
-    })
-    .filter((item): item is [string, ModelUsageSnapshot] => !!item);
-  if (parsedEntries.length === 0) {
+  const match = normalized.match(/^([0-9]+(?:\.[0-9]+)?)\s*([km])?$/);
+  if (!match) {
     return null;
   }
-  return Object.fromEntries(parsedEntries);
+  const base = Number(match[1]);
+  if (!Number.isFinite(base)) {
+    return null;
+  }
+  const unit = match[2] ?? '';
+  if (unit === 'k') {
+    return Math.round(base * 1_000);
+  }
+  if (unit === 'm') {
+    return Math.round(base * 1_000_000);
+  }
+  return Math.round(base);
 }
-
-function selectModelUsageEntry(
-  map: Record<string, ModelUsageSnapshot>,
-  preferredModel: string | null,
-): { model: string; usage: ModelUsageSnapshot } | null {
-  if (preferredModel && map[preferredModel]) {
-    return { model: preferredModel, usage: map[preferredModel] };
-  }
-  const first = Object.entries(map)[0];
-  if (!first) {
-    return null;
-  }
-  return { model: first[0], usage: first[1] };
-}
-
-function parseModelUsage(value: unknown): ModelUsageSnapshot | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null;
-  }
-  const record = value as Record<string, unknown>;
-  const inputTokens = readRequiredFiniteNumber(record, 'inputTokens');
-  const outputTokens = readRequiredFiniteNumber(record, 'outputTokens');
-  const cacheReadInputTokens = readRequiredFiniteNumber(record, 'cacheReadInputTokens');
-  const cacheCreationInputTokens = readRequiredFiniteNumber(record, 'cacheCreationInputTokens');
-  const contextWindow = readRequiredFiniteNumber(record, 'contextWindow');
-  if (
-    inputTokens === null ||
-    outputTokens === null ||
-    cacheReadInputTokens === null ||
-    cacheCreationInputTokens === null ||
-    contextWindow === null ||
-    contextWindow <= 0
-  ) {
-    return null;
-  }
-  return {
-    inputTokens,
-    outputTokens,
-    cacheReadInputTokens,
-    cacheCreationInputTokens,
-    contextWindow,
-  };
-}
-
-function readRequiredFiniteNumber(record: Record<string, unknown>, key: string): number | null {
-  const value = record[key];
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
-  }
-  return null;
-}
-
-type ModelUsageSnapshot = {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadInputTokens: number;
-  cacheCreationInputTokens: number;
-  contextWindow: number;
-};
 
 function countPatchLines(content: string): number {
   if (content.length === 0) {

@@ -800,7 +800,11 @@ async function listSkills(cwd: string | null, requestedBackend: RunnerBackend | 
     return isBackendSupported('codex') ? codexBackend.listSkills(cwd?.trim() || codexDefaultCwd) : [];
   }
 
-  if (requestedBackend === 'claude' || requestedBackend === 'mock') {
+  if (requestedBackend === 'claude') {
+    return isBackendSupported('claude') ? claudeBackend.listSkills(cwd?.trim() || process.cwd()) : [];
+  }
+
+  if (requestedBackend === 'mock') {
     return [];
   }
 

@@ -429,12 +429,17 @@ export class TurnsService implements OnModuleInit {
         const ratio = readFiniteNumber(payload.remainingRatio);
         const remainingTokens = readFiniteNumber(payload.remainingTokens);
         const windowTokens = readFiniteNumber(payload.modelContextWindow);
+        const hasAnyUsageSignal = ratio !== null || remainingTokens !== null || windowTokens !== null;
+        if (!hasAnyUsageSignal) {
+          await this.appendEvent(turnId, type, this.normalizePayload(payload));
+          return;
+        }
         await this.prisma.turn.update({
           where: { id: turnId },
           data: {
-            contextRemainingRatio: ratio,
-            contextRemainingTokens: remainingTokens === null ? null : Math.max(0, Math.round(remainingTokens)),
-            contextWindowTokens: windowTokens === null ? null : Math.max(0, Math.round(windowTokens)),
+            contextRemainingRatio: ratio === null ? undefined : ratio,
+            contextRemainingTokens: remainingTokens === null ? undefined : Math.max(0, Math.round(remainingTokens)),
+            contextWindowTokens: windowTokens === null ? undefined : Math.max(0, Math.round(windowTokens)),
             contextUpdatedAt: new Date(),
           },
         });

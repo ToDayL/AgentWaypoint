@@ -207,6 +207,7 @@ type SkillOption = {
   name: string;
   description: string;
 };
+type CommandSuggestionMode = 'codex-skill' | 'claude-slash';
 
 const DEFAULT_CODEX_MODEL = 'gpt-5-codex';
 const DEFAULT_CODEX_EXECUTION_MODE = 'safe-write';
@@ -610,7 +611,12 @@ export default function HomePage() {
     const parts = normalized.split(/[\\/]/).filter((part) => part.length > 0);
     return parts[parts.length - 1] ?? normalized;
   }, [activeWorkspacePath]);
-  const activeSkillToken = useMemo(() => findSkillTokenContext(prompt, promptCursor), [prompt, promptCursor]);
+  const commandSuggestionMode: CommandSuggestionMode = selectedProject?.backend === 'claude' ? 'claude-slash' : 'codex-skill';
+  const commandSuggestionPrefix = commandSuggestionMode === 'claude-slash' ? '/' : '$';
+  const activeSkillToken = useMemo(
+    () => findSkillTokenContext(prompt, promptCursor, commandSuggestionMode),
+    [prompt, promptCursor, commandSuggestionMode],
+  );
   const filteredSkillSuggestions = useMemo(() => {
     if (!activeSkillToken) {
       return [];
@@ -2805,7 +2811,7 @@ export default function HomePage() {
     if (!activeSkillToken) {
       return;
     }
-    const replacement = `$${skill.name} `;
+    const replacement = `${commandSuggestionPrefix}${skill.name} `;
     const nextPrompt = `${prompt.slice(0, activeSkillToken.start)}${replacement}${prompt.slice(activeSkillToken.end)}`;
     const nextCursor = activeSkillToken.start + replacement.length;
     setPrompt(nextPrompt);
@@ -3951,7 +3957,7 @@ export default function HomePage() {
                             }}
                           >
                             <span className="composer-skill-line">
-                              <span className="composer-skill-name">${skill.name}</span>
+                              <span className="composer-skill-name">{`${commandSuggestionPrefix}${skill.name}`}</span>
                               <span className="composer-skill-description">{skill.description || 'Skill'}</span>
                             </span>
                           </button>
@@ -4388,9 +4394,26 @@ function applyDirectorySuggestionSelection(value: string, suggestions: string[])
   return suggestions.includes(value) ? ensureTrailingSlash(value) : value;
 }
 
-function findSkillTokenContext(input: string, cursor: number): { start: number; end: number; prefix: string } | null {
+function findSkillTokenContext(
+  input: string,
+  cursor: number,
+  mode: CommandSuggestionMode,
+): { start: number; end: number; prefix: string } | null {
   const safeCursor = Math.max(0, Math.min(cursor, input.length));
   const beforeCursor = input.slice(0, safeCursor);
+  if (mode === 'claude-slash') {
+    const match = beforeCursor.match(/^\/([A-Za-z0-9_-]*)$/);
+    if (!match) {
+      return null;
+    }
+    const prefix = match[1] ?? '';
+    let end = safeCursor;
+    while (end < input.length && /[A-Za-z0-9_-]/.test(input[end] ?? '')) {
+      end += 1;
+    }
+    return { start: 0, end, prefix };
+  }
+
   const match = beforeCursor.match(/(?:^|\s)\$([A-Za-z0-9_-]*)$/);
   if (!match) {
     return null;
