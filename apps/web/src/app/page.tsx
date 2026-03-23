@@ -4703,19 +4703,7 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
   }
 
   if (envelope.type === 'turn.completed') {
-    const content = typeof envelope.payload.content === 'string' ? envelope.payload.content.trim() : '';
-    const next: TimelineEvent[] = [...current];
-    if (content.length > 0) {
-      next.push({
-        id: `assistant-final-${envelope.seq}`,
-        kind: 'assistant',
-        title: 'Assistant Message',
-        seqStart: envelope.seq,
-        seqEnd: envelope.seq,
-        createdAt: envelope.createdAt,
-        details: [],
-      });
-    }
+    const next = appendOrMergeByKindWithoutDetails(current, 'assistant', 'Assistant Message', envelope);
     next.push({
       id: `turn-completed-${envelope.seq}`,
       kind: 'event',
@@ -4824,7 +4812,11 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
   }
 
   if (envelope.type === 'assistant.delta') {
-    return current;
+    const text = typeof envelope.payload.text === 'string' ? envelope.payload.text : '';
+    if (!text) {
+      return current;
+    }
+    return appendOrMergeByKindWithoutDetails(current, 'assistant', 'Assistant Message', envelope);
   }
 
   if (envelope.type === 'plan.updated') {
