@@ -323,12 +323,18 @@ const server = createServer(async (request, response) => {
 
     if (pathname === '/runner/threads/close') {
       const payload = parseCloseThreadBody(await readJsonBody(request));
-      if (!isBackendSupported('codex')) {
+      const requestedBackend = resolveRequestedBackend(payload.backend, 'backend');
+      if (requestedBackend === 'mock') {
         response.statusCode = 204;
         response.end();
         return;
       }
-
+      if (requestedBackend === 'claude') {
+        await claudeBackend.closeThread(payload);
+        response.statusCode = 204;
+        response.end();
+        return;
+      }
       await codexBackend.closeThread(payload);
       response.statusCode = 204;
       response.end();
@@ -535,6 +541,8 @@ function parseCloseThreadBody(input: unknown): CloseThreadBody {
   const record = input as Record<string, unknown>;
   return {
     threadId: readNonEmptyString(record.threadId, 'threadId'),
+    backend: readOptionalString(record.backend),
+    cwd: readOptionalString(record.cwd),
   };
 }
 

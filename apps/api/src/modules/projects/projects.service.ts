@@ -135,7 +135,11 @@ export class ProjectsService {
         id: projectId,
         ownerUserId: userId,
       },
-      select: { id: true },
+      select: {
+        id: true,
+        backend: true,
+        repoPath: true,
+      },
     });
 
     if (!project) {
@@ -175,7 +179,11 @@ export class ProjectsService {
     await Promise.all(
       threadIds.map(async (threadId) => {
         try {
-          await this.runnerAdapter.closeThread({ threadId });
+          await this.runnerAdapter.closeThread({
+            threadId,
+            backend: project.backend?.trim() || null,
+            cwd: project.repoPath?.trim() || null,
+          });
         } catch (error: unknown) {
           if (error instanceof Error) {
             this.logger.warn(`Failed to close thread ${threadId} during project delete ${projectId}: ${error.message}`);

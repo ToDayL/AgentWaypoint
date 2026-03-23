@@ -46,6 +46,8 @@ export type ForkThreadBody = {
 
 export type CloseThreadBody = {
   threadId: string;
+  backend?: string | null;
+  cwd?: string | null;
 };
 
 export type CompactThreadBody = {

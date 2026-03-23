@@ -227,7 +227,16 @@ export class SessionsService {
           ownerUserId: userId,
         },
       },
-      select: { id: true, backendThreadId: true },
+      select: {
+        id: true,
+        backendThreadId: true,
+        project: {
+          select: {
+            backend: true,
+            repoPath: true,
+          },
+        },
+      },
     });
 
     if (!session) {
@@ -251,7 +260,11 @@ export class SessionsService {
     const threadId = session.backendThreadId?.trim();
     if (threadId) {
       try {
-        await this.runnerAdapter.closeThread({ threadId });
+        await this.runnerAdapter.closeThread({
+          threadId,
+          backend: session.project.backend?.trim() || null,
+          cwd: session.project.repoPath?.trim() || null,
+        });
       } catch (error: unknown) {
         if (error instanceof Error) {
           this.logger.warn(`Failed to close thread ${threadId} during session delete ${sessionId}: ${error.message}`);

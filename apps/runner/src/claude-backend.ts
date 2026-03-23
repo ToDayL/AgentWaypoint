@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { unlink } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import path from 'node:path';
 import { forkSession, query } from '@anthropic-ai/claude-agent-sdk';
 import type {
   HookCallbackMatcher,
@@ -12,6 +15,7 @@ import type {
 import type {
   ActiveClaudeTurn,
   ActiveTurn,
+  CloseThreadBody,
   CompactThreadBody,
   ForkThreadBody,
   ModelListItem,
@@ -618,6 +622,26 @@ export class ClaudeBackend {
     return nextThreadId;
   }
 
+  async closeThread(input: CloseThreadBody): Promise<void> {
+    const threadId = readNonEmptyString(input.threadId);
+    if (!threadId) {
+      throw new Error('threadId is required');
+    }
+    const cwd = readNonEmptyString(input.cwd);
+    if (!cwd) {
+      return;
+    }
+    const encodedCwd = encodeClaudeProjectDir(cwd);
+    const sessionFilePath = path.join(homedir(), '.claude', 'projects', encodedCwd, `${threadId}.jsonl`);
+    try {
+      await unlink(sessionFilePath);
+    } catch (error: unknown) {
+      if (!isFileNotFound(error)) {
+        throw error;
+      }
+    }
+  }
+
   async cancelTurn(turn: ActiveClaudeTurn): Promise<void> {
     this.cancellingTurns.add(turn.turnId);
     const inputQueue = this.turnInputs.get(turn.turnId);
@@ -1183,6 +1207,18 @@ function mapToolNameToApprovalKind(toolName: string): string {
     return 'file_change';
   }
   return 'permission';
+}
+
+function encodeClaudeProjectDir(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9]/g, '-');
+}
+
+function isFileNotFound(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return code === 'ENOENT';
 }
 
 

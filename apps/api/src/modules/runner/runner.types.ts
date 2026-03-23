@@ -51,6 +51,8 @@ export type ForkThreadResult = {
 
 export type CloseThreadInput = {
   threadId: string;
+  backend?: string | null;
+  cwd?: string | null;
 };
 
 export type CompactThreadInput = {

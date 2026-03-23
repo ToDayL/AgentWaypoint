@@ -292,6 +292,8 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       path: '/runner/threads/close',
       body: {
         threadId: input.threadId,
+        backend: input.backend ?? null,
+        cwd: input.cwd ?? null,
       },
     });
   }
