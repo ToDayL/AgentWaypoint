@@ -7,6 +7,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   CodexRateLimits,
+  RunnerHealth,
   AvailableSkill,
   AvailableModel,
   CancelTurnInput,
@@ -175,6 +176,12 @@ export class MockRunnerAdapter implements RunnerAdapter {
     return {
       rateLimits: null,
       rateLimitsByLimitId: null,
+    };
+  }
+
+  async getHealth(): Promise<RunnerHealth> {
+    return {
+      supportedBackends: ['codex', 'claude'],
     };
   }
 

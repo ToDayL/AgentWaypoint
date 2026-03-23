@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
   CodexRateLimits,
+  RunnerHealth,
   AvailableSkill,
   AvailableModel,
   CancelTurnInput,
@@ -201,6 +202,25 @@ export class HttpRunnerAdapter implements RunnerAdapter {
     return {
       rateLimits: parseRateLimitSnapshot(record.rateLimits),
       rateLimitsByLimitId: parseRateLimitsByLimitId(record.rateLimitsByLimitId),
+    };
+  }
+
+  async getHealth(): Promise<RunnerHealth> {
+    const response = await this.request({
+      method: 'GET',
+      path: '/runner/health',
+    });
+    if (!response || typeof response !== 'object') {
+      throw new Error('Runner health response is invalid');
+    }
+    const record = response as Record<string, unknown>;
+    const supportedBackends = Array.isArray(record.supportedBackends)
+      ? record.supportedBackends
+          .map((item) => (typeof item === 'string' ? item.trim() : ''))
+          .filter((item) => item.length > 0)
+      : [];
+    return {
+      supportedBackends,
     };
   }
 

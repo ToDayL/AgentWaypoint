@@ -1,9 +1,10 @@
 # AgentWaypoint
 
-AgentWaypoint offers a WebUI for Codex CLI through a runner service.
+AgentWaypoint offers a WebUI for backend-driven coding agents through a runner service.
+Currently supported backends: `codex`, `claude`.
 
 ## What It Offers
-- WebUI chat interface for Codex CLI with streaming responses.
+- WebUI chat interface with streaming responses for Codex and Claude backends.
 - Project and session management for organized workspaces.
 - Multi-user support with role-based access.
 - Tooling insights (events/diff/tool output) for turn inspection.
@@ -16,8 +17,9 @@ Prerequisite:
 - Bash
 - Node.js `22.x` recommended
 - `corepack` (or `pnpm`) available on host
-- Codex CLI installed on host (`codex` in `PATH`)
-- Login on host before startup (run `codex login` once)
+- Codex CLI installed on host (`codex` in `PATH`) when using codex backend
+- Claude runtime dependencies installed on host when using claude backend
+- Login on host before startup for enabled backends
 
 1. Prepare env:
 ```bash
@@ -31,6 +33,12 @@ Set admin bootstrap values for first startup:
 Set a strong runner token (required for production security):
 - `RUNNER_AUTH_TOKEN` (same value is used by API -> runner and runner auth check)
 - Generate one on host: `openssl rand -hex 32`
+
+Configure enabled backends for this deployment:
+- Set `RUNNER_SUPPORTED_BACKENDS` in `.env.production` (comma-separated), for example:
+  - `RUNNER_SUPPORTED_BACKENDS=codex,claude`
+  - `RUNNER_SUPPORTED_BACKENDS=codex`
+  - `RUNNER_SUPPORTED_BACKENDS=claude`
 
 Security note:
 - `prod-up` bootstraps admin only when no admin exists.

@@ -183,6 +183,7 @@ type PendingApproval = {
 type AppSettings = {
   turnSteerEnabled: boolean;
   defaultWorkspaceRoot: string | null;
+  supportedBackends: string[];
 };
 
 type WorkspaceTreeEntry = {
@@ -247,6 +248,17 @@ function readCodexBackendConfig(config: Record<string, unknown> | null | undefin
 
 function resolveModelDefault(models: AvailableModel[]): string {
   return models.find((model) => model.isDefault)?.model ?? models[0]?.model ?? DEFAULT_CODEX_MODEL;
+}
+
+function normalizeSupportedBackends(input: unknown): string[] {
+  if (!Array.isArray(input)) {
+    return ['codex'];
+  }
+  const normalized = input
+    .map((item) => (typeof item === 'string' ? item.trim().toLowerCase() : ''))
+    .filter((item) => item === 'codex' || item === 'claude');
+  const unique = Array.from(new Set(normalized));
+  return unique.length > 0 ? unique : ['codex'];
 }
 
 function mapExecutionModeToRuntime(executionMode: string): { sandbox: string; approvalPolicy: string } {
@@ -356,7 +368,7 @@ const EXECUTION_MODE_OPTIONS = [
   { value: 'yolo', label: 'yolo' },
 ];
 
-const PROJECT_BACKEND_OPTIONS = [
+const ALL_PROJECT_BACKEND_OPTIONS = [
   { value: 'codex', label: 'codex' },
   { value: 'claude', label: 'claude' },
 ];
@@ -440,6 +452,7 @@ export default function HomePage() {
   const [appSettings, setAppSettings] = useState<AppSettings>({
     turnSteerEnabled: false,
     defaultWorkspaceRoot: null,
+    supportedBackends: ['codex'],
   });
   const [accountRateLimits, setAccountRateLimits] = useState<{
     fiveHour: RateLimitWindow | null;
@@ -548,6 +561,10 @@ export default function HomePage() {
   const canSteerTurn =
     appSettings.turnSteerEnabled && !!activeTurnId && prompt.trim().length > 0 && pendingApproval === null;
   const canManualCompact = !!selectedSessionId && !activeTurnId && !busy && !compactingContext;
+  const supportedBackends = appSettings.supportedBackends;
+  const codexBackendEnabled = supportedBackends.includes('codex');
+  const projectBackendOptions = ALL_PROJECT_BACKEND_OPTIONS.filter((option) => supportedBackends.includes(option.value));
+  const fallbackProjectBackend = projectBackendOptions[0]?.value ?? 'codex';
   const normalizedDefaultWorkspaceRootDraft = defaultWorkspaceRootInput.trim() || null;
   const appSettingsDirty =
     turnSteerDraft !== appSettings.turnSteerEnabled ||
@@ -909,12 +926,44 @@ export default function HomePage() {
   }, [mounted, newProjectRepoPath, projectConfigRepoPath, actionPanelMode, authenticated]);
 
   useEffect(() => {
-    if (!mounted || !authenticated || leftSidebarTab !== 'config') {
+    if (!mounted || !authenticated || leftSidebarTab !== 'config' || !codexBackendEnabled) {
       return;
     }
     void loadAccountRateLimits();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mounted, authenticated, leftSidebarTab]);
+  }, [mounted, authenticated, leftSidebarTab, codexBackendEnabled]);
+
+  useEffect(() => {
+    if (codexBackendEnabled) {
+      return;
+    }
+    setAccountRateLimits({
+      fiveHour: null,
+      weekly: null,
+    });
+  }, [codexBackendEnabled]);
+
+  useEffect(() => {
+    if (!mounted || !authenticated) {
+      return;
+    }
+    if (!supportedBackends.includes(newProjectBackend)) {
+      const fallback = supportedBackends[0] ?? 'codex';
+      setNewProjectBackend(fallback);
+      void loadAvailableModels(fallback, { target: 'new' });
+    }
+    if (!supportedBackends.includes(projectConfigBackend)) {
+      const fallback = supportedBackends[0] ?? 'codex';
+      setProjectConfigBackend(fallback);
+      void loadAvailableModels(fallback, { target: 'config' });
+    }
+  }, [
+    mounted,
+    authenticated,
+    supportedBackends,
+    newProjectBackend,
+    projectConfigBackend,
+  ]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !authenticated || !currentUserEmail || !selectedProjectId) {
@@ -1255,13 +1304,15 @@ export default function HomePage() {
         setAuthenticated(true);
         setCurrentUserEmail(userEmail);
         setCurrentUserRole(response.principal.role);
-        await loadAppSettings();
+        const settings = await loadAppSettings();
         if (response.principal.role === 'admin') {
           await loadAdminUsers();
         } else {
           setAdminUsers([]);
         }
-        await loadAvailableModels('codex', { target: 'both' });
+        const initialBackend =
+          settings?.supportedBackends.find((backend) => backend === 'codex' || backend === 'claude') ?? 'codex';
+        await loadAvailableModels(initialBackend, { target: 'both' });
         const preferredProjectId = readLastProjectId(userEmail) ?? undefined;
         await loadProjects({
           preferredProjectId,
@@ -1273,10 +1324,20 @@ export default function HomePage() {
       setAuthenticated(false);
       setCurrentUserEmail('');
       setCurrentUserRole('user');
+      setAppSettings({
+        turnSteerEnabled: false,
+        defaultWorkspaceRoot: null,
+        supportedBackends: ['codex'],
+      });
     } catch {
       setAuthenticated(false);
       setCurrentUserEmail('');
       setCurrentUserRole('user');
+      setAppSettings({
+        turnSteerEnabled: false,
+        defaultWorkspaceRoot: null,
+        supportedBackends: ['codex'],
+      });
     }
   }
 
@@ -1343,6 +1404,11 @@ export default function HomePage() {
       setNewManagedUserDefaultWorkspaceRoot('');
       setDefaultWorkspaceRootInput('');
       setTurnSteerDraft(false);
+      setAppSettings({
+        turnSteerEnabled: false,
+        defaultWorkspaceRoot: null,
+        supportedBackends: ['codex'],
+      });
       setFileBrowserNodes({});
       setFileBrowserExpandedPaths([]);
       setFileBrowserError('');
@@ -1456,24 +1522,36 @@ export default function HomePage() {
     }
   }
 
-  async function loadAppSettings(): Promise<void> {
+  async function loadAppSettings(): Promise<AppSettings | null> {
     try {
       const response = await apiRequest<AppSettings>('/api/settings', {
         method: 'GET',
       });
       const normalizedWorkspaceRoot = response.defaultWorkspaceRoot?.trim() || null;
-      setAppSettings({
+      const supported = normalizeSupportedBackends(response.supportedBackends);
+      const nextSettings: AppSettings = {
         turnSteerEnabled: !!response.turnSteerEnabled,
         defaultWorkspaceRoot: normalizedWorkspaceRoot,
-      });
+        supportedBackends: supported,
+      };
+      setAppSettings(nextSettings);
       setTurnSteerDraft(!!response.turnSteerEnabled);
       setDefaultWorkspaceRootInput(normalizedWorkspaceRoot ?? '');
+      return nextSettings;
     } catch (requestError) {
       setError(extractMessage(requestError));
+      return null;
     }
   }
 
   async function loadAccountRateLimits(): Promise<void> {
+    if (!codexBackendEnabled) {
+      setAccountRateLimits({
+        fiveHour: null,
+        weekly: null,
+      });
+      return;
+    }
     setAccountRateLimitsBusy(true);
     try {
       const response = await apiRequest<CodexRateLimitsResponse>('/api/settings/codex/rate-limits', {
@@ -1664,9 +1742,11 @@ export default function HomePage() {
         },
       });
       const normalizedWorkspaceRoot = response.defaultWorkspaceRoot?.trim() || null;
+      const supported = normalizeSupportedBackends(response.supportedBackends);
       setAppSettings({
         turnSteerEnabled: !!response.turnSteerEnabled,
         defaultWorkspaceRoot: normalizedWorkspaceRoot,
+        supportedBackends: supported,
       });
       setTurnSteerDraft(!!response.turnSteerEnabled);
       setDefaultWorkspaceRootInput(normalizedWorkspaceRoot ?? '');
@@ -2522,9 +2602,9 @@ export default function HomePage() {
 
   function openActionPanel(mode: ActionPanelMode): void {
     if (mode === 'createProject') {
-      setNewProjectBackend('codex');
+      setNewProjectBackend(fallbackProjectBackend);
       setNewProjectExecutionMode(DEFAULT_CODEX_EXECUTION_MODE);
-      void loadAvailableModels('codex', { target: 'new' });
+      void loadAvailableModels(fallbackProjectBackend, { target: 'new' });
     }
     setActionPanelMode(mode);
   }
@@ -2551,13 +2631,14 @@ export default function HomePage() {
   function openProjectConfigPanel(project: Project): void {
     const backendConfig = readCodexBackendConfig(project.backendConfig);
     const backend = project.backend?.trim() || 'codex';
+    const resolvedBackend = supportedBackends.includes(backend) ? backend : fallbackProjectBackend;
     setSelectedProjectId(project.id);
     setProjectConfigName(project.name);
     setProjectConfigRepoPath(project.repoPath ?? '');
-    setProjectConfigBackend(backend);
+    setProjectConfigBackend(resolvedBackend);
     setProjectConfigDefaultModel(backendConfig.model);
     setProjectConfigExecutionMode(backendConfig.executionMode);
-    void loadAvailableModels(backend, { target: 'config', preferredModel: backendConfig.model });
+    void loadAvailableModels(resolvedBackend, { target: 'config', preferredModel: backendConfig.model });
     openActionPanel('projectConfig');
   }
 
@@ -3041,7 +3122,7 @@ export default function HomePage() {
                         void loadAvailableModels(nextBackend, { target: 'new' });
                       }}
                     >
-                      {PROJECT_BACKEND_OPTIONS.map((option) => (
+                      {projectBackendOptions.map((option) => (
                         <option key={`project-backend-${option.value}`} value={option.value}>
                           {option.label}
                         </option>
@@ -3160,7 +3241,7 @@ export default function HomePage() {
                         void loadAvailableModels(nextBackend, { target: 'config' });
                       }}
                     >
-                      {PROJECT_BACKEND_OPTIONS.map((option) => (
+                      {projectBackendOptions.map((option) => (
                         <option key={`project-config-backend-${option.value}`} value={option.value}>
                           {option.label}
                         </option>
@@ -3666,35 +3747,39 @@ export default function HomePage() {
                       <div className="left-config-panel">
                         <h2>Config</h2>
                         <p>Signed in as: <strong>{currentUserEmail}</strong></p>
-                        <h3>Codex Rate Limits</h3>
-                        {accountRateLimitsBusy ? <p>Loading Codex rate limits…</p> : null}
-                        {!accountRateLimitsBusy ? (
-                          <div className="rate-limit-list">
-                            <div className="rate-limit-item">
-                              <div className="rate-limit-head">
-                                <strong>5h</strong>
-                                <span>{formatRateLimitReset(accountRateLimits.fiveHour)}</span>
+                        {codexBackendEnabled ? (
+                          <>
+                            <h3>Codex Rate Limits</h3>
+                            {accountRateLimitsBusy ? <p>Loading Codex rate limits…</p> : null}
+                            {!accountRateLimitsBusy ? (
+                              <div className="rate-limit-list">
+                                <div className="rate-limit-item">
+                                  <div className="rate-limit-head">
+                                    <strong>5h</strong>
+                                    <span>{formatRateLimitReset(accountRateLimits.fiveHour)}</span>
+                                  </div>
+                                  <div className="rate-limit-track">
+                                    <div
+                                      className={`rate-limit-fill ${rateLimitFillClass(accountRateLimits.fiveHour)}`}
+                                      style={{ width: `${formatRateLimitRemainingPercent(accountRateLimits.fiveHour)}%` }}
+                                    />
+                                  </div>
+                                </div>
+                                <div className="rate-limit-item">
+                                  <div className="rate-limit-head">
+                                    <strong>Week</strong>
+                                    <span>{formatRateLimitReset(accountRateLimits.weekly)}</span>
+                                  </div>
+                                  <div className="rate-limit-track">
+                                    <div
+                                      className={`rate-limit-fill ${rateLimitFillClass(accountRateLimits.weekly)}`}
+                                      style={{ width: `${formatRateLimitRemainingPercent(accountRateLimits.weekly)}%` }}
+                                    />
+                                  </div>
+                                </div>
                               </div>
-                              <div className="rate-limit-track">
-                                <div
-                                  className={`rate-limit-fill ${rateLimitFillClass(accountRateLimits.fiveHour)}`}
-                                  style={{ width: `${formatRateLimitRemainingPercent(accountRateLimits.fiveHour)}%` }}
-                                />
-                              </div>
-                            </div>
-                            <div className="rate-limit-item">
-                              <div className="rate-limit-head">
-                                <strong>Week</strong>
-                                <span>{formatRateLimitReset(accountRateLimits.weekly)}</span>
-                              </div>
-                              <div className="rate-limit-track">
-                                <div
-                                  className={`rate-limit-fill ${rateLimitFillClass(accountRateLimits.weekly)}`}
-                                  style={{ width: `${formatRateLimitRemainingPercent(accountRateLimits.weekly)}%` }}
-                                />
-                              </div>
-                            </div>
-                          </div>
+                            ) : null}
+                          </>
                         ) : null}
                         <label className="inline-checkbox">
                           <span>Turn Steering</span>

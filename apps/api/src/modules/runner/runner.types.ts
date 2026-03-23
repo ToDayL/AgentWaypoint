@@ -29,6 +29,10 @@ export type AvailableSkill = {
   enabled: boolean;
 };
 
+export type RunnerHealth = {
+  supportedBackends: string[];
+};
+
 export type CancelTurnInput = {
   turnId: string;
 };
@@ -207,6 +211,7 @@ export interface RunnerAdapter {
   cancelTurn(input: CancelTurnInput): Promise<void>;
   resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void>;
   readCodexRateLimits(): Promise<CodexRateLimits>;
+  getHealth(): Promise<RunnerHealth>;
   listModels(input: ModelListInput): Promise<AvailableModel[]>;
   listSkills(input: SkillListInput): Promise<AvailableSkill[]>;
   forkThread(input: ForkThreadInput): Promise<ForkThreadResult>;
