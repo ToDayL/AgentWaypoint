@@ -76,6 +76,19 @@ fi
 echo "[prod-up] Starting Docker app services (api/web/nginx)..."
 docker compose -f "$COMPOSE_FILE" up --build -d api web nginx
 
+ensure_runner_deps() {
+  local pm=(pnpm)
+  if ! command -v pnpm >/dev/null 2>&1; then
+    export COREPACK_HOME="${COREPACK_HOME:-/tmp/corepack}"
+    pm=(corepack pnpm)
+  fi
+
+  echo "[prod-up] Ensuring host runner dependencies are installed..."
+  CI=true "${pm[@]}" install --no-frozen-lockfile --reporter=append-only
+}
+
+ensure_runner_deps
+
 start_bg() {
   local name="$1"
   local pid_file="$STATE_DIR/${name}.pid"
