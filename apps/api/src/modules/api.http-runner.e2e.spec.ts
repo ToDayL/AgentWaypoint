@@ -25,6 +25,7 @@ type RunnerEventType =
 type TestRunnerServer = {
   baseUrl: string;
   getClosedThreadIds: () => string[];
+  getClosedThreadCalls: () => Array<{ threadId: string; backend: string | null; cwd: string | null }>;
   getCompactedThreadIds: () => string[];
   close: () => Promise<void>;
 };
@@ -105,7 +106,7 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
 async function createTestRunnerServer(): Promise<TestRunnerServer> {
   const activeTurns = new Map<string, ActiveTurnState>();
   const forkedThreadIds = new Map<string, string>();
-  const closedThreadIds = new Set<string>();
+  const closedThreadCalls: Array<{ threadId: string; backend: string | null; cwd: string | null }> = [];
   const compactedThreadIds = new Set<string>();
   const bufferedTurns = new Map<string, BufferedTurnState>();
 
@@ -326,7 +327,9 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
       if (request.url === '/runner/threads/close') {
         const payload = await readJsonBody(request);
         const threadId = readRequiredString(payload, 'threadId');
-        closedThreadIds.add(threadId);
+        const backend = typeof payload.backend === 'string' && payload.backend.trim().length > 0 ? payload.backend.trim() : null;
+        const cwd = typeof payload.cwd === 'string' && payload.cwd.trim().length > 0 ? payload.cwd.trim() : null;
+        closedThreadCalls.push({ threadId, backend, cwd });
         response.statusCode = 204;
         response.end();
         return;
@@ -420,7 +423,8 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
 
   return {
     baseUrl: `http://127.0.0.1:${addr.port}`,
-    getClosedThreadIds: () => [...closedThreadIds],
+    getClosedThreadIds: () => closedThreadCalls.map((item) => item.threadId),
+    getClosedThreadCalls: () => [...closedThreadCalls],
     getCompactedThreadIds: () => [...compactedThreadIds],
     close: () => {
       activeTurns.forEach((turn) => {
@@ -430,7 +434,7 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
       });
       activeTurns.clear();
       bufferedTurns.clear();
-      closedThreadIds.clear();
+      closedThreadCalls.splice(0, closedThreadCalls.length);
       compactedThreadIds.clear();
       return new Promise<void>((resolve, reject) => {
         server.close((error) => {
@@ -477,6 +481,36 @@ describe.sequential('API e2e (http runner)', () => {
     process.env.RUNNER_MODE = prevRunnerMode;
     process.env.RUNNER_BASE_URL = prevRunnerBaseUrl;
   });
+
+  async function createClaudeProjectAndSession(
+    email: string,
+    names: { project: string; session: string },
+  ): Promise<{ projectId: string; sessionId: string }> {
+    const projectResponse = await fetch(`${apiBaseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({
+        name: names.project,
+        repoPath: TEST_REPO_PATH,
+        backend: 'claude',
+        backendConfig: {
+          model: 'claude-sonnet-4',
+          executionMode: 'safe-write',
+        },
+      }),
+    });
+    expect(projectResponse.status).toBe(201);
+    const project = (await projectResponse.json()) as { id: string };
+
+    const sessionResponse = await fetch(`${apiBaseUrl}/api/projects/${project.id}/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ title: names.session }),
+    });
+    expect(sessionResponse.status).toBe(201);
+    const session = (await sessionResponse.json()) as { id: string };
+    return { projectId: project.id, sessionId: session.id };
+  }
 
   it('creates turn and streams runner callback events to completion', async () => {
     const email = randomEmail('http-runner');
@@ -791,7 +825,7 @@ describe.sequential('API e2e (http runner)', () => {
     };
     expect(history.messages).toMatchObject([
       { role: 'user', content: 'create forkable history' },
-      { role: 'assistant', content: expect.stringContaining('Echo: create forkable history') },
+      { role: 'assistant', content: expect.stringMatching(/^Echo:\s*create fork/) },
     ]);
     expect(history.turns).toHaveLength(0);
   });
@@ -1091,5 +1125,270 @@ describe.sequential('API e2e (http runner)', () => {
     expect(streamText).toContain('event: turn.approval.requested');
     expect(streamText).toContain('event: turn.approval.resolved');
     expect(streamText).toContain('event: turn.completed');
+  });
+
+  it('persists claude backend config and runtime snapshots on turn start', async () => {
+    const email = randomEmail('http-claude-config');
+    const { sessionId } = await createClaudeProjectAndSession(email, {
+      project: 'HTTP Claude Config Project',
+      session: 'HTTP Claude Config Session',
+    });
+
+    const turnResponse = await fetch(`${apiBaseUrl}/api/sessions/${sessionId}/turns`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'verify claude config persistence' }),
+    });
+    expect(turnResponse.status).toBe(201);
+    const turn = (await turnResponse.json()) as { turnId: string };
+
+    await sleep(1300);
+
+    const turnStatusResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}`, {
+      headers: { 'x-user-email': email },
+    });
+    expect(turnStatusResponse.status).toBe(200);
+    expect(await turnStatusResponse.json()).toMatchObject({
+      id: turn.turnId,
+      backend: 'claude',
+      effectiveBackendConfig: {
+        model: 'claude-sonnet-4',
+        executionMode: 'safe-write',
+        cwd: TEST_REPO_PATH,
+      },
+      effectiveRuntimeConfig: {
+        model: 'claude-sonnet-4',
+        sandbox: 'workspace-write',
+        approvalPolicy: 'on-request',
+        cwd: TEST_REPO_PATH,
+      },
+    });
+  });
+
+  it('forks a claude session into a new session with copied history and a new thread id', async () => {
+    const email = randomEmail('http-claude-fork');
+    const { sessionId } = await createClaudeProjectAndSession(email, {
+      project: 'HTTP Claude Fork Project',
+      session: 'HTTP Claude Fork Session',
+    });
+
+    const turnResponse = await fetch(`${apiBaseUrl}/api/sessions/${sessionId}/turns`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'create claude forkable history' }),
+    });
+    expect(turnResponse.status).toBe(201);
+
+    let readyToFork = false;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await sleep(250);
+      const historyResponse = await fetch(`${apiBaseUrl}/api/sessions/${sessionId}/history`, {
+        headers: { 'x-user-email': email },
+      });
+      expect(historyResponse.status).toBe(200);
+      const history = (await historyResponse.json()) as { activeTurnId: string | null };
+      if (!history.activeTurnId) {
+        readyToFork = true;
+        break;
+      }
+    }
+    expect(readyToFork).toBe(true);
+
+    const forkResponse = await fetch(`${apiBaseUrl}/api/sessions/${sessionId}/fork`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({}),
+    });
+    expect(forkResponse.status).toBe(201);
+    const forkedSession = (await forkResponse.json()) as { id: string; title: string; backendThreadId: string };
+    expect(forkedSession.id).not.toBe(sessionId);
+    expect(forkedSession.title).toBe('HTTP Claude Fork Session (Fork)');
+    expect(forkedSession.backendThreadId).toMatch(/^forked-/);
+  });
+
+  it('closes claude thread when deleting a session', async () => {
+    const email = randomEmail('http-claude-delete-close-thread');
+    const { sessionId } = await createClaudeProjectAndSession(email, {
+      project: 'HTTP Claude Delete Session Project',
+      session: 'HTTP Claude Delete Session',
+    });
+
+    const turnResponse = await fetch(`${apiBaseUrl}/api/sessions/${sessionId}/turns`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'populate claude thread id before delete' }),
+    });
+    expect(turnResponse.status).toBe(201);
+
+    await sleep(1300);
+
+    const deleteSessionResponse = await fetch(`${apiBaseUrl}/api/sessions/${sessionId}`, {
+      method: 'DELETE',
+      headers: { 'x-user-email': email },
+    });
+    expect(deleteSessionResponse.status).toBe(204);
+
+    const calls = runner.getClosedThreadCalls();
+    expect(
+      calls.some(
+        (call) => call.threadId === `thread-${sessionId}` && call.backend === 'claude' && call.cwd === TEST_REPO_PATH,
+      ),
+    ).toBe(true);
+  });
+
+  it('manually compacts an idle claude session thread', async () => {
+    const email = randomEmail('http-claude-compact-session');
+    const { sessionId } = await createClaudeProjectAndSession(email, {
+      project: 'HTTP Claude Compact Project',
+      session: 'HTTP Claude Compact Session',
+    });
+
+    const turnResponse = await fetch(`${apiBaseUrl}/api/sessions/${sessionId}/turns`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'prepare claude thread before manual compact' }),
+    });
+    expect(turnResponse.status).toBe(201);
+
+    await sleep(1300);
+
+    const compactResponse = await fetch(`${apiBaseUrl}/api/sessions/${sessionId}/compact`, {
+      method: 'POST',
+      headers: { 'x-user-email': email },
+    });
+    expect(compactResponse.status).toBe(202);
+    expect(runner.getCompactedThreadIds()).toContain(`thread-${sessionId}`);
+  });
+
+  it('steers an active claude turn through the http runner adapter when enabled', async () => {
+    const email = randomEmail('http-claude-steer');
+
+    const settingsResponse = await fetch(`${apiBaseUrl}/api/settings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ turnSteerEnabled: true }),
+    });
+    expect(settingsResponse.status).toBe(201);
+
+    const { sessionId } = await createClaudeProjectAndSession(email, {
+      project: 'HTTP Claude Steer Project',
+      session: 'HTTP Claude Steer Session',
+    });
+
+    const turnResponse = await fetch(`${apiBaseUrl}/api/sessions/${sessionId}/turns`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'long running claude steer target' }),
+    });
+    expect(turnResponse.status).toBe(201);
+    const turn = (await turnResponse.json()) as { turnId: string };
+
+    await sleep(200);
+
+    const steerResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/steer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'claude steer focus on tests only' }),
+    });
+    expect(steerResponse.status).toBe(201);
+
+    await sleep(1300);
+
+    const streamResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/stream?since=0`, {
+      headers: { 'x-user-email': email },
+    });
+    expect(streamResponse.status).toBe(200);
+    const streamText = await streamResponse.text();
+    expect(streamText).toContain('[steer:claude steer focus on tests only]');
+  });
+
+  it('cancels active claude turn through http runner adapter', async () => {
+    const email = randomEmail('http-claude-cancel');
+    const { sessionId } = await createClaudeProjectAndSession(email, {
+      project: 'HTTP Claude Cancel Project',
+      session: 'HTTP Claude Cancel Session',
+    });
+
+    const turnResponse = await fetch(`${apiBaseUrl}/api/sessions/${sessionId}/turns`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'cancel claude turn' }),
+    });
+    expect(turnResponse.status).toBe(201);
+    const turn = (await turnResponse.json()) as { turnId: string };
+    await sleep(220);
+
+    const cancelResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/cancel`, {
+      method: 'POST',
+      headers: { 'x-user-email': email },
+    });
+    expect(cancelResponse.status).toBe(201);
+
+    let streamText = '';
+    for (let i = 0; i < 10; i += 1) {
+      const streamResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/stream?since=0`, {
+        headers: { 'x-user-email': email },
+      });
+      expect(streamResponse.status).toBe(200);
+      streamText = await streamResponse.text();
+      if (streamText.includes('event: turn.cancelled')) {
+        break;
+      }
+      await sleep(120);
+    }
+    expect(streamText).toContain('event: turn.cancelled');
+  });
+
+  it('resolves approval requests for claude through http runner adapter', async () => {
+    const email = randomEmail('http-claude-approval');
+    const { sessionId } = await createClaudeProjectAndSession(email, {
+      project: 'HTTP Claude Approval Project',
+      session: 'HTTP Claude Approval Session',
+    });
+
+    const turnResponse = await fetch(`${apiBaseUrl}/api/sessions/${sessionId}/turns`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ content: 'please run [approval] claude protected command' }),
+    });
+    expect(turnResponse.status).toBe(201);
+    const turn = (await turnResponse.json()) as { turnId: string };
+
+    let pendingApprovalId = '';
+    for (let i = 0; i < 10; i += 1) {
+      const statusResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}`, {
+        headers: { 'x-user-email': email },
+      });
+      expect(statusResponse.status).toBe(200);
+      const status = (await statusResponse.json()) as {
+        status: string;
+        pendingApproval: null | { id: string };
+      };
+      if (status.status === 'waiting_approval' && status.pendingApproval?.id) {
+        pendingApprovalId = status.pendingApproval.id;
+        break;
+      }
+      await sleep(120);
+    }
+    expect(pendingApprovalId).toBeTruthy();
+
+    const approvalResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}/approval`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': email },
+      body: JSON.stringify({ approvalId: pendingApprovalId, decision: 'approve' }),
+    });
+    expect(approvalResponse.status).toBe(201);
+
+    await sleep(600);
+
+    const finalStatusResponse = await fetch(`${apiBaseUrl}/api/turns/${turn.turnId}`, {
+      headers: { 'x-user-email': email },
+    });
+    expect(finalStatusResponse.status).toBe(200);
+    expect(await finalStatusResponse.json()).toMatchObject({
+      id: turn.turnId,
+      status: 'completed',
+      pendingApproval: null,
+    });
   });
 });
