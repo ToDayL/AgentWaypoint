@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { forkSession, query } from '@anthropic-ai/claude-agent-sdk';
 import type {
   HookCallbackMatcher,
   HookEvent,
@@ -9,7 +9,16 @@ import type {
   SandboxSettings,
   SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
-import type { ActiveClaudeTurn, ActiveTurn, ModelListItem, ResolveApprovalBody, RunnerEventType, StartTurnBody } from './types.js';
+import type {
+  ActiveClaudeTurn,
+  ActiveTurn,
+  CompactThreadBody,
+  ForkThreadBody,
+  ModelListItem,
+  ResolveApprovalBody,
+  RunnerEventType,
+  StartTurnBody,
+} from './types.js';
 
 const DEFAULT_CLAUDE_MAX_TURNS = 12;
 const STEER_GRACE_WINDOW_MS = 1500;
@@ -429,6 +438,18 @@ export class ClaudeBackend {
 
         if (msg.type === 'result') {
           sawResult = true;
+          const usageSnapshot = extractContextUsageSnapshot(msg, config.model);
+          if (usageSnapshot) {
+            await this.deps.appendTurnEvent(turn.turnId, 'thread.token_usage.updated', {
+              threadId: activeSessionId,
+              turnId: turn.turnId,
+              model: usageSnapshot.model,
+              modelContextWindow: usageSnapshot.modelContextWindow,
+              totalTokens: usageSnapshot.totalTokens,
+              remainingTokens: usageSnapshot.remainingTokens,
+              remainingRatio: usageSnapshot.remainingRatio,
+            });
+          }
           if (this.cancellingTurns.has(turn.turnId)) {
             await this.deps.finalizeTurn(turn.turnId, 'turn.cancelled', {});
             break;
@@ -495,6 +516,70 @@ export class ClaudeBackend {
       this.aggregatedDiffsByTurn.delete(input.turnId);
       this.cancellingTurns.delete(turn.turnId);
     }
+  }
+
+  async compactThread(input: CompactThreadBody): Promise<void> {
+    const threadId = readNonEmptyString(input.threadId);
+    if (!threadId) {
+      throw new Error('threadId is required');
+    }
+    const cwd = input.cwd?.trim() || process.cwd();
+    const config = readBackendConfig(input.backendConfig);
+    const runtimePolicy = resolveClaudeRuntimePolicy(config.executionMode, cwd);
+    const q = query({
+      prompt: '/Compact',
+      options: {
+        cwd,
+        model: config.model ?? undefined,
+        systemPrompt: {
+          type: 'preset',
+          preset: 'claude_code',
+        },
+        settingSources: ['user', 'project', 'local'],
+        includePartialMessages: true,
+        maxTurns: 1,
+        permissionMode: runtimePolicy.permissionMode,
+        allowDangerouslySkipPermissions: runtimePolicy.allowDangerouslySkipPermissions,
+        sandbox: runtimePolicy.sandbox,
+        resume: threadId,
+      },
+    });
+
+    try {
+      for await (const message of q) {
+        if (!message || typeof message !== 'object') {
+          continue;
+        }
+        const msg = message as Record<string, unknown>;
+        if (msg.type !== 'result') {
+          continue;
+        }
+        const subtype = readNonEmptyString(msg.subtype);
+        if (subtype && subtype.startsWith('error')) {
+          const details = readFirstString(msg.errors) ?? readNonEmptyString(msg.result) ?? 'Claude compact failed';
+          throw new Error(details);
+        }
+        return;
+      }
+      throw new Error('Claude compact did not return result');
+    } finally {
+      q.close();
+    }
+  }
+
+  async forkThread(input: ForkThreadBody): Promise<string> {
+    const sourceThreadId = readNonEmptyString(input.threadId);
+    if (!sourceThreadId) {
+      throw new Error('threadId is required');
+    }
+    const cwd = input.cwd?.trim();
+    const options = cwd ? { dir: cwd } : undefined;
+    const result = await forkSession(sourceThreadId, options);
+    const nextThreadId = readNonEmptyString(result?.sessionId);
+    if (!nextThreadId) {
+      throw new Error('forkSession did not return sessionId');
+    }
+    return nextThreadId;
   }
 
   async cancelTurn(turn: ActiveClaudeTurn): Promise<void> {
@@ -1455,6 +1540,111 @@ function readPatchNumber(value: unknown): number | null {
   }
   return Math.trunc(value);
 }
+
+function extractContextUsageSnapshot(message: Record<string, unknown>, preferredModel: string | null): {
+  model: string;
+  modelContextWindow: number;
+  totalTokens: number;
+  remainingTokens: number;
+  remainingRatio: number;
+} | null {
+  const modelUsageMap = readModelUsageMap(message.modelUsage);
+  if (!modelUsageMap) {
+    return null;
+  }
+  const selected = selectModelUsageEntry(modelUsageMap, preferredModel);
+  if (!selected) {
+    return null;
+  }
+  const totalTokens = selected.usage.inputTokens;
+  const clampedTotal = Math.max(0, totalTokens);
+  const remainingTokens = Math.max(selected.usage.contextWindow - clampedTotal, 0);
+  const remainingRatio = selected.usage.contextWindow > 0 ? remainingTokens / selected.usage.contextWindow : 0;
+
+  return {
+    model: selected.model,
+    modelContextWindow: selected.usage.contextWindow,
+    totalTokens: clampedTotal,
+    remainingTokens,
+    remainingRatio,
+  };
+}
+
+function readModelUsageMap(value: unknown): Record<string, ModelUsageSnapshot> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  const parsedEntries = Object.entries(raw)
+    .map(([model, usage]) => {
+      const parsed = parseModelUsage(usage);
+      return parsed ? [model, parsed] : null;
+    })
+    .filter((item): item is [string, ModelUsageSnapshot] => !!item);
+  if (parsedEntries.length === 0) {
+    return null;
+  }
+  return Object.fromEntries(parsedEntries);
+}
+
+function selectModelUsageEntry(
+  map: Record<string, ModelUsageSnapshot>,
+  preferredModel: string | null,
+): { model: string; usage: ModelUsageSnapshot } | null {
+  if (preferredModel && map[preferredModel]) {
+    return { model: preferredModel, usage: map[preferredModel] };
+  }
+  const first = Object.entries(map)[0];
+  if (!first) {
+    return null;
+  }
+  return { model: first[0], usage: first[1] };
+}
+
+function parseModelUsage(value: unknown): ModelUsageSnapshot | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const inputTokens = readRequiredFiniteNumber(record, 'inputTokens');
+  const outputTokens = readRequiredFiniteNumber(record, 'outputTokens');
+  const cacheReadInputTokens = readRequiredFiniteNumber(record, 'cacheReadInputTokens');
+  const cacheCreationInputTokens = readRequiredFiniteNumber(record, 'cacheCreationInputTokens');
+  const contextWindow = readRequiredFiniteNumber(record, 'contextWindow');
+  if (
+    inputTokens === null ||
+    outputTokens === null ||
+    cacheReadInputTokens === null ||
+    cacheCreationInputTokens === null ||
+    contextWindow === null ||
+    contextWindow <= 0
+  ) {
+    return null;
+  }
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadInputTokens,
+    cacheCreationInputTokens,
+    contextWindow,
+  };
+}
+
+function readRequiredFiniteNumber(record: Record<string, unknown>, key: string): number | null {
+  const value = record[key];
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  return null;
+}
+
+type ModelUsageSnapshot = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  contextWindow: number;
+};
 
 function countPatchLines(content: string): number {
   if (content.length === 0) {

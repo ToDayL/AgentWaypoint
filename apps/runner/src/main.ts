@@ -307,6 +307,12 @@ const server = createServer(async (request, response) => {
         return;
       }
 
+      if (requestedBackend === 'claude') {
+        const threadId = await claudeBackend.forkThread({ ...payload, cwd });
+        sendJson(response, 200, { threadId });
+        return;
+      }
+
       if (requestedBackend !== 'codex') {
         throw new Error(`Unsupported backend: ${requestedBackend}`);
       }
@@ -343,6 +349,14 @@ const server = createServer(async (request, response) => {
       }
 
       if (requestedBackend !== 'codex') {
+        if (requestedBackend === 'claude') {
+          await claudeBackend.compactThread({ ...payload, cwd });
+          sendJson(response, 202, {
+            accepted: true,
+            runnerRequestId: randomUUID(),
+          });
+          return;
+        }
         throw new Error(`Unsupported backend: ${requestedBackend}`);
       }
       await codexBackend.compactThread({ ...payload, cwd });

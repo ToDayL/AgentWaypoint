@@ -4,6 +4,7 @@ import {
   ChangeEvent,
   CSSProperties,
   KeyboardEvent,
+  memo,
   PointerEvent as ReactPointerEvent,
   SyntheticEvent,
   useEffect,
@@ -3850,9 +3851,7 @@ export default function HomePage() {
                       ) : null}
                     </header>
                     <div className="chat-markdown">
-                      <ReactMarkdown remarkPlugins={CHAT_MARKDOWN_REMARK_PLUGINS}>
-                        {renderChatMessageMarkdown(message.content)}
-                      </ReactMarkdown>
+                      <ChatMessageMarkdown content={message.content} />
                     </div>
                   </article>
                 ))}
@@ -4865,6 +4864,11 @@ function renderChatMessageMarkdown(content: string): string {
     return `\n${italicLines}\n`;
   });
 }
+
+const ChatMessageMarkdown = memo(function ChatMessageMarkdown({ content }: { content: string }) {
+  const rendered = useMemo(() => renderChatMessageMarkdown(content), [content]);
+  return <ReactMarkdown remarkPlugins={CHAT_MARKDOWN_REMARK_PLUGINS}>{rendered}</ReactMarkdown>;
+});
 
 function resolveToolKey(envelope: StreamEnvelope): string {
   const payload = envelope.payload;
