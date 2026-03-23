@@ -324,7 +324,9 @@ describe('API e2e', () => {
     });
     expect(patchResponse.statusCode).toBe(409);
     expect(patchResponse.json()).toMatchObject({
-      message: 'Cannot change backend for a project that already has sessions',
+      error: {
+        message: 'Cannot change backend for a project that already has sessions',
+      },
     });
   });
 
