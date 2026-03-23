@@ -112,6 +112,19 @@ export class ProjectsService {
         : null;
     }
     const resolvedBackend = typeof input.backend === 'string' ? normalizeBackend(input.backend) : project.backend;
+    const backendSwitchRequested = typeof input.backend === 'string' && resolvedBackend !== project.backend;
+    if (backendSwitchRequested) {
+      const sessionCount = await this.prisma.session.count({
+        where: {
+          projectId: project.id,
+        },
+      });
+      if (sessionCount > 0) {
+        throw new ConflictException({
+          message: 'Cannot change backend for a project that already has sessions',
+        });
+      }
+    }
     if (typeof input.backend === 'string') {
       data.backend = resolvedBackend;
     }

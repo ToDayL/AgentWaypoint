@@ -282,6 +282,52 @@ describe('API e2e', () => {
     });
   });
 
+  it('blocks backend switch when the project already has sessions', async () => {
+    const email = randomEmail('project-backend-switch-blocked');
+
+    const projectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Backend Switch Guard Project',
+        repoPath: TEST_REPO_PATH,
+        backend: 'codex',
+        backendConfig: {
+          model: 'gpt-5-codex',
+          executionMode: 'safe-write',
+        },
+      },
+    });
+    expect(projectResponse.statusCode).toBe(201);
+    const project = projectResponse.json() as { id: string };
+
+    const sessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Session Exists' },
+    });
+    expect(sessionResponse.statusCode).toBe(201);
+
+    const patchResponse = await app.inject({
+      method: 'PATCH',
+      url: `/api/projects/${project.id}`,
+      headers: { 'x-user-email': email },
+      payload: {
+        backend: 'claude',
+        backendConfig: {
+          model: 'claude-sonnet-4',
+          executionMode: 'safe-write',
+        },
+      },
+    });
+    expect(patchResponse.statusCode).toBe(409);
+    expect(patchResponse.json()).toMatchObject({
+      message: 'Cannot change backend for a project that already has sessions',
+    });
+  });
+
   it('creates project workspace automatically when repoPath is omitted', async () => {
     const email = randomEmail('workspace-default-root');
     const tempRoot = await mkdtemp(path.join(tmpdir(), 'aw-default-workspace-'));

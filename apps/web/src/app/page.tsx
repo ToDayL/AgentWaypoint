@@ -2587,7 +2587,6 @@ export default function HomePage() {
         body: {
           name: projectConfigName.trim(),
           repoPath: projectConfigRepoPath.trim() || null,
-          backend: projectConfigBackend,
           backendConfig,
         },
       });
@@ -3235,11 +3234,7 @@ export default function HomePage() {
                     Backend
                     <select
                       value={projectConfigBackend}
-                      onChange={(event) => {
-                        const nextBackend = event.target.value.trim() || 'codex';
-                        setProjectConfigBackend(nextBackend);
-                        void loadAvailableModels(nextBackend, { target: 'config' });
-                      }}
+                      disabled
                     >
                       {projectBackendOptions.map((option) => (
                         <option key={`project-config-backend-${option.value}`} value={option.value}>
@@ -3247,6 +3242,7 @@ export default function HomePage() {
                         </option>
                       ))}
                     </select>
+                    <span className="sim-input-hint">Backend is fixed after project creation.</span>
                   </label>
                   <label>
                     Default Model
