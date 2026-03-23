@@ -61,7 +61,7 @@ export class TurnsService implements OnModuleInit {
       },
       select: {
         id: true,
-        codexThreadId: true,
+        backendThreadId: true,
         project: {
           select: {
             repoPath: true,
@@ -120,7 +120,7 @@ export class TurnsService implements OnModuleInit {
         content: input.content,
         backend,
         backendConfig,
-        threadId: session.codexThreadId,
+        threadId: session.backendThreadId,
         cwd,
       })
       .then(() => {
@@ -286,7 +286,7 @@ export class TurnsService implements OnModuleInit {
         if (typeof threadId === 'string' && threadId.length > 0) {
           await this.prisma.session.update({
             where: { id: turn.sessionId },
-            data: { codexThreadId: threadId },
+            data: { backendThreadId: threadId },
           });
         }
         if (turn.status === 'queued') {

@@ -776,10 +776,10 @@ describe.sequential('API e2e (http runner)', () => {
       body: JSON.stringify({}),
     });
     expect(forkResponse.status).toBe(201);
-    const forkedSession = (await forkResponse.json()) as { id: string; title: string; codexThreadId: string };
+    const forkedSession = (await forkResponse.json()) as { id: string; title: string; backendThreadId: string };
     expect(forkedSession.id).not.toBe(session.id);
     expect(forkedSession.title).toBe('HTTP Fork Session (Fork)');
-    expect(forkedSession.codexThreadId).toMatch(/^forked-/);
+    expect(forkedSession.backendThreadId).toMatch(/^forked-/);
 
     const historyResponse = await fetch(`${apiBaseUrl}/api/sessions/${forkedSession.id}/history`, {
       headers: { 'x-user-email': email },

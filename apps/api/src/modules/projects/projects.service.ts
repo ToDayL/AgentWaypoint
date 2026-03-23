@@ -167,11 +167,11 @@ export class ProjectsService {
         projectId,
       },
       select: {
-        codexThreadId: true,
+        backendThreadId: true,
       },
     });
 
-    const threadIds = [...new Set(sessions.map((item) => item.codexThreadId?.trim()).filter((item): item is string => !!item))];
+    const threadIds = [...new Set(sessions.map((item) => item.backendThreadId?.trim()).filter((item): item is string => !!item))];
     await Promise.all(
       threadIds.map(async (threadId) => {
         try {

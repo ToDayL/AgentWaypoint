@@ -58,7 +58,7 @@ model Session {
   projectId              String
   title                  String
   status                 String
-  codexThreadId          String?
+  backendThreadId          String?
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
   messages               Message[]

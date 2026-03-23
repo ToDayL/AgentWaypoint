@@ -137,7 +137,7 @@ export class SessionsService {
         id: true,
         projectId: true,
         title: true,
-        codexThreadId: true,
+        backendThreadId: true,
         project: {
           select: {
             repoPath: true,
@@ -160,7 +160,7 @@ export class SessionsService {
     if (!sourceSession) {
       throw new NotFoundException({ message: 'Session not found' });
     }
-    if (!sourceSession.codexThreadId) {
+    if (!sourceSession.backendThreadId) {
       throw new ConflictException({ message: 'Session cannot be forked before the first turn starts' });
     }
 
@@ -185,7 +185,7 @@ export class SessionsService {
         : null;
 
     const forked = await this.runnerAdapter.forkThread({
-      threadId: sourceSession.codexThreadId,
+      threadId: sourceSession.backendThreadId,
       backend,
       backendConfig,
       cwd,
@@ -199,7 +199,7 @@ export class SessionsService {
           projectId: sourceSession.projectId,
           title,
           status: 'active',
-          codexThreadId: forked.threadId,
+          backendThreadId: forked.threadId,
         },
       });
 
@@ -227,7 +227,7 @@ export class SessionsService {
           ownerUserId: userId,
         },
       },
-      select: { id: true, codexThreadId: true },
+      select: { id: true, backendThreadId: true },
     });
 
     if (!session) {
@@ -248,7 +248,7 @@ export class SessionsService {
       throw new ConflictException({ message: 'Cannot delete session while a turn is active' });
     }
 
-    const threadId = session.codexThreadId?.trim();
+    const threadId = session.backendThreadId?.trim();
     if (threadId) {
       try {
         await this.runnerAdapter.closeThread({ threadId });
@@ -278,7 +278,7 @@ export class SessionsService {
       },
       select: {
         id: true,
-        codexThreadId: true,
+        backendThreadId: true,
         project: {
           select: {
             repoPath: true,
@@ -293,7 +293,7 @@ export class SessionsService {
       throw new NotFoundException({ message: 'Session not found' });
     }
 
-    const threadId = session.codexThreadId?.trim();
+    const threadId = session.backendThreadId?.trim();
     if (!threadId) {
       throw new ConflictException({ message: 'Session cannot be compacted before the first turn starts' });
     }
