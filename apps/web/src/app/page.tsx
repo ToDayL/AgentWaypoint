@@ -2396,6 +2396,7 @@ export default function HomePage() {
     const streamUrl = `/api/turns/${turnId}/stream`;
     const source = new EventSource(streamUrl);
     eventSourceRef.current = source;
+    let sawNonReasoningAssistantDelta = false;
 
     const appendTimelineEvent = (envelope: StreamEnvelope): void => {
       setTimelineEvents((current) => mergeTimelineEvent(current, envelope));
@@ -2424,6 +2425,10 @@ export default function HomePage() {
         if (envelope.type === 'assistant.delta') {
           const delta = envelope.payload.text;
           if (typeof delta === 'string') {
+            const isReasoningDelta = envelope.payload.isReasoning === true;
+            if (!isReasoningDelta && delta.length > 0) {
+              sawNonReasoningAssistantDelta = true;
+            }
             setAssistantText((current) => current + delta);
           }
         }
@@ -2485,6 +2490,12 @@ export default function HomePage() {
         }
 
         if (envelope.type === 'turn.completed' || envelope.type === 'turn.failed' || envelope.type === 'turn.cancelled') {
+          if (envelope.type === 'turn.completed' && !sawNonReasoningAssistantDelta) {
+            const completedContent = typeof envelope.payload.content === 'string' ? envelope.payload.content : '';
+            if (completedContent.length > 0) {
+              setAssistantText((current) => `${ensureBalancedThinkTags(current)}${completedContent}`);
+            }
+          }
           setTurnStatus(envelope.type.replace('turn.', ''));
           setStreamActive(false);
           setResumedTurnHint('');
@@ -4702,7 +4713,7 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
         seqStart: envelope.seq,
         seqEnd: envelope.seq,
         createdAt: envelope.createdAt,
-        details: [content],
+        details: [],
       });
     }
     next.push({
@@ -4809,7 +4820,7 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
     if (!delta) {
       return current;
     }
-    return appendOrMergeByKind(current, 'reasoning', 'Reasoning', envelope, delta);
+    return appendOrMergeByKindWithoutDetails(current, 'reasoning', 'Reasoning', envelope);
   }
 
   if (envelope.type === 'assistant.delta') {
@@ -4943,6 +4954,35 @@ function appendOrMergeByKind(
   ];
 }
 
+function appendOrMergeByKindWithoutDetails(
+  current: TimelineEvent[],
+  kind: TimelineEvent['kind'],
+  title: string,
+  envelope: StreamEnvelope,
+): TimelineEvent[] {
+  const last = current[current.length - 1];
+  if (last && last.kind === kind) {
+    const updatedLast: TimelineEvent = {
+      ...last,
+      seqEnd: Math.max(last.seqEnd, envelope.seq),
+      details: [],
+    };
+    return [...current.slice(0, -1), updatedLast];
+  }
+  return [
+    ...current,
+    {
+      id: `${kind}-${envelope.seq}`,
+      kind,
+      title,
+      seqStart: envelope.seq,
+      seqEnd: envelope.seq,
+      createdAt: envelope.createdAt,
+      details: [],
+    },
+  ];
+}
+
 function appendOrMergeDetail(details: string[], text: string): string[] {
   if (details.length === 0) {
     return [text];
@@ -4965,8 +5005,22 @@ function renderChatMessageMarkdown(content: string): string {
       .split('\n')
       .map((line) => `> _${line.trim()}_`)
       .join('\n');
-    return `\n${italicLines}\n`;
+    // Ensure a blank line after blockquote so following assistant text
+    // is not treated as lazy continuation of the quote block.
+    return `\n${italicLines}\n\n`;
   });
+}
+
+function ensureBalancedThinkTags(content: string): string {
+  if (!content.includes('<think>')) {
+    return content;
+  }
+  const openCount = (content.match(/<think>/gi) ?? []).length;
+  const closeCount = (content.match(/<\/think>/gi) ?? []).length;
+  if (openCount <= closeCount) {
+    return content;
+  }
+  return `${content}${'</think>'.repeat(openCount - closeCount)}`;
 }
 
 const ChatMessageMarkdown = memo(function ChatMessageMarkdown({ content }: { content: string }) {

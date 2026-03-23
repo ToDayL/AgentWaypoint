@@ -181,7 +181,7 @@ export class MockRunnerAdapter implements RunnerAdapter {
 
   async getHealth(): Promise<RunnerHealth> {
     return {
-      supportedBackends: ['codex', 'claude'],
+      supportedBackends: ['codex'],
     };
   }
 

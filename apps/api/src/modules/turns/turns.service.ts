@@ -332,7 +332,7 @@ export class TurnsService implements OnModuleInit {
         }
         await this.openReasoningBlockIfNeeded(turnId);
         await this.appendEvent(turnId, 'reasoning.delta', this.normalizePayload({ delta }));
-        await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: delta }));
+        await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: delta, isReasoning: true }));
         return;
       }
       case 'turn.approval.requested': {
@@ -457,12 +457,18 @@ export class TurnsService implements OnModuleInit {
 
         await this.prisma.$transaction(async (tx) => {
           const assistantContentFromEvents = await this.collectAssistantDeltaContent(tx, turnId);
-          const assistantContent = assistantContentFromEvents.length > 0 ? assistantContentFromEvents : content;
+          const assistantContent =
+            assistantContentFromEvents.full.length > 0
+              ? assistantContentFromEvents.nonReasoning.length > 0
+                ? assistantContentFromEvents.full
+                : `${assistantContentFromEvents.full}${content}`
+              : content;
+          const normalizedAssistantContent = ensureBalancedThinkTags(assistantContent);
           const assistantMessage = await tx.message.create({
             data: {
               sessionId: turn.sessionId,
               role: 'assistant',
-              content: assistantContent,
+              content: normalizedAssistantContent,
             },
           });
 
@@ -477,7 +483,7 @@ export class TurnsService implements OnModuleInit {
           });
         });
 
-        await this.appendEvent(turnId, 'turn.completed', this.normalizePayload({}));
+        await this.appendEvent(turnId, 'turn.completed', this.normalizePayload(payload));
         return;
       }
       case 'turn.cancelled': {
@@ -485,7 +491,7 @@ export class TurnsService implements OnModuleInit {
           return;
         }
         await this.prisma.$transaction(async (tx) => {
-          const assistantContent = await this.collectAssistantDeltaContent(tx, turnId);
+          const assistantContent = ensureBalancedThinkTags((await this.collectAssistantDeltaContent(tx, turnId)).full);
           const assistantMessage =
             assistantContent.length > 0
               ? await tx.message.create({
@@ -553,7 +559,7 @@ export class TurnsService implements OnModuleInit {
       return;
     }
     this.reasoningOpenTurns.add(turnId);
-    await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: '<think>' }));
+    await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: '<think>', isReasoning: true }));
   }
 
   private async closeReasoningBlockIfOpen(turnId: string): Promise<void> {
@@ -561,10 +567,13 @@ export class TurnsService implements OnModuleInit {
       return;
     }
     this.reasoningOpenTurns.delete(turnId);
-    await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: '</think>' }));
+    await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: '</think>', isReasoning: true }));
   }
 
-  private async collectAssistantDeltaContent(tx: Prisma.TransactionClient, turnId: string): Promise<string> {
+  private async collectAssistantDeltaContent(
+    tx: Prisma.TransactionClient,
+    turnId: string,
+  ): Promise<{ full: string; nonReasoning: string }> {
     const deltaEvents = await tx.event.findMany({
       where: {
         turnId,
@@ -576,16 +585,23 @@ export class TurnsService implements OnModuleInit {
       },
     });
     if (deltaEvents.length === 0) {
-      return '';
+      return { full: '', nonReasoning: '' };
     }
-    const chunks: string[] = [];
+    const fullChunks: string[] = [];
+    const nonReasoningChunks: string[] = [];
     for (const event of deltaEvents) {
-      const text = extractAssistantDeltaText(event.payload);
+      const { text, isReasoning } = extractAssistantDelta(event.payload);
       if (text.length > 0) {
-        chunks.push(text);
+        fullChunks.push(text);
+        if (!isReasoning) {
+          nonReasoningChunks.push(text);
+        }
       }
     }
-    return chunks.join('');
+    return {
+      full: fullChunks.join(''),
+      nonReasoning: nonReasoningChunks.join(''),
+    };
   }
 
   private async reconcileInFlightTurnsOnStartup(): Promise<void> {
@@ -737,12 +753,28 @@ function readFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function extractAssistantDeltaText(payload: Prisma.JsonValue): string {
+function extractAssistantDelta(payload: Prisma.JsonValue): { text: string; isReasoning: boolean } {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    return '';
+    return { text: '', isReasoning: false };
   }
-  const text = (payload as Record<string, unknown>).text;
-  return typeof text === 'string' ? text : '';
+  const record = payload as Record<string, unknown>;
+  const text = record.text;
+  return {
+    text: typeof text === 'string' ? text : '',
+    isReasoning: record.isReasoning === true,
+  };
+}
+
+function ensureBalancedThinkTags(content: string): string {
+  if (!content.includes('<think>')) {
+    return content;
+  }
+  const openCount = (content.match(/<think>/gi) ?? []).length;
+  const closeCount = (content.match(/<\/think>/gi) ?? []).length;
+  if (openCount <= closeCount) {
+    return content;
+  }
+  return `${content}${'</think>'.repeat(openCount - closeCount)}`;
 }
 
 function normalizeJsonRecord(value: Prisma.JsonValue | null): Record<string, unknown> | null {
