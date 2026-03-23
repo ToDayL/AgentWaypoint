@@ -21,10 +21,15 @@ docker compose -f "$COMPOSE_FILE" up -d postgres redis
 echo "[test-api-e2e] Running migrations..."
 docker compose -f "$COMPOSE_FILE" run --rm \
   -e DATABASE_URL="$API_DATABASE_URL" \
+  -e CI="${CI:-}" \
   api sh -lc "
     pnpm install --no-frozen-lockfile --reporter=append-only &&
     pnpm --filter @agentwaypoint/api prisma:generate &&
-    pnpm --filter @agentwaypoint/api prisma:migrate:dev
+    if [ \"\${CI:-}\" = \"true\" ]; then
+      pnpm --filter @agentwaypoint/api prisma migrate deploy;
+    else
+      pnpm --filter @agentwaypoint/api prisma:migrate:dev;
+    fi
   "
 
 echo "[test-api-e2e] Running API e2e tests..."

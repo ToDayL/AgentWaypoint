@@ -1,0 +1,54 @@
+name: API E2E
+
+on:
+  pull_request:
+    paths:
+      - 'apps/api/**'
+      - 'packages/**'
+      - 'scripts/test-api-e2e.sh'
+      - 'infra/docker/**'
+      - '.github/workflows/api-e2e.yml'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'package.json'
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/api/**'
+      - 'packages/**'
+      - 'scripts/test-api-e2e.sh'
+      - 'infra/docker/**'
+      - '.github/workflows/api-e2e.yml'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'package.json'
+
+concurrency:
+  group: api-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Run API E2E in Docker
+        env:
+          CI: 'true'
+        run: ./scripts/test-api-e2e.sh
+
+      - name: Dump docker compose logs on failure
+        if: failure()
+        run: docker compose -f infra/docker/docker-compose.yml logs --no-color --timestamps
+
+      - name: Teardown docker resources
+        if: always()
+        run: docker compose -f infra/docker/docker-compose.yml down -v --remove-orphans
