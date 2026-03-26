@@ -69,5 +69,12 @@ Data persistence:
 - [Developer Guide](./doc/Developer-Guide.md)
 - [AGENTS runbook](./AGENTS.md)
 
+## Screenshots
+![Screenshot 1](./doc/images/readme/IMG_4477.jpeg)
+![Screenshot 2](./doc/images/readme/IMG_4476.jpeg)
+![Screenshot 3](./doc/images/readme/IMG_4475.jpeg)
+![Screenshot 4](./doc/images/readme/IMG_4454.jpeg)
+![Screenshot 5](./doc/images/readme/IMG_4455.jpeg)
+
 ## License
 Apache License 2.0. See [LICENSE](./LICENSE).
