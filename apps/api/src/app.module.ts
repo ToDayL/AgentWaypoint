@@ -7,6 +7,7 @@ import { SessionsModule } from './modules/sessions/sessions.module';
 import { RunnerModule } from './modules/runner/runner.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { TurnsModule } from './modules/turns/turns.module';
+import { ChannelsModule } from './modules/channels/channels.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { TurnsModule } from './modules/turns/turns.module';
     RunnerModule,
     SettingsModule,
     TurnsModule,
+    ChannelsModule,
   ],
 })
 export class AppModule {}

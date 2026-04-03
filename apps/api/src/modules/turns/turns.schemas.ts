@@ -10,13 +10,17 @@ export const TurnIdParamsSchema = z.object({
 
 export const CreateTurnBodySchema = z.object({
   content: z.string().trim().min(1).max(10000),
+  triggerIdentifier: z.string().trim().min(1).max(200).optional(),
+  triggerProvider: z.string().trim().min(1).max(120).optional(),
+  triggerIntegrationId: z.string().trim().min(1).max(120).optional(),
+  triggerMessageId: z.string().trim().min(1).max(300).optional().nullable(),
 });
 
 export const SteerTurnBodySchema = z.object({
   content: z.string().trim().min(1).max(10000),
 });
 
-const ApprovalDecisionSchema = z.union([
+export const ApprovalDecisionSchema = z.union([
   z.enum(['approve', 'reject', 'accept', 'acceptForSession', 'decline', 'cancel']),
   z
     .object({

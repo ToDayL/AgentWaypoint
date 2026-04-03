@@ -75,6 +75,48 @@ export class TurnsService implements OnModuleInit {
       throw new NotFoundException({ message: 'Session not found' });
     }
 
+    return this.createTurnWithResolvedSession(session, input);
+  }
+
+  async createTurnForGateway(
+    sessionId: string,
+    input: Pick<CreateTurnBody, 'content' | 'triggerIdentifier' | 'triggerProvider' | 'triggerIntegrationId' | 'triggerMessageId'>,
+  ) {
+    const session = await this.prisma.session.findUnique({
+      where: { id: sessionId },
+      select: {
+        id: true,
+        backendThreadId: true,
+        project: {
+          select: {
+            repoPath: true,
+            backend: true,
+            backendConfig: true,
+          },
+        },
+      },
+    });
+    if (!session) {
+      throw new NotFoundException({ message: 'Session not found' });
+    }
+
+    return this.createTurnWithResolvedSession(session, input);
+  }
+
+  private async createTurnWithResolvedSession(
+    session: {
+      id: string;
+      backendThreadId: string | null;
+      project: {
+        repoPath: string | null;
+        backend: string;
+        backendConfig: Prisma.JsonValue | null;
+      };
+    },
+    input: Pick<CreateTurnBody, 'content' | 'triggerIdentifier' | 'triggerProvider' | 'triggerIntegrationId' | 'triggerMessageId'>,
+  ) {
+    const sessionId = session.id;
+
     const cwd = session.project.repoPath?.trim() || null;
     const backend = session.project.backend?.trim() || null;
     const backendConfig =
@@ -93,7 +135,7 @@ export class TurnsService implements OnModuleInit {
       throw new ConflictException({ message: 'An active turn already exists for this session' });
     }
 
-    const turn = await this.prisma.$transaction(async (tx) => {
+    const created = await this.prisma.$transaction(async (tx) => {
       const userMessage = await tx.message.create({
         data: {
           sessionId,
@@ -102,20 +144,28 @@ export class TurnsService implements OnModuleInit {
         },
       });
 
-      return tx.turn.create({
+      const turn = await tx.turn.create({
         data: {
           sessionId,
           userMessageId: userMessage.id,
+          triggerIdentifier: normalizeTriggerIdentifier(input.triggerIdentifier),
+          triggerProvider: normalizeTriggerProvider(input.triggerProvider),
+          triggerIntegrationId: normalizeTriggerIntegrationId(input.triggerIntegrationId),
+          triggerMessageId: normalizeTriggerMessageId(input.triggerMessageId),
           status: 'queued',
           backend,
           requestedBackendConfig: buildRequestedBackendConfig(backendConfig, cwd),
         },
       });
+      return {
+        turn,
+        userMessageId: userMessage.id,
+      };
     });
 
     void this.runnerAdapter
       .startTurn({
-        turnId: turn.id,
+        turnId: created.turn.id,
         sessionId,
         content: input.content,
         backend,
@@ -124,27 +174,28 @@ export class TurnsService implements OnModuleInit {
         cwd,
       })
       .then(() => {
-        this.ensureRunnerEventConsumer(turn.id);
+        this.ensureRunnerEventConsumer(created.turn.id);
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : 'Runner start failed';
         void this.failTurn(
-          turn.id,
-          turn.status,
+          created.turn.id,
+          created.turn.status,
           'RUNNER_DISPATCH_FAILED',
           message,
           this.normalizePayload({ code: 'RUNNER_DISPATCH_FAILED', message }),
         );
         if (error instanceof Error) {
-          this.logger.error(`Failed to dispatch turn ${turn.id} to runner: ${error.message}`, error.stack);
+          this.logger.error(`Failed to dispatch turn ${created.turn.id} to runner: ${error.message}`, error.stack);
           return;
         }
-        this.logger.error(`Failed to dispatch turn ${turn.id} to runner`);
+        this.logger.error(`Failed to dispatch turn ${created.turn.id} to runner`);
       });
 
     return {
-      turnId: turn.id,
-      status: turn.status,
+      turnId: created.turn.id,
+      messageId: created.userMessageId,
+      status: created.turn.status,
     };
   }
 
@@ -211,6 +262,46 @@ export class TurnsService implements OnModuleInit {
     return this.getTurnStatusForUser(userId, turnId);
   }
 
+  async resolveTurnApprovalForGateway(turnId: string, input: ResolveTurnApprovalBody) {
+    const turn = await this.prisma.turn.findUnique({
+      where: { id: turnId },
+      select: { id: true, status: true },
+    });
+    if (!turn) {
+      throw new NotFoundException({ message: 'Turn not found' });
+    }
+
+    const approval = await this.prisma.turnApproval.findFirst({
+      where: {
+        requestId: input.approvalId,
+        turnId,
+        status: 'pending',
+      },
+      select: {
+        requestId: true,
+      },
+    });
+    if (!approval) {
+      throw new NotFoundException({ message: 'Pending approval not found' });
+    }
+
+    await this.runnerAdapter.resolveTurnApproval({
+      turnId,
+      requestId: approval.requestId,
+      decision: normalizeApprovalDecisionInput(input.decision),
+    });
+
+    const latest = await this.prisma.turn.findUnique({
+      where: { id: turnId },
+      select: { id: true, status: true },
+    });
+    return {
+      turnId,
+      status: latest?.status ?? turn.status,
+      accepted: true as const,
+    };
+  }
+
   async getEventsForTurn(userId: string, turnId: string, sinceSeq: number) {
     await this.getTurnForUser(userId, turnId);
     return this.prisma.event.findMany({
@@ -250,6 +341,10 @@ export class TurnsService implements OnModuleInit {
       id: turn.id,
       sessionId: turn.sessionId,
       backend: turn.backend,
+      triggerIdentifier: turn.triggerIdentifier,
+      triggerProvider: turn.triggerProvider,
+      triggerIntegrationId: turn.triggerIntegrationId,
+      triggerMessageId: turn.triggerMessageId,
       status: turn.status,
       failureCode: turn.failureCode,
       failureMessage: turn.failureMessage,
@@ -270,7 +365,20 @@ export class TurnsService implements OnModuleInit {
   async ingestRunnerEvent(turnId: string, type: RunnerEventType, payload: Record<string, unknown>) {
     const turn = await this.prisma.turn.findUnique({
       where: { id: turnId },
-      select: { id: true, sessionId: true, status: true, backend: true, requestedBackendConfig: true },
+      select: {
+        id: true,
+        sessionId: true,
+        status: true,
+        backend: true,
+        requestedBackendConfig: true,
+        triggerIdentifier: true,
+        triggerProvider: true,
+        triggerIntegrationId: true,
+        triggerMessageId: true,
+        session: {
+          select: { projectId: true },
+        },
+      },
     });
     if (!turn) {
       throw new NotFoundException({ message: 'Turn not found' });
@@ -481,6 +589,25 @@ export class TurnsService implements OnModuleInit {
               startedAt: turn.status === 'queued' ? new Date() : undefined,
             },
           });
+
+          if (turn.triggerIdentifier !== 'web') {
+            await tx.botMessage.create({
+              data: {
+                projectId: turn.session.projectId,
+                sessionId: turn.sessionId,
+                kind: 'turn_message',
+                payloadRaw: {
+                  turnId: turn.id,
+                  triggerIdentifier: turn.triggerIdentifier,
+                  triggerProvider: turn.triggerProvider,
+                  triggerIntegrationId: turn.triggerIntegrationId,
+                  triggerMessageId: turn.triggerMessageId,
+                  content: normalizedAssistantContent,
+                },
+                status: 'queued',
+              },
+            });
+          }
         });
 
         await this.appendEvent(turnId, 'turn.completed', this.normalizePayload(payload));
@@ -540,12 +667,52 @@ export class TurnsService implements OnModuleInit {
       select: { seq: true },
     });
 
-    await this.prisma.event.create({
+    const event = await this.prisma.event.create({
       data: {
         turnId,
         seq: (latest?.seq ?? 0) + 1,
         type,
         payload,
+      },
+    });
+
+    const turn = await this.prisma.turn.findUnique({
+      where: { id: turnId },
+      select: {
+        id: true,
+        sessionId: true,
+        triggerIdentifier: true,
+        triggerProvider: true,
+        triggerIntegrationId: true,
+        triggerMessageId: true,
+        session: {
+          select: {
+            projectId: true,
+          },
+        },
+      },
+    });
+    if (!turn) {
+      return;
+    }
+
+    await this.prisma.botMessage.create({
+      data: {
+        projectId: turn.session.projectId,
+        sessionId: turn.sessionId,
+        kind: 'event',
+        payloadRaw: {
+          turnId,
+          seq: event.seq,
+          type,
+          payload,
+          createdAt: event.createdAt.toISOString(),
+          triggerIdentifier: turn.triggerIdentifier,
+          triggerProvider: turn.triggerProvider,
+          triggerIntegrationId: turn.triggerIntegrationId,
+          triggerMessageId: turn.triggerMessageId,
+        },
+        status: 'queued',
       },
     });
   }
@@ -889,4 +1056,24 @@ function deriveExecutionModeFromRuntime(payload: Record<string, unknown>): 'read
     return 'yolo';
   }
   return 'safe-write';
+}
+
+function normalizeTriggerIdentifier(input: string | undefined): string {
+  const normalized = input?.trim();
+  return normalized && normalized.length > 0 ? normalized : 'web';
+}
+
+function normalizeTriggerMessageId(input: string | null | undefined): string | null {
+  const normalized = input?.trim();
+  return normalized && normalized.length > 0 ? normalized : null;
+}
+
+function normalizeTriggerProvider(input: string | undefined): string {
+  const normalized = input?.trim();
+  return normalized && normalized.length > 0 ? normalized : 'web';
+}
+
+function normalizeTriggerIntegrationId(input: string | undefined): string | null {
+  const normalized = input?.trim();
+  return normalized && normalized.length > 0 ? normalized : null;
 }
