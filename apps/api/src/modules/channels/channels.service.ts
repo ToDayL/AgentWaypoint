@@ -170,9 +170,20 @@ export class ChannelsService {
   }
 
   async pullOutboundForGateway(limit: number): Promise<BotMessage[]> {
+    const now = new Date();
     return this.prisma.botMessage.findMany({
       where: {
-        status: BOT_MESSAGE_QUEUED_STATUS,
+        OR: [
+          {
+            status: BOT_MESSAGE_QUEUED_STATUS,
+          },
+          {
+            status: 'sending',
+            leaseExpireAt: {
+              lte: now,
+            },
+          },
+        ],
       },
       orderBy: {
         createdAt: 'asc',
