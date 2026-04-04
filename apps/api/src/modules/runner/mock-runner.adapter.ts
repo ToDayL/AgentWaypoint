@@ -42,6 +42,13 @@ const WORKSPACE_FILE_MAX_SIZE_BYTES = 10 * 1024 * 1024;
 export class MockRunnerAdapter implements RunnerAdapter {
   private readonly logger = new Logger(MockRunnerAdapter.name);
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>[]>();
+  private readonly pendingApprovals = new Map<
+    string,
+    {
+      requestId: string;
+      assistantText: string;
+    }
+  >();
 
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
@@ -90,28 +97,58 @@ export class MockRunnerAdapter implements RunnerAdapter {
     });
 
     const assistantText = `Echo: ${input.content}`;
-    const chunks = chunkText(assistantText, 12);
-    const scheduled: ReturnType<typeof setTimeout>[] = [];
-
-    chunks.forEach((chunk, index) => {
-      const timer = setTimeout(() => {
-        void this.handleDelta(input.turnId, chunk).catch((error: unknown) => {
-          this.logError('Failed to emit assistant delta event', error);
-        });
-      }, 120 + index * 120);
-      scheduled.push(timer);
-    });
-
-    const finalizeDelay = 200 + chunks.length * 120;
-    const finalizeTimer = setTimeout(() => {
-      void this.finalizeTurn(input.turnId, assistantText).catch((error: unknown) => {
-        this.logError('Failed to finalize turn', error);
+    const requiresApproval = /approval/i.test(input.content);
+    if (requiresApproval) {
+      const requestId = `approval-${input.turnId}`;
+      this.pendingApprovals.set(input.turnId, {
+        requestId,
+        assistantText,
       });
-    }, finalizeDelay);
-    scheduled.push(finalizeTimer);
+      await this.prisma.$transaction(async (tx) => {
+        await tx.turn.update({
+          where: { id: input.turnId },
+          data: { status: 'waiting_approval' },
+        });
+        await tx.turnApproval.upsert({
+          where: {
+            turnId_requestId: {
+              turnId: input.turnId,
+              requestId,
+            },
+          },
+          update: {
+            kind: 'command',
+            status: 'pending',
+            decision: null,
+            resolvedAt: null,
+            payload: {
+              requestId,
+              kind: 'command',
+              command: input.content,
+            },
+          },
+          create: {
+            turnId: input.turnId,
+            requestId,
+            kind: 'command',
+            status: 'pending',
+            payload: {
+              requestId,
+              kind: 'command',
+              command: input.content,
+            },
+          },
+        });
+      });
+      await this.appendEvent(input.turnId, 'turn.approval.requested', {
+        requestId,
+        kind: 'command',
+        command: input.content,
+      });
+      return;
+    }
 
-    // Keep track so cancel can interrupt in-flight mock execution.
-    this.timers.set(input.turnId, scheduled);
+    this.scheduleAssistantOutput(input.turnId, assistantText);
   }
 
   async consumeTurnEvents(
@@ -131,6 +168,7 @@ export class MockRunnerAdapter implements RunnerAdapter {
     }
 
     this.clearTurnTimers(input.turnId);
+    this.pendingApprovals.delete(input.turnId);
     await this.prisma.$transaction(async (tx) => {
       const assistantContent = await collectAssistantDeltaContent(tx, input.turnId);
       const assistantMessage =
@@ -169,7 +207,75 @@ export class MockRunnerAdapter implements RunnerAdapter {
   }
 
   async resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void> {
-    throw new Error(`Mock runner does not support approvals for turn ${input.turnId}`);
+    const pending = this.pendingApprovals.get(input.turnId);
+    if (!pending) {
+      throw new Error(`No pending approval for turn ${input.turnId}`);
+    }
+    if (pending.requestId !== input.requestId) {
+      throw new Error(`Approval request mismatch for turn ${input.turnId}`);
+    }
+
+    const decisionLabel = normalizeApprovalDecisionLabel(input.decision);
+    const resolvedAt = new Date();
+    await this.appendEvent(input.turnId, 'turn.approval.resolved', {
+      requestId: input.requestId,
+      decision: decisionLabel,
+    });
+
+    if (isApprovalAccepted(decisionLabel)) {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.turnApproval.updateMany({
+          where: {
+            turnId: input.turnId,
+            requestId: input.requestId,
+            status: 'pending',
+          },
+          data: {
+            status: 'approved',
+            decision: decisionLabel,
+            resolvedAt,
+          },
+        });
+        await tx.turn.update({
+          where: { id: input.turnId },
+          data: { status: 'running' },
+        });
+      });
+      this.pendingApprovals.delete(input.turnId);
+      this.scheduleAssistantOutput(input.turnId, pending.assistantText);
+      return;
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.turnApproval.updateMany({
+        where: {
+          turnId: input.turnId,
+          requestId: input.requestId,
+          status: 'pending',
+        },
+        data: {
+          status: 'rejected',
+          decision: decisionLabel,
+          resolvedAt,
+        },
+      });
+      await tx.turn.update({
+        where: { id: input.turnId },
+        data: {
+          status: 'failed',
+          failureCode: 'APPROVAL_REJECTED',
+          failureMessage: 'Approval rejected',
+          endedAt: new Date(),
+        },
+      });
+    });
+    this.pendingApprovals.delete(input.turnId);
+    await this.appendEvent(input.turnId, 'turn.failed', {
+      code: 'APPROVAL_REJECTED',
+      message: 'Approval rejected',
+      requestId: input.requestId,
+      decision: decisionLabel,
+    });
   }
 
   async readCodexRateLimits(): Promise<CodexRateLimits> {
@@ -365,7 +471,20 @@ export class MockRunnerAdapter implements RunnerAdapter {
   private async finalizeTurn(turnId: string, content: string): Promise<void> {
     const turn = await this.prisma.turn.findUnique({
       where: { id: turnId },
-      select: { status: true, sessionId: true },
+      select: {
+        id: true,
+        status: true,
+        sessionId: true,
+        triggerIdentifier: true,
+        triggerProvider: true,
+        triggerIntegrationId: true,
+        triggerMessageId: true,
+        session: {
+          select: {
+            projectId: true,
+          },
+        },
+      },
     });
     if (!turn || TERMINAL_STATUSES.has(turn.status)) {
       this.clearTurnTimers(turnId);
@@ -389,10 +508,30 @@ export class MockRunnerAdapter implements RunnerAdapter {
           endedAt: new Date(),
         },
       });
+
+      if (turn.triggerIdentifier !== 'web') {
+        await tx.botMessage.create({
+          data: {
+            projectId: turn.session.projectId,
+            sessionId: turn.sessionId,
+            kind: 'turn_message',
+            payloadRaw: {
+              turnId: turn.id,
+              triggerIdentifier: turn.triggerIdentifier,
+              triggerProvider: turn.triggerProvider,
+              triggerIntegrationId: turn.triggerIntegrationId,
+              triggerMessageId: turn.triggerMessageId,
+              content,
+            },
+            status: 'queued',
+          },
+        });
+      }
     });
 
     await this.appendEvent(turnId, 'turn.completed', {});
     this.clearTurnTimers(turnId);
+    this.pendingApprovals.delete(turnId);
   }
 
   private async appendEvent(turnId: string, type: string, payload: Prisma.InputJsonValue): Promise<void> {
@@ -402,12 +541,52 @@ export class MockRunnerAdapter implements RunnerAdapter {
       select: { seq: true },
     });
 
-    await this.prisma.event.create({
+    const event = await this.prisma.event.create({
       data: {
         turnId,
         seq: (latest?.seq ?? 0) + 1,
         type,
         payload,
+      },
+    });
+
+    const turn = await this.prisma.turn.findUnique({
+      where: { id: turnId },
+      select: {
+        id: true,
+        sessionId: true,
+        triggerIdentifier: true,
+        triggerProvider: true,
+        triggerIntegrationId: true,
+        triggerMessageId: true,
+        session: {
+          select: {
+            projectId: true,
+          },
+        },
+      },
+    });
+    if (!turn) {
+      return;
+    }
+
+    await this.prisma.botMessage.create({
+      data: {
+        projectId: turn.session.projectId,
+        sessionId: turn.sessionId,
+        kind: 'event',
+        payloadRaw: {
+          turnId,
+          seq: event.seq,
+          type,
+          payload,
+          createdAt: event.createdAt.toISOString(),
+          triggerIdentifier: turn.triggerIdentifier,
+          triggerProvider: turn.triggerProvider,
+          triggerIntegrationId: turn.triggerIntegrationId,
+          triggerMessageId: turn.triggerMessageId,
+        },
+        status: 'queued',
       },
     });
   }
@@ -419,6 +598,30 @@ export class MockRunnerAdapter implements RunnerAdapter {
     }
     pending.forEach((timer) => clearTimeout(timer));
     this.timers.delete(turnId);
+  }
+
+  private scheduleAssistantOutput(turnId: string, assistantText: string): void {
+    const chunks = chunkText(assistantText, 12);
+    const scheduled: ReturnType<typeof setTimeout>[] = [];
+
+    chunks.forEach((chunk, index) => {
+      const timer = setTimeout(() => {
+        void this.handleDelta(turnId, chunk).catch((error: unknown) => {
+          this.logError('Failed to emit assistant delta event', error);
+        });
+      }, 120 + index * 120);
+      scheduled.push(timer);
+    });
+
+    const finalizeDelay = 200 + chunks.length * 120;
+    const finalizeTimer = setTimeout(() => {
+      void this.finalizeTurn(turnId, assistantText).catch((error: unknown) => {
+        this.logError('Failed to finalize turn', error);
+      });
+    }, finalizeDelay);
+    scheduled.push(finalizeTimer);
+
+    this.timers.set(turnId, scheduled);
   }
 
   private logError(message: string, error: unknown): void {
@@ -527,6 +730,31 @@ function chunkText(text: string, size: number): string[] {
     chunks.push(text.slice(i, i + size));
   }
   return chunks;
+}
+
+function isApprovalAccepted(decision: string): boolean {
+  return (
+    decision === 'approve' ||
+    decision === 'accept' ||
+    decision === 'acceptForSession' ||
+    decision.startsWith('acceptWithExecpolicyAmendment') ||
+    decision.startsWith('applyNetworkPolicyAmendment')
+  );
+}
+
+function normalizeApprovalDecisionLabel(decision: unknown): string {
+  if (typeof decision === 'string') {
+    return decision;
+  }
+  if (decision && typeof decision === 'object') {
+    if ('acceptWithExecpolicyAmendment' in decision) {
+      return 'acceptWithExecpolicyAmendment';
+    }
+    if ('applyNetworkPolicyAmendment' in decision) {
+      return 'applyNetworkPolicyAmendment';
+    }
+  }
+  return 'decline';
 }
 
 async function collectAssistantDeltaContent(tx: Prisma.TransactionClient, turnId: string): Promise<string> {

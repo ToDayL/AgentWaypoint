@@ -16,7 +16,7 @@ export const SteerTurnBodySchema = z.object({
   content: z.string().trim().min(1).max(10000),
 });
 
-const ApprovalDecisionSchema = z.union([
+export const ApprovalDecisionSchema = z.union([
   z.enum(['approve', 'reject', 'accept', 'acceptForSession', 'decline', 'cancel']),
   z
     .object({

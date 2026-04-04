@@ -731,7 +731,7 @@ export default function HomePage() {
     if (!previewFilePath) {
       return '';
     }
-    return `/api/fs/file-content?${new URLSearchParams({ path: previewFilePath }).toString()}`;
+    return `/api/channels/plugins/web/app/fs/file-content?${new URLSearchParams({ path: previewFilePath }).toString()}`;
   }, [previewFilePath]);
   const previewCodeMirrorExtensions = useMemo(() => resolveCodeMirrorExtensions(previewFilePath), [previewFilePath]);
 
@@ -897,7 +897,7 @@ export default function HomePage() {
     const timer = setTimeout(() => {
       setWorkspaceSuggestionBusy(true);
       void apiRequest<{ data: string[] }>(
-        `/api/fs/suggestions?${new URLSearchParams({ prefix, limit: '8' }).toString()}`,
+        `/api/channels/plugins/web/app/fs/suggestions?${new URLSearchParams({ prefix, limit: '8' }).toString()}`,
         {
           method: 'GET',
           signal: controller.signal,
@@ -1062,7 +1062,7 @@ export default function HomePage() {
       backend,
     });
     void apiRequest<{ data?: Array<{ name?: string; description?: string; enabled?: boolean }> }>(
-      `/api/skills?${query.toString()}`,
+      `/api/channels/plugins/web/app/skills?${query.toString()}`,
       { method: 'GET', signal: controller.signal },
     )
       .then((response) => {
@@ -1579,7 +1579,9 @@ export default function HomePage() {
         query.set('backend', backend.trim());
       }
       const response = await apiRequest<{ data: AvailableModel[] }>(
-        query.size > 0 ? `/api/models?${query.toString()}` : '/api/models',
+        query.size > 0
+          ? `/api/channels/plugins/web/app/models?${query.toString()}`
+          : '/api/channels/plugins/web/app/models',
         {
         method: 'GET',
         },
@@ -1633,7 +1635,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      const items = (await apiRequest<Project[]>('/api/projects', {
+      const items = (await apiRequest<Project[]>('/api/channels/plugins/web/app/projects', {
         method: 'GET',
       })) as Project[];
       setProjects(items);
@@ -1666,7 +1668,9 @@ export default function HomePage() {
       if (options?.hydrateAllSessions) {
         const allProjectSessions = await Promise.all(
           items.map(async (project) => {
-            const projectSessions = (await apiRequest<Session[]>(`/api/projects/${project.id}/sessions`, {
+            const projectSessions = (await apiRequest<Session[]>(
+              `/api/channels/plugins/web/app/projects/${project.id}/sessions`,
+              {
               method: 'GET',
             })) as Session[];
             return { projectId: project.id, sessions: projectSessions };
@@ -1767,7 +1771,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      const items = (await apiRequest<Session[]>(`/api/projects/${projectId}/sessions`, {
+      const items = (await apiRequest<Session[]>(`/api/channels/plugins/web/app/projects/${projectId}/sessions`, {
         method: 'GET',
       })) as Session[];
       setSessions(items);
@@ -1814,7 +1818,7 @@ export default function HomePage() {
     }
     try {
       const response = await apiRequest<{ data: WorkspaceTreeEntry[] }>(
-        `/api/fs/tree?${new URLSearchParams({ path: normalizedPath, limit: '200', includeHidden: 'true' }).toString()}`,
+        `/api/channels/plugins/web/app/fs/tree?${new URLSearchParams({ path: normalizedPath, limit: '200', includeHidden: 'true' }).toString()}`,
         {
           method: 'GET',
         },
@@ -1869,7 +1873,7 @@ export default function HomePage() {
 
     try {
       const response = await apiRequest<WorkspaceFileResponse>(
-        `/api/fs/file?${new URLSearchParams({ path: normalizedPath, maxBytes: String(256 * 1024) }).toString()}`,
+        `/api/channels/plugins/web/app/fs/file?${new URLSearchParams({ path: normalizedPath, maxBytes: String(256 * 1024) }).toString()}`,
         {
           method: 'GET',
         },
@@ -1983,7 +1987,7 @@ export default function HomePage() {
         model: newProjectDefaultModel,
         executionMode: newProjectExecutionMode,
       });
-      const created = await apiRequest<Project>('/api/projects', {
+      const created = await apiRequest<Project>('/api/channels/plugins/web/app/projects', {
         method: 'POST',
         body: {
           name: newProjectName.trim(),
@@ -2012,7 +2016,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      const created = await apiRequest<Session>(`/api/projects/${selectedProjectId}/sessions`, {
+      const created = await apiRequest<Session>(`/api/channels/plugins/web/app/projects/${selectedProjectId}/sessions`, {
         method: 'POST',
         body: {
           title: newSessionTitle.trim(),
@@ -2044,7 +2048,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      const forked = await apiRequest<Session>(`/api/sessions/${sourceSessionId}/fork`, {
+      const forked = await apiRequest<Session>(`/api/channels/plugins/web/app/sessions/${sourceSessionId}/fork`, {
         method: 'POST',
         body: {},
       });
@@ -2073,7 +2077,7 @@ export default function HomePage() {
     setCompactingContext(true);
     setError('');
     try {
-      await apiRequest<{ accepted: boolean }>(`/api/sessions/${sessionId}/compact`, {
+      await apiRequest<{ accepted: boolean }>(`/api/channels/plugins/web/app/sessions/${sessionId}/compact`, {
         method: 'POST',
       });
       await loadSessionHistory(sessionId, {
@@ -2132,7 +2136,7 @@ export default function HomePage() {
         const formData = new FormData();
         formData.append('workspacePath', workspacePath);
         formData.append('file', file, file.name);
-        const uploaded = await uploadRequest<WorkspaceUploadResponse>('/api/fs/upload', formData);
+        const uploaded = await uploadRequest<WorkspaceUploadResponse>('/api/channels/plugins/web/app/fs/upload', formData);
         appendWorkspacePathMention(uploaded.path);
       }
       await loadWorkspaceTree(workspacePath);
@@ -2169,7 +2173,7 @@ export default function HomePage() {
         ]);
         setPrompt('');
         try {
-          await apiRequest<TurnStatusResponse>(`/api/turns/${activeTurnId}/steer`, {
+          await apiRequest<TurnStatusResponse>(`/api/channels/plugins/web/app/turns/${activeTurnId}/steer`, {
             method: 'POST',
             body: { content: steerContent },
           });
@@ -2207,7 +2211,9 @@ export default function HomePage() {
       const createTurnController = new AbortController();
       pendingTurnCreateAbortRef.current = createTurnController;
 
-      const result = await apiRequest<{ turnId: string; status: string }>(`/api/sessions/${selectedSessionId}/turns`, {
+      const result = await apiRequest<{ turnId: string; status: string }>(
+        `/api/channels/plugins/web/app/sessions/${selectedSessionId}/turns`,
+        {
         method: 'POST',
         body: { content: userContent },
         signal: createTurnController.signal,
@@ -2266,7 +2272,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      const cancelled = await apiRequest<{ status: string }>(`/api/turns/${cancellingTurnId}/cancel`, {
+      const cancelled = await apiRequest<{ status: string }>(`/api/channels/plugins/web/app/turns/${cancellingTurnId}/cancel`, {
         method: 'POST',
       });
       setTurnStatus(cancelled.status);
@@ -2290,7 +2296,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      await apiRequest<TurnStatusResponse>(`/api/turns/${activeTurnId}/approval`, {
+      await apiRequest<TurnStatusResponse>(`/api/channels/plugins/web/app/turns/${activeTurnId}/approval`, {
         method: 'POST',
         body: {
           approvalId: pendingApproval.id,
@@ -2338,7 +2344,7 @@ export default function HomePage() {
     stopTurnStatusPolling();
     setError('');
     try {
-      const history = await apiRequest<SessionHistory>(`/api/sessions/${sessionId}/history`, {
+      const history = await apiRequest<SessionHistory>(`/api/channels/plugins/web/app/sessions/${sessionId}/history`, {
         method: 'GET',
       });
       setMessages(history.messages);
@@ -2380,7 +2386,7 @@ export default function HomePage() {
   }
 
   async function syncTurnState(turnId: string): Promise<void> {
-    const status = await apiRequest<TurnStatusResponse>(`/api/turns/${turnId}`, {
+    const status = await apiRequest<TurnStatusResponse>(`/api/channels/plugins/web/app/turns/${turnId}`, {
       method: 'GET',
     });
     setTurnStatus(status.status);
@@ -2393,7 +2399,7 @@ export default function HomePage() {
 
   function openStream(turnId: string, sessionId: string): void {
     eventSourceRef.current?.close();
-    const streamUrl = `/api/turns/${turnId}/stream`;
+    const streamUrl = `/api/channels/plugins/web/app/turns/${turnId}/stream`;
     const source = new EventSource(streamUrl);
     eventSourceRef.current = source;
     let sawNonReasoningAssistantDelta = false;
@@ -2537,7 +2543,7 @@ export default function HomePage() {
     turnPollTimerRef.current = setInterval(() => {
       void (async () => {
         try {
-          const status = await apiRequest<TurnStatusResponse>(`/api/turns/${turnId}`, {
+          const status = await apiRequest<TurnStatusResponse>(`/api/channels/plugins/web/app/turns/${turnId}`, {
             method: 'GET',
           });
           setTurnStatus(status.status);
@@ -2593,7 +2599,7 @@ export default function HomePage() {
         model: projectConfigDefaultModel,
         executionMode: projectConfigExecutionMode,
       });
-      await apiRequest<Project>(`/api/projects/${selectedProjectId}`, {
+      await apiRequest<Project>(`/api/channels/plugins/web/app/projects/${selectedProjectId}`, {
         method: 'PATCH',
         body: {
           name: projectConfigName.trim(),
@@ -2751,7 +2757,9 @@ export default function HomePage() {
       return;
     }
     try {
-      const items = (await apiRequest<Session[]>(`/api/projects/${normalizedProjectId}/sessions`, {
+      const items = (await apiRequest<Session[]>(
+        `/api/channels/plugins/web/app/projects/${normalizedProjectId}/sessions`,
+        {
         method: 'GET',
       })) as Session[];
       setSessionsByProject((current) => ({ ...current, [normalizedProjectId]: items }));
@@ -2819,7 +2827,7 @@ export default function HomePage() {
     try {
       if (actionPanelMode === 'confirmDeleteProject' && projectDeleteTarget) {
         const deletingSelectedProject = selectedProjectId === projectDeleteTarget.id;
-        await apiRequest(`/api/projects/${projectDeleteTarget.id}`, {
+        await apiRequest(`/api/channels/plugins/web/app/projects/${projectDeleteTarget.id}`, {
           method: 'DELETE',
         });
         if (deletingSelectedProject) {
@@ -2833,7 +2841,7 @@ export default function HomePage() {
           throw new Error('No project selected');
         }
         const deletingSelectedSession = selectedSessionId === sessionDeleteTarget.id;
-        await apiRequest(`/api/sessions/${sessionDeleteTarget.id}`, {
+        await apiRequest(`/api/channels/plugins/web/app/sessions/${sessionDeleteTarget.id}`, {
           method: 'DELETE',
         });
         if (deletingSelectedSession) {
