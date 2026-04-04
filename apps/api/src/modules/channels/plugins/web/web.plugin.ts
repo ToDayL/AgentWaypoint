@@ -26,6 +26,8 @@ type SessionDispatchedBuffer = {
   events: WebDispatchedEvent[];
 };
 
+const MAX_SESSION_BUFFER_EVENTS = 500;
+
 @Injectable()
 export class WebPlugin implements ChannelPlugin {
   readonly provider = 'web';
@@ -234,6 +236,10 @@ export class WebPlugin implements ChannelPlugin {
       return;
     }
     existing.events.push(event);
+    if (existing.events.length > MAX_SESSION_BUFFER_EVENTS) {
+      const overflow = existing.events.length - MAX_SESSION_BUFFER_EVENTS;
+      existing.events.splice(0, overflow);
+    }
   }
 
   private nextFallbackSeq(): number {

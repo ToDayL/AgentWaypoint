@@ -35,6 +35,22 @@ type PendingApprovalSummary = {
   payload: Record<string, unknown>;
 };
 
+type InternalCreateTurnInput = {
+  content: string;
+  triggerIdentifier?: string;
+  triggerProvider?: string;
+  triggerIntegrationId?: string;
+  triggerMessageId?: string | null;
+};
+
+type GatewayCreateTurnInput = {
+  content: string;
+  triggerIdentifier: string;
+  triggerProvider?: string;
+  triggerIntegrationId?: string;
+  triggerMessageId?: string | null;
+};
+
 @Injectable()
 export class TurnsService implements OnModuleInit {
   private readonly logger = new Logger(TurnsService.name);
@@ -80,7 +96,7 @@ export class TurnsService implements OnModuleInit {
 
   async createTurnForGateway(
     sessionId: string,
-    input: Pick<CreateTurnBody, 'content' | 'triggerIdentifier' | 'triggerProvider' | 'triggerIntegrationId' | 'triggerMessageId'>,
+    input: GatewayCreateTurnInput,
   ) {
     const session = await this.prisma.session.findUnique({
       where: { id: sessionId },
@@ -113,7 +129,7 @@ export class TurnsService implements OnModuleInit {
         backendConfig: Prisma.JsonValue | null;
       };
     },
-    input: Pick<CreateTurnBody, 'content' | 'triggerIdentifier' | 'triggerProvider' | 'triggerIntegrationId' | 'triggerMessageId'>,
+    input: InternalCreateTurnInput,
   ) {
     const sessionId = session.id;
 
