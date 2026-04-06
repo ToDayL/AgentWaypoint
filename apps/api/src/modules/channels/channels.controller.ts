@@ -70,12 +70,6 @@ export class ChannelsController {
     return this.channelsService.setIntegrationStatus(user.id, botIntegrationId, 'paused');
   }
 
-  @Post('integrations/:botIntegrationId/disable')
-  async disableIntegration(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown) {
-    const { botIntegrationId } = parseWithZod(BotIntegrationIdParamsSchema, params);
-    return this.channelsService.setIntegrationStatus(user.id, botIntegrationId, 'disabled');
-  }
-
   @Delete('integrations/:botIntegrationId')
   @HttpCode(204)
   async deleteIntegration(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown) {

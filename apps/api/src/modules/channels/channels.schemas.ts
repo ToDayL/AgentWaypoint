@@ -1,12 +1,9 @@
 import { z } from 'zod';
 
 export const BotIntegrationStatusSchema = z.enum([
-  'draft',
-  'authorizing',
   'active',
   'paused',
   'error',
-  'disabled',
 ]);
 
 export const BotMessageKindSchema = z.enum([
@@ -32,12 +29,50 @@ export const MessageIdParamsSchema = z.object({
   messageId: z.string().trim().min(1),
 });
 
-export const CreateIntegrationBodySchema = z.object({
-  provider: z.string().trim().min(1).max(120),
-  name: z.string().trim().min(1).max(120),
-  credentialsEncrypted: z.record(z.unknown()).optional(),
-  pluginConfig: z.record(z.unknown()).optional(),
+const DiscordIdListSchema = z.array(z.string().trim().min(1).max(120)).max(500);
+
+const DiscordCredentialsSchema = z.object({
+  botToken: z.string().trim().min(1).max(4096),
 });
+
+const DiscordPluginConfigSchema = z.object({
+  trigger: z.object({
+    requireMention: z.boolean(),
+    allowedUsers: DiscordIdListSchema,
+    allowedGuilds: DiscordIdListSchema,
+    allowedChannels: DiscordIdListSchema.optional(),
+    allowDM: z.boolean().optional(),
+  }),
+  message: z.object({
+    sendStyle: z.enum(['reply', 'new_message']).optional(),
+    allowEveryoneMention: z.boolean().optional(),
+    ignoreBotMessages: z.boolean().optional(),
+    maxInboundLength: z.coerce.number().int().min(1).max(10000).optional(),
+  }),
+});
+
+const GenericCreateIntegrationBodySchema = z
+  .object({
+    provider: z.string().trim().min(1).max(120),
+    name: z.string().trim().min(1).max(120),
+    credentialsEncrypted: z.record(z.unknown()).optional(),
+    pluginConfig: z.record(z.unknown()).optional(),
+  })
+  .refine((input) => input.provider !== 'discord', {
+    message: 'Discord integrations must use the Discord payload schema',
+  });
+
+const DiscordCreateIntegrationBodySchema = z.object({
+  provider: z.literal('discord'),
+  name: z.string().trim().min(1).max(120),
+  credentialsEncrypted: DiscordCredentialsSchema,
+  pluginConfig: DiscordPluginConfigSchema,
+});
+
+export const CreateIntegrationBodySchema = z.union([
+  GenericCreateIntegrationBodySchema,
+  DiscordCreateIntegrationBodySchema,
+]);
 
 export const UpdateIntegrationBodySchema = z
   .object({

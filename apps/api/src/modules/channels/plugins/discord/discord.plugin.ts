@@ -1,0 +1,2402 @@
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { BotIntegration, BotMessage } from '@prisma/client';
+import {
+  ActionRowBuilder,
+  type ApplicationCommandDataResolvable,
+  ApplicationCommandOptionType,
+  type AutocompleteInteraction,
+  ChannelType,
+  ChatInputCommandInteraction,
+  Client,
+  GatewayIntentBits,
+  Message,
+  Partials,
+  StringSelectMenuBuilder,
+  type StringSelectMenuInteraction,
+} from 'discord.js';
+import type { GatewayDispatchPayload } from 'discord.js';
+import http from 'node:http';
+import https from 'node:https';
+import { HttpProxyAgent } from 'http-proxy-agent';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { Dispatcher, ProxyAgent } from 'undici';
+import { ChannelsService } from '../../channels.service';
+import { ChannelPlugin, ChannelPluginContext, PluginBindingPolicy, PluginDispatchContext } from '../plugin.types';
+
+type DiscordPluginConfig = {
+  trigger?: {
+    requireMention?: boolean;
+    allowedUsers?: string[];
+    allowedGuilds?: string[];
+    allowedChannels?: string[];
+    allowDM?: boolean;
+  };
+  message?: {
+    sendStyle?: 'reply' | 'new_message';
+    allowEveryoneMention?: boolean;
+    ignoreBotMessages?: boolean;
+    maxInboundLength?: number;
+  };
+  channelBindings?: Record<string, DiscordChannelBinding>;
+  sessionBindings?: Record<string, DiscordSessionBinding>;
+  sessionIds?: string[];
+};
+
+type DiscordChannelBinding = {
+  projectId: string;
+  channel: string;
+  guild?: string | null;
+};
+
+type DiscordSessionBinding = {
+  channel: string;
+  thread: string | null;
+  guid?: string | null;
+};
+
+type DiscordRuntime = {
+  integrationId: string;
+  ownerUserId: string;
+  client: Client;
+  botToken: string;
+  config: DiscordPluginConfig;
+  stopped: boolean;
+  processedMessageIds: Map<string, number>;
+  approvalMenus: Map<string, DiscordApprovalMenuState>;
+  triggerMessageActions: Map<string, 'watching' | 'active' | 'final'>;
+  typingByMessageKey: Map<string, string>;
+  typingIntervals: Map<string, ReturnType<typeof setInterval>>;
+};
+
+type ApprovalDecision =
+  | 'approve'
+  | 'reject'
+  | 'accept'
+  | 'acceptForSession'
+  | 'decline'
+  | 'cancel'
+  | { acceptWithExecpolicyAmendment: { execpolicy_amendment: string[] } }
+  | { applyNetworkPolicyAmendment: { network_policy_amendment: { action: 'allow' | 'deny'; host: string } } };
+
+type DiscordApprovalRequest = {
+  turnId: string;
+  approvalId: string;
+  kind: string;
+  payload: Record<string, unknown>;
+};
+
+type DiscordApprovalActionOption = {
+  key: string;
+  label: string;
+  decision: ApprovalDecision;
+  secondary?: boolean;
+};
+
+type DiscordApprovalMenuState = {
+  turnId: string;
+  approvalId: string;
+  options: DiscordApprovalActionOption[];
+  optionByKey: Map<string, DiscordApprovalActionOption>;
+  expiresAt: number;
+};
+
+const DEFAULT_RECONCILE_INTERVAL_MS = 10_000;
+const DISCORD_LOGIN_TIMEOUT_MS = 20_000;
+const RAW_FALLBACK_DELAY_MS = 500;
+const PROCESSED_MESSAGE_TTL_MS = 5 * 60_000;
+const PROCESSED_MESSAGE_MAX = 4_000;
+const DISCORD_MESSAGE_MAX_LENGTH = 2_000;
+const DISCORD_PROJECT_COMMAND = 'project';
+const EXECUTION_MODE_CHOICES = ['read-only', 'safe-write', 'yolo'] as const;
+const AUTOCOMPLETE_MODEL_TIMEOUT_MS = 1_200;
+const AUTOCOMPLETE_MODEL_CACHE_TTL_MS = 60_000;
+const DISCORD_APPROVAL_SELECT_PREFIX = 'aw-approval';
+const DISCORD_APPROVAL_MENU_TTL_MS = 24 * 60 * 60 * 1000;
+const DISCORD_ACTION_EYE = '👀';
+const DISCORD_ACTION_FLASH = '⚡';
+const DISCORD_ACTION_CHECK = '✅';
+const DISCORD_ACTION_CROSS = '❌';
+const DISCORD_ACTION_ALERT = '❗';
+const DISCORD_TYPING_HEARTBEAT_MS = 8_000;
+let proxyConfigured = false;
+let sharedProxyDispatcher: Dispatcher | null = null;
+let httpsWebSocketProxyPatched = false;
+
+@Injectable()
+export class DiscordPlugin implements ChannelPlugin {
+  readonly provider = 'discord';
+  private readonly logger = new Logger(DiscordPlugin.name);
+  private readonly bindingPolicy: PluginBindingPolicy = {
+    bindAllSessions: false,
+  };
+  private context: ChannelPluginContext | null = null;
+  private runtimes = new Map<string, DiscordRuntime>();
+  private reconcileTimer: ReturnType<typeof setInterval> | null = null;
+  private reconciling = false;
+  private proxyDispatcher: Dispatcher | null = null;
+  private modelAutocompleteCache = new Map<string, { expiresAt: number; models: string[] }>();
+
+  constructor(
+    @Inject(ChannelsService) private readonly channelsService: ChannelsService,
+  ) {}
+
+  async boot(context: ChannelPluginContext): Promise<void> {
+    this.context = context;
+    this.proxyDispatcher = configureProxyFromEnvironment(this.logger);
+    void this.reconcileRuntimes();
+    this.reconcileTimer = setInterval(() => {
+      void this.reconcileRuntimes();
+    }, DEFAULT_RECONCILE_INTERVAL_MS);
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.reconcileTimer) {
+      clearInterval(this.reconcileTimer);
+      this.reconcileTimer = null;
+    }
+    const runtimes = [...this.runtimes.values()];
+    this.runtimes.clear();
+    await Promise.all(runtimes.map((runtime) => this.stopRuntime(runtime)));
+    this.context = null;
+  }
+
+  getBindingPolicy(): PluginBindingPolicy {
+    return this.bindingPolicy;
+  }
+
+  async sendMessage(message: BotMessage, context: PluginDispatchContext): Promise<{ providerMessageId: string }> {
+    const integrationId = normalizeOptionalString(context.bindingIntegrationId);
+    if (!integrationId) {
+      throw new Error('Missing Discord integration binding for outbound message');
+    }
+    const runtime = this.runtimes.get(integrationId);
+    if (!runtime || runtime.stopped) {
+      throw new Error(`Discord runtime unavailable for integration ${integrationId}`);
+    }
+
+    const targetChannelId = normalizeOptionalString(context.bindingThread) ?? normalizeOptionalString(context.bindingChannel);
+    if (!targetChannelId) {
+      throw new Error(`Discord binding target missing for outbound message ${message.id}`);
+    }
+
+    const channel = await runtime.client.channels.fetch(targetChannelId);
+    if (!channel?.isSendable()) {
+      throw new Error(`Discord channel ${targetChannelId} is not sendable`);
+    }
+
+    const approval = extractDiscordApprovalRequest(message);
+    if (approval) {
+      const triggerMessageId = readDiscordTriggerMessageId(message);
+      const reactionTargetChannelId =
+        normalizeOptionalString(context.bindingThread) ?? normalizeOptionalString(context.bindingChannel);
+      if (triggerMessageId && reactionTargetChannelId) {
+        await this.applyTriggerMessageAction(runtime, reactionTargetChannelId, triggerMessageId, {
+          action: 'approval_pending',
+          onlyIfTracked: false,
+          skipOutboundText: true,
+        });
+      }
+      const providerMessageId = await this.sendApprovalPrompt(
+        runtime,
+        channel as unknown as { send: (options: Record<string, unknown>) => Promise<{ id: string }> },
+        approval,
+      );
+      return { providerMessageId };
+    }
+
+    const reactionEffect = describeDiscordReactionEffect(message);
+    if (reactionEffect) {
+      const triggerMessageId = readDiscordTriggerMessageId(message);
+      const reactionTargetChannelId =
+        normalizeOptionalString(context.bindingThread) ?? normalizeOptionalString(context.bindingChannel);
+      if (triggerMessageId && reactionTargetChannelId) {
+        await this.applyTriggerMessageAction(runtime, reactionTargetChannelId, triggerMessageId, reactionEffect);
+      }
+      if (reactionEffect.skipOutboundText) {
+        return { providerMessageId: `discord-reaction-${message.id}` };
+      }
+    }
+
+    const outboundText = buildDiscordOutboundText(message);
+    if (!outboundText) {
+      return { providerMessageId: `discord-skipped-${message.id}` };
+    }
+
+    const sent = await channel.send({
+      content: limitDiscordMessageLength(outboundText),
+      allowedMentions: buildAllowedMentions(runtime.config.message?.allowEveryoneMention ?? false),
+    });
+    return { providerMessageId: sent.id };
+  }
+
+  private async reconcileRuntimes(): Promise<void> {
+    if (this.reconciling) {
+      return;
+    }
+    this.reconciling = true;
+    try {
+      const activeIntegrations = await this.channelsService.listActiveIntegrationsForGateway({});
+      const discordIntegrations = activeIntegrations.filter((integration) => integration.provider === this.provider);
+      const targetById = new Map(discordIntegrations.map((integration) => [integration.id, integration]));
+
+      for (const [integrationId, runtime] of this.runtimes) {
+        const target = targetById.get(integrationId);
+        if (!target || !hasSameRuntimeIdentity(target, runtime.botToken, runtime.config)) {
+          this.runtimes.delete(integrationId);
+          await this.stopRuntime(runtime);
+        }
+      }
+
+      for (const integration of discordIntegrations) {
+        if (this.runtimes.has(integration.id)) {
+          continue;
+        }
+        const runtime = this.createRuntime(integration);
+        if (!runtime) {
+          continue;
+        }
+        this.runtimes.set(integration.id, runtime);
+        await this.startRuntime(runtime);
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'unknown reconcile error';
+      this.logger.warn(`Failed to reconcile Discord runtimes: ${message}`);
+    } finally {
+      this.reconciling = false;
+    }
+  }
+
+  private createRuntime(integration: BotIntegration): DiscordRuntime | null {
+    const botToken = readBotToken(integration.credentialsEncrypted);
+    if (!botToken) {
+      this.logger.warn(`Skipping discord integration ${integration.id}: missing bot token`);
+      return null;
+    }
+    const config = readDiscordPluginConfig(integration.pluginConfig);
+    const client = new Client({
+      intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.DirectMessages,
+      ],
+      partials: [Partials.Channel],
+      rest: this.proxyDispatcher ? { agent: this.proxyDispatcher } : undefined,
+    });
+
+    const runtime: DiscordRuntime = {
+      integrationId: integration.id,
+      ownerUserId: integration.ownerUserId,
+      client,
+      botToken,
+      config,
+      stopped: false,
+      processedMessageIds: new Map<string, number>(),
+      approvalMenus: new Map<string, DiscordApprovalMenuState>(),
+      triggerMessageActions: new Map<string, 'watching' | 'active' | 'final'>(),
+      typingByMessageKey: new Map<string, string>(),
+      typingIntervals: new Map<string, ReturnType<typeof setInterval>>(),
+    };
+
+    client.on('messageCreate', async (message) => {
+      this.markMessageProcessed(runtime, message.id);
+      try {
+        await this.handleMessage(runtime, message);
+      } catch (error: unknown) {
+        const messageText = error instanceof Error ? error.message : 'unknown messageCreate error';
+        this.logger.warn(`Discord messageCreate handler failed for integration ${runtime.integrationId}: ${messageText}`);
+      }
+    });
+    client.on('raw', (packet: GatewayDispatchPayload) => {
+      if (packet.t !== 'MESSAGE_CREATE') {
+        return;
+      }
+      const data = packet.d as unknown as Record<string, unknown>;
+      const messageId = typeof data.id === 'string' ? data.id : '';
+      if (messageId && this.wasMessageProcessed(runtime, messageId)) {
+        return;
+      }
+      setTimeout(() => {
+        void this.handleRawMessageCreate(runtime, data);
+      }, RAW_FALLBACK_DELAY_MS);
+    });
+    client.on('clientReady', () => {
+      void this.registerProjectCommand(runtime);
+    });
+    client.on('interactionCreate', async (interaction) => {
+      if (interaction.isAutocomplete()) {
+        try {
+          await this.handleProjectAutocomplete(runtime, interaction);
+        } catch {
+          await interaction.respond([]);
+        }
+        return;
+      }
+      if (interaction.isStringSelectMenu() && interaction.customId.startsWith(`${DISCORD_APPROVAL_SELECT_PREFIX}:`)) {
+        try {
+          await this.handleApprovalSelect(runtime, interaction);
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : 'unknown approval interaction error';
+          this.logger.warn(`Discord approval interaction failed for integration ${runtime.integrationId}: ${message}`);
+          await safeMenuReply(interaction, `Failed to resolve approval: ${message}`);
+        }
+        return;
+      }
+      if (!interaction.isChatInputCommand()) {
+        return;
+      }
+      if (interaction.commandName !== DISCORD_PROJECT_COMMAND) {
+        return;
+      }
+      try {
+        await this.handleProjectCommand(runtime, interaction);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'unknown interaction error';
+        this.logger.warn(`Discord interaction failed for integration ${runtime.integrationId}: ${message}`);
+        await safeReply(interaction, `Failed: ${message}`);
+      }
+    });
+
+    client.on('error', (error) => {
+      this.logger.warn(`Discord client error for integration ${runtime.integrationId}: ${error.message}`);
+    });
+    client.on('shardError', (error, shardId) => {
+      this.logger.warn(
+        `Discord shard error for integration ${runtime.integrationId}, shard=${shardId}: ${error.message}`,
+      );
+    });
+    client.on('shardDisconnect', (event, shardId) => {
+      this.logger.warn(
+        `Discord shard disconnected for integration ${runtime.integrationId}, shard=${shardId}, code=${event.code}`,
+      );
+    });
+    client.on('invalidated', () => {
+      this.logger.warn(`Discord session invalidated for integration ${runtime.integrationId}`);
+    });
+
+    return runtime;
+  }
+
+  private async startRuntime(runtime: DiscordRuntime): Promise<void> {
+    try {
+      await withTimeout(
+        runtime.client.login(runtime.botToken),
+        DISCORD_LOGIN_TIMEOUT_MS,
+        `Discord login timed out after ${DISCORD_LOGIN_TIMEOUT_MS}ms`,
+      );
+      this.logger.log(
+        `Discord runtime started for integration ${runtime.integrationId} as ${runtime.client.user?.tag ?? 'unknown'} (${runtime.client.user?.id ?? 'unknown'})`,
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'unknown login error';
+      this.logger.warn(`Discord runtime failed to login for integration ${runtime.integrationId}: ${message}`);
+      await this.stopRuntime(runtime);
+      this.runtimes.delete(runtime.integrationId);
+    }
+  }
+
+  private async stopRuntime(runtime: DiscordRuntime): Promise<void> {
+    runtime.stopped = true;
+    runtime.approvalMenus.clear();
+    runtime.triggerMessageActions.clear();
+    runtime.typingByMessageKey.clear();
+    for (const interval of runtime.typingIntervals.values()) {
+      clearInterval(interval);
+    }
+    runtime.typingIntervals.clear();
+    try {
+      await runtime.client.destroy();
+    } catch {
+      // ignore
+    }
+  }
+
+  private async sendApprovalPrompt(
+    runtime: DiscordRuntime,
+    channel: { send: (options: Record<string, unknown>) => Promise<{ id: string }> },
+    approval: DiscordApprovalRequest,
+  ): Promise<string> {
+    const options = getDiscordApprovalActionOptions(approval.kind, approval.payload).slice(0, 25);
+    if (options.length === 0) {
+      throw new Error(`No approval actions available for approval ${approval.approvalId}`);
+    }
+    this.compactApprovalMenus(runtime);
+    const menuId = buildApprovalMenuId();
+    const optionByKey = new Map(options.map((option) => [option.key, option]));
+    runtime.approvalMenus.set(menuId, {
+      turnId: approval.turnId,
+      approvalId: approval.approvalId,
+      options,
+      optionByKey,
+      expiresAt: Date.now() + DISCORD_APPROVAL_MENU_TTL_MS,
+    });
+
+    const select = new StringSelectMenuBuilder()
+      .setCustomId(`${DISCORD_APPROVAL_SELECT_PREFIX}:${menuId}`)
+      .setPlaceholder('Choose approval action')
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(
+        options.map((option) => ({
+          label: option.label.slice(0, 100),
+          value: option.key.slice(0, 100),
+        })),
+      );
+
+    const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
+    const sent = await channel.send({
+      content: limitDiscordMessageLength(formatApprovalPromptContent(approval.kind, approval.payload)),
+      components: [row],
+      allowedMentions: buildAllowedMentions(runtime.config.message?.allowEveryoneMention ?? false),
+    });
+    return sent.id;
+  }
+
+  private async handleApprovalSelect(runtime: DiscordRuntime, interaction: StringSelectMenuInteraction): Promise<void> {
+    this.compactApprovalMenus(runtime);
+    const menuId = interaction.customId.slice(`${DISCORD_APPROVAL_SELECT_PREFIX}:`.length);
+    const state = runtime.approvalMenus.get(menuId);
+    if (!state || state.expiresAt <= Date.now()) {
+      runtime.approvalMenus.delete(menuId);
+      await safeMenuReply(interaction, 'This approval action has expired. Please request approval again.');
+      return;
+    }
+    const selectedKey = interaction.values[0] ?? '';
+    const selected = state.optionByKey.get(selectedKey);
+    if (!selected) {
+      await safeMenuReply(interaction, 'Unknown approval action.');
+      return;
+    }
+
+    // Acknowledge quickly to avoid Discord "interaction failed" when backend resolution takes >3s.
+    if (!interaction.deferred && !interaction.replied) {
+      await interaction.deferUpdate();
+    }
+
+    await this.requireContext().resolveApproval({
+      turnId: state.turnId,
+      approvalId: state.approvalId,
+      decision: selected.decision,
+    });
+
+    runtime.approvalMenus.delete(menuId);
+    await interaction.editReply({
+      content: limitDiscordMessageLength(
+        `${interaction.message.content}\n\nApproved by <@${interaction.user.id}>: ${selected.label}`,
+      ),
+      components: [],
+      allowedMentions: buildAllowedMentions(runtime.config.message?.allowEveryoneMention ?? false),
+    });
+  }
+
+  private compactApprovalMenus(runtime: DiscordRuntime): void {
+    const now = Date.now();
+    for (const [menuId, state] of runtime.approvalMenus) {
+      if (state.expiresAt <= now) {
+        runtime.approvalMenus.delete(menuId);
+      }
+    }
+  }
+
+  private async registerProjectCommand(runtime: DiscordRuntime): Promise<void> {
+    if (!runtime.client.application) {
+      return;
+    }
+    const definitions = buildDiscordProjectCommandDefinitions();
+    await runtime.client.application.commands.set(definitions);
+    for (const guild of runtime.client.guilds.cache.values()) {
+      try {
+        await guild.commands.set(definitions);
+      } catch {
+        // ignore per-guild registration failure; global command remains registered.
+      }
+    }
+  }
+
+  private async handleProjectCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    const subcommand = interaction.options.getSubcommand(true);
+    if (subcommand === 'list') {
+      await this.handleProjectListCommand(runtime, interaction);
+      return;
+    }
+    if (subcommand === 'info') {
+      await this.handleProjectInfoCommand(runtime, interaction);
+      return;
+    }
+    if (subcommand === 'create') {
+      await this.handleProjectCreateCommand(runtime, interaction);
+      return;
+    }
+    if (subcommand === 'bind') {
+      await this.handleProjectBindCommand(runtime, interaction);
+      return;
+    }
+    if (subcommand === 'change') {
+      await this.handleProjectChangeCommand(runtime, interaction);
+      return;
+    }
+    await safeReply(interaction, `Unsupported subcommand: ${subcommand}`);
+  }
+
+  private async handleProjectListCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply({ ephemeral: true });
+    const projects = asRecordArray(await this.requireContext().listProjectsForUser(runtime.ownerUserId));
+    if (projects.length === 0) {
+      await interaction.editReply('No projects found.');
+      return;
+    }
+    const lines = projects
+      .map((project) => {
+        const id = normalizeOptionalString(project.id) ?? 'unknown';
+        const name = normalizeOptionalString(project.name) ?? 'unnamed';
+        const backend = normalizeOptionalString(project.backend) ?? 'unknown';
+        const repoPath = normalizeOptionalString(project.repoPath) ?? '(auto)';
+        return `- \`${id}\` ${name} | backend=${backend} | repo=${repoPath}`;
+      })
+      .join('\n');
+    await interaction.editReply(`Projects:\n${lines}`);
+  }
+
+  private async handleProjectInfoCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply({ ephemeral: true });
+    const projectRef = normalizeOptionalString(interaction.options.getString('project'));
+    const project = projectRef
+      ? await this.resolveProjectByRef(runtime.ownerUserId, projectRef)
+      : await this.resolveBoundProjectForInteraction(runtime, interaction);
+    if (!project) {
+      await interaction.editReply(
+        projectRef
+          ? `Project not found: ${projectRef}`
+          : 'No bound project found for current channel/thread.',
+      );
+      return;
+    }
+    const id = normalizeOptionalString(project.id) ?? 'unknown';
+    const name = normalizeOptionalString(project.name) ?? 'unnamed';
+    const backend = normalizeOptionalString(project.backend) ?? 'unknown';
+    const repoPath = normalizeOptionalString(project.repoPath) ?? '(auto)';
+    const backendConfig = normalizeJsonRecordForDisplay(project.backendConfig);
+    const info =
+      `id: ${id}\n` +
+      `name: ${name}\n` +
+      `backend: ${backend}\n` +
+      `repoPath: ${repoPath}\n` +
+      `backendConfig: ${JSON.stringify(backendConfig)}`;
+    await interaction.editReply(`Project info:\n\`\`\`\n${info}\n\`\`\``);
+  }
+
+  private async resolveBoundProjectForInteraction(
+    runtime: DiscordRuntime,
+    interaction: ChatInputCommandInteraction,
+  ): Promise<Record<string, unknown> | null> {
+    const target = resolveBindingTargetFromInteraction(interaction);
+    if (!target.bindingChannelId) {
+      return null;
+    }
+
+    const threadBoundSessionId = findSessionIdByTarget(runtime.config, target.bindingChannelId, target.bindingThreadId);
+    if (threadBoundSessionId) {
+      const session = await this.readSessionForOwner(runtime.ownerUserId, threadBoundSessionId);
+      if (session) {
+        const project = await this.tryGetProjectById(runtime.ownerUserId, session.projectId);
+        if (project) {
+          return project;
+        }
+      }
+    }
+
+    const channelProjectId = findProjectIdByChannel(runtime.config, target.bindingChannelId);
+    if (!channelProjectId) {
+      return null;
+    }
+    return this.tryGetProjectById(runtime.ownerUserId, channelProjectId);
+  }
+
+  private async handleProjectCreateCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    const threadError = this.validateCommandNotInThread(interaction);
+    if (threadError) {
+      await safeReply(interaction, threadError);
+      return;
+    }
+    await interaction.deferReply({ ephemeral: true });
+    const name = interaction.options.getString('name', true).trim();
+    const workingDir = normalizeOptionalString(interaction.options.getString('working_dir'));
+    const backend = normalizeOptionalString(interaction.options.getString('backend'))?.toLowerCase() ?? null;
+    const model = normalizeOptionalString(interaction.options.getString('model'));
+    const executionMode = normalizeOptionalString(interaction.options.getString('execution_mode'));
+    if ((model && !executionMode) || (!model && executionMode)) {
+      await interaction.editReply('Please provide both model and execution_mode together.');
+      return;
+    }
+    if (backend === 'claude' && (!model || !executionMode)) {
+      await interaction.editReply('Backend `claude` requires both model and execution_mode.');
+      return;
+    }
+    const target = resolveBindingTargetFromInteraction(interaction);
+    if (!target.bindingChannelId) {
+      await interaction.editReply('Unable to resolve channel binding target.');
+      return;
+    }
+
+    const createInput: {
+      name: string;
+      repoPath?: string;
+      backend?: string;
+      backendConfig?: Record<string, unknown>;
+    } = {
+      name,
+      repoPath: workingDir ?? undefined,
+    };
+    if (backend) {
+      createInput.backend = backend;
+    }
+    if (model && executionMode) {
+      if (!EXECUTION_MODE_CHOICES.includes(executionMode as (typeof EXECUTION_MODE_CHOICES)[number])) {
+        await interaction.editReply(`Unsupported execution_mode: ${executionMode}`);
+        return;
+      }
+      createInput.backendConfig = {
+        model,
+        executionMode,
+      };
+    }
+
+    const created = await this.requireContext().createProjectForUser(runtime.ownerUserId, createInput);
+    const project = asRecord(created) ?? {};
+    const projectId = readRequiredId(created, 'project');
+
+    const nextConfig = applyChannelProjectBinding(runtime.config, {
+      channelId: target.bindingChannelId,
+      guildId: target.guildId,
+      projectId,
+    });
+    await this.persistRuntimeConfig(runtime, nextConfig);
+    await interaction.editReply(`Created and bound project \`${projectId}\` to this channel.`);
+  }
+
+  private async handleProjectBindCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    const threadError = this.validateCommandNotInThread(interaction);
+    if (threadError) {
+      await safeReply(interaction, threadError);
+      return;
+    }
+    await interaction.deferReply({ ephemeral: true });
+    const projectRef = interaction.options.getString('project', true).trim();
+    const project = await this.resolveProjectByRef(runtime.ownerUserId, projectRef);
+    if (!project) {
+      await interaction.editReply(`Project not found: ${projectRef}`);
+      return;
+    }
+    const projectId = readRequiredId(project, 'project');
+    const target = resolveBindingTargetFromInteraction(interaction);
+    if (!target.bindingChannelId) {
+      await interaction.editReply('Unable to resolve channel binding target.');
+      return;
+    }
+    const nextConfig = applyChannelProjectBinding(runtime.config, {
+      channelId: target.bindingChannelId,
+      guildId: target.guildId,
+      projectId,
+    });
+    await this.persistRuntimeConfig(runtime, nextConfig);
+    await interaction.editReply(`Bound this channel to project \`${projectId}\`.`);
+  }
+
+  private async handleProjectChangeCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    const threadError = this.validateCommandNotInThread(interaction);
+    if (threadError) {
+      await safeReply(interaction, threadError);
+      return;
+    }
+    await interaction.deferReply({ ephemeral: true });
+    const target = resolveBindingTargetFromInteraction(interaction);
+    if (!target.bindingChannelId) {
+      await interaction.editReply('Unable to resolve channel binding target.');
+      return;
+    }
+    const projectId = findProjectIdByChannel(runtime.config, target.bindingChannelId);
+    if (!projectId) {
+      await interaction.editReply('This channel is not bound to any project.');
+      return;
+    }
+    const project = await this.requireContext().getProjectForUser(runtime.ownerUserId, projectId);
+    const projectRecord = asRecord(project);
+    if (!projectRecord) {
+      await interaction.editReply(`Unable to load bound project ${projectId}.`);
+      return;
+    }
+
+    const workingDir = normalizeOptionalString(interaction.options.getString('working_dir'));
+    const model = normalizeOptionalString(interaction.options.getString('model'));
+    const executionMode = normalizeOptionalString(interaction.options.getString('execution_mode'));
+    if (!workingDir && !model && !executionMode) {
+      await interaction.editReply('No changes provided.');
+      return;
+    }
+
+    const updateInput = buildProjectUpdateInput(projectRecord, {
+      repoPath: workingDir,
+      model,
+      executionMode,
+    });
+    await this.requireContext().updateProjectForUser(runtime.ownerUserId, projectId, updateInput);
+
+    const nextConfig = applyChannelProjectBinding(runtime.config, {
+      channelId: target.bindingChannelId,
+      guildId: target.guildId,
+      projectId,
+    });
+    await this.persistRuntimeConfig(runtime, nextConfig);
+    await interaction.editReply(`Updated and rebound project \`${projectId}\` for this channel.`);
+  }
+
+  private async handleProjectAutocomplete(
+    runtime: DiscordRuntime,
+    interaction: AutocompleteInteraction,
+  ): Promise<void> {
+    if (interaction.commandName !== DISCORD_PROJECT_COMMAND) {
+      await interaction.respond([]);
+      return;
+    }
+    const subcommand = interaction.options.getSubcommand(false);
+    if (subcommand !== 'create') {
+      if (subcommand === 'change') {
+        const focusedChange = interaction.options.getFocused(true);
+        if (focusedChange.name === 'working_dir') {
+          const prefix = String(focusedChange.value ?? '');
+          const suggestions = await this.requireContext().suggestWorkspaceDirectories({
+            prefix,
+            limit: 25,
+          });
+          await interaction.respond(
+            suggestions.slice(0, 25).map((item) => ({
+              name: item,
+              value: item,
+            })),
+          );
+          return;
+        }
+      }
+      await interaction.respond([]);
+      return;
+    }
+
+    const focused = interaction.options.getFocused(true);
+    const focusedRawValue = String(focused.value ?? '');
+    const focusedValue = focusedRawValue.toLowerCase();
+    const selectedBackend = normalizeOptionalString(interaction.options.getString('backend'))?.toLowerCase() ?? null;
+
+    if (focused.name === 'working_dir') {
+      const suggestions = await this.requireContext().suggestWorkspaceDirectories({
+        prefix: focusedRawValue,
+        limit: 25,
+      });
+      await interaction.respond(
+        suggestions.slice(0, 25).map((item) => ({
+          name: item,
+          value: item,
+        })),
+      );
+      return;
+    }
+
+    if (focused.name === 'backend') {
+      const suggestions = ['codex', 'claude', 'mock']
+        .filter((item) => item.includes(focusedValue))
+        .slice(0, 25)
+        .map((item) => ({ name: item, value: item }));
+      await interaction.respond(suggestions);
+      return;
+    }
+
+    if (focused.name === 'model') {
+      const uniqueModels = await this.getModelAutocompleteOptions(selectedBackend);
+      const suggestions = uniqueModels
+        .filter((item) => item.toLowerCase().includes(focusedValue))
+        .slice(0, 25)
+        .map((item) => ({ name: item, value: item }));
+      await interaction.respond(suggestions);
+      return;
+    }
+
+    if (focused.name === 'execution_mode') {
+      const candidates = resolveExecutionModesForBackend(selectedBackend);
+      const suggestions = candidates
+        .filter((item) => item.includes(focusedValue))
+        .slice(0, 25)
+        .map((item) => ({ name: item, value: item }));
+      await interaction.respond(suggestions);
+      return;
+    }
+
+    await interaction.respond([]);
+  }
+
+  private async resolveProjectByRef(userId: string, projectRef: string): Promise<Record<string, unknown> | null> {
+    const byId = await this.tryGetProjectById(userId, projectRef);
+    if (byId) {
+      return byId;
+    }
+    const projects = asRecordArray(await this.requireContext().listProjectsForUser(userId));
+    const byName = projects.find((project) => normalizeOptionalString(project.name) === projectRef) ?? null;
+    return byName;
+  }
+
+  private async tryGetProjectById(userId: string, projectId: string): Promise<Record<string, unknown> | null> {
+    try {
+      const project = await this.requireContext().getProjectForUser(userId, projectId);
+      return asRecord(project);
+    } catch {
+      return null;
+    }
+  }
+
+  private async getModelAutocompleteOptions(backend: string | null): Promise<string[]> {
+    const cacheKey = backend ?? '__all__';
+    const cached = this.modelAutocompleteCache.get(cacheKey);
+    const now = Date.now();
+    if (cached && cached.expiresAt > now) {
+      return cached.models;
+    }
+
+    const models = await withTimeout(
+      this.requireContext().listModels({ backend }),
+      AUTOCOMPLETE_MODEL_TIMEOUT_MS,
+      'model autocomplete timeout',
+    ).catch(() => [] as Awaited<ReturnType<ChannelPluginContext['listModels']>>);
+    const uniqueModels = [...new Set(models.map((item) => item.model).filter((item) => item.trim().length > 0))];
+    this.modelAutocompleteCache.set(cacheKey, {
+      expiresAt: now + AUTOCOMPLETE_MODEL_CACHE_TTL_MS,
+      models: uniqueModels,
+    });
+    return uniqueModels;
+  }
+
+  private validateCommandNotInThread(interaction: ChatInputCommandInteraction): string | null {
+    const channelType = interaction.channel?.type;
+    if (
+      channelType === ChannelType.PublicThread ||
+      channelType === ChannelType.PrivateThread ||
+      channelType === ChannelType.AnnouncementThread
+    ) {
+      return 'This command is not allowed in threads.';
+    }
+    return null;
+  }
+
+  private async handleMessage(runtime: DiscordRuntime, message: Message): Promise<void> {
+    if (runtime.stopped) {
+      return;
+    }
+
+    if (message.author?.bot && (runtime.config.message?.ignoreBotMessages ?? true)) {
+      return;
+    }
+
+    if (!runtime.config.trigger?.allowDM && message.channel.type === ChannelType.DM) {
+      return;
+    }
+
+    if (!isAllowedByList(message.author?.id ?? '', runtime.config.trigger?.allowedUsers)) {
+      return;
+    }
+
+    if (!isAllowedByList(message.guildId ?? '', runtime.config.trigger?.allowedGuilds)) {
+      return;
+    }
+
+    if (!isAllowedByList(message.channelId ?? '', runtime.config.trigger?.allowedChannels)) {
+      return;
+    }
+
+    if (runtime.config.trigger?.requireMention) {
+      const botUserId = runtime.client.user?.id;
+      if (!botUserId || !message.mentions.users.has(botUserId)) {
+        return;
+      }
+    }
+
+    const inputText = (message.content ?? '').trim();
+    if (!inputText) {
+      return;
+    }
+
+    await this.applyTriggerMessageAction(runtime, message.channelId, message.id, {
+      action: 'watching',
+      onlyIfTracked: false,
+      skipOutboundText: false,
+    });
+
+    const { bindingChannelId, bindingThreadId, channelName } = resolveBindingTargetFromMessage(message);
+    await this.enqueueInboundTurn(runtime, {
+      content: normalizeInboundContent(inputText, runtime.config.message?.maxInboundLength),
+      providerMessageId: message.id,
+      bindingChannelId,
+      bindingThreadId,
+      channelName,
+      guildId: message.guildId ?? null,
+    });
+  }
+
+  private async handleRawMessageCreate(runtime: DiscordRuntime, payload: Record<string, unknown>): Promise<void> {
+    if (runtime.stopped) {
+      return;
+    }
+
+    const messageId = typeof payload.id === 'string' ? payload.id : '';
+    if (messageId && this.wasMessageProcessed(runtime, messageId)) {
+      return;
+    }
+    if (messageId) {
+      this.markMessageProcessed(runtime, messageId);
+    }
+
+    const channelId = typeof payload.channel_id === 'string' ? payload.channel_id : '';
+    if (!channelId) {
+      return;
+    }
+
+    const guildId = typeof payload.guild_id === 'string' ? payload.guild_id : null;
+    const content = typeof payload.content === 'string' ? payload.content : '';
+    const author = (payload.author ?? null) as Record<string, unknown> | null;
+    const authorId = author && typeof author.id === 'string' ? author.id : '';
+    const authorIsBot = author && typeof author.bot === 'boolean' ? author.bot : false;
+
+    if (authorIsBot && (runtime.config.message?.ignoreBotMessages ?? true)) {
+      return;
+    }
+
+    if (!runtime.config.trigger?.allowDM && !guildId) {
+      return;
+    }
+
+    if (!isAllowedByList(authorId, runtime.config.trigger?.allowedUsers)) {
+      return;
+    }
+
+    if (!isAllowedByList(guildId ?? '', runtime.config.trigger?.allowedGuilds)) {
+      return;
+    }
+
+    if (!isAllowedByList(channelId, runtime.config.trigger?.allowedChannels)) {
+      return;
+    }
+
+    if (runtime.config.trigger?.requireMention) {
+      const botUserId = runtime.client.user?.id;
+      const mentions = Array.isArray(payload.mentions) ? payload.mentions : [];
+      const mentioned = mentions.some((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+          return false;
+        }
+        const mentionId = (entry as Record<string, unknown>).id;
+        return typeof mentionId === 'string' && mentionId === botUserId;
+      });
+      if (!botUserId || !mentioned) {
+        return;
+      }
+    }
+
+    const inputText = content.trim();
+    if (!inputText) {
+      return;
+    }
+
+    try {
+      if (messageId) {
+        await this.applyTriggerMessageAction(runtime, channelId, messageId, {
+          action: 'watching',
+          onlyIfTracked: false,
+          skipOutboundText: false,
+        });
+      }
+      const channel = await runtime.client.channels.fetch(channelId);
+      if (!channel?.isSendable()) {
+        return;
+      }
+
+      const { bindingChannelId, bindingThreadId, channelName } = resolveBindingTargetFromChannel(channel);
+      await this.enqueueInboundTurn(runtime, {
+        content: normalizeInboundContent(inputText, runtime.config.message?.maxInboundLength),
+        providerMessageId: messageId || null,
+        bindingChannelId,
+        bindingThreadId,
+        channelName,
+        guildId,
+      });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'unknown raw send error';
+      this.logger.warn(`Discord raw fallback failed for integration ${runtime.integrationId}: ${message}`);
+    }
+  }
+
+  private async applyTriggerMessageAction(
+    runtime: DiscordRuntime,
+    channelId: string,
+    messageId: string,
+    effect: {
+      action:
+        | 'watching'
+        | 'active'
+        | 'approval_pending'
+        | 'final_success'
+        | 'final_cancel'
+        | 'final_error';
+      onlyIfTracked: boolean;
+      skipOutboundText: boolean;
+    },
+  ): Promise<void> {
+    const key = `${channelId}:${messageId}`;
+    const current = runtime.triggerMessageActions.get(key);
+    if (effect.onlyIfTracked && !current) {
+      return;
+    }
+
+    try {
+      const channel = await runtime.client.channels.fetch(channelId);
+      if (!channel || !('messages' in channel)) {
+        return;
+      }
+      const targetMessage = await channel.messages.fetch(messageId);
+      const botUserId = runtime.client.user?.id;
+      if (!botUserId) {
+        return;
+      }
+      const refreshed = await targetMessage.fetch().catch(() => targetMessage);
+      const desired = resolveDesiredActionEmojis(effect.action);
+      const desiredKeys = new Set(desired.map((emoji) => normalizeEmojiName(emoji)));
+      const existingByKey = new Map<string, { users: { remove: (userId: string) => Promise<unknown> } }>();
+
+      for (const reaction of refreshed.reactions.cache.values()) {
+        const emojiName = reaction.emoji.name ?? '';
+        if (!isManagedActionEmoji(emojiName)) {
+          continue;
+        }
+        existingByKey.set(normalizeEmojiName(emojiName), reaction);
+      }
+
+      // Add missing actions first.
+      for (const emoji of desired) {
+        const normalized = normalizeEmojiName(emoji);
+        if (existingByKey.has(normalized)) {
+          continue;
+        }
+        await targetMessage.react(emoji).catch(() => undefined);
+      }
+
+      // Then remove actions that are no longer needed.
+      for (const [normalized, reaction] of existingByKey.entries()) {
+        if (desiredKeys.has(normalized)) {
+          continue;
+        }
+        await reaction.users.remove(botUserId).catch(() => undefined);
+      }
+
+      runtime.triggerMessageActions.set(key, resolveActionTrackingState(effect.action));
+    } catch {
+      // ignore reaction failures; chat flow should continue.
+    }
+    await this.syncTypingIndicatorForAction(runtime, key, channelId, effect.action);
+  }
+
+  private async syncTypingIndicatorForAction(
+    runtime: DiscordRuntime,
+    messageKey: string,
+    channelId: string,
+    action: 'watching' | 'active' | 'approval_pending' | 'final_success' | 'final_cancel' | 'final_error',
+  ): Promise<void> {
+    const isFinal = action === 'final_success' || action === 'final_cancel' || action === 'final_error';
+    const previousChannelId = runtime.typingByMessageKey.get(messageKey) ?? null;
+    if (isFinal) {
+      runtime.typingByMessageKey.delete(messageKey);
+      if (previousChannelId) {
+        this.stopTypingHeartbeatIfIdle(runtime, previousChannelId);
+      }
+      return;
+    }
+
+    runtime.typingByMessageKey.set(messageKey, channelId);
+    if (previousChannelId && previousChannelId !== channelId) {
+      this.stopTypingHeartbeatIfIdle(runtime, previousChannelId);
+    }
+    await this.ensureTypingHeartbeat(runtime, channelId);
+  }
+
+  private async ensureTypingHeartbeat(runtime: DiscordRuntime, channelId: string): Promise<void> {
+    if (runtime.stopped) {
+      return;
+    }
+    await this.sendTypingPulse(runtime, channelId);
+    if (runtime.typingIntervals.has(channelId)) {
+      return;
+    }
+    const interval = setInterval(() => {
+      void this.sendTypingPulse(runtime, channelId);
+    }, DISCORD_TYPING_HEARTBEAT_MS);
+    runtime.typingIntervals.set(channelId, interval);
+  }
+
+  private stopTypingHeartbeatIfIdle(runtime: DiscordRuntime, channelId: string): void {
+    for (const activeChannelId of runtime.typingByMessageKey.values()) {
+      if (activeChannelId === channelId) {
+        return;
+      }
+    }
+    const interval = runtime.typingIntervals.get(channelId);
+    if (!interval) {
+      return;
+    }
+    clearInterval(interval);
+    runtime.typingIntervals.delete(channelId);
+  }
+
+  private async sendTypingPulse(runtime: DiscordRuntime, channelId: string): Promise<void> {
+    if (runtime.stopped) {
+      this.stopTypingHeartbeatIfIdle(runtime, channelId);
+      return;
+    }
+    let active = false;
+    for (const activeChannelId of runtime.typingByMessageKey.values()) {
+      if (activeChannelId === channelId) {
+        active = true;
+        break;
+      }
+    }
+    if (!active) {
+      this.stopTypingHeartbeatIfIdle(runtime, channelId);
+      return;
+    }
+
+    try {
+      const channel = await runtime.client.channels.fetch(channelId);
+      if (!channel || !('sendTyping' in channel) || typeof channel.sendTyping !== 'function') {
+        return;
+      }
+      await channel.sendTyping();
+    } catch {
+      // ignore typing indicator failures; chat flow should continue.
+    }
+  }
+
+  private async enqueueInboundTurn(
+    runtime: DiscordRuntime,
+    input: {
+      content: string;
+      providerMessageId: string | null;
+      bindingChannelId: string;
+      bindingThreadId: string | null;
+      channelName: string;
+      guildId: string | null;
+    },
+  ): Promise<void> {
+    const resolved = await this.ensureBindingForInbound(runtime, {
+      channelId: input.bindingChannelId,
+      threadId: input.bindingThreadId,
+      channelName: input.channelName,
+      guildId: input.guildId,
+    });
+
+    const created = await this.requireContext().ingestInbound({
+      unifiedIdentifier: buildDiscordUnifiedIdentifier(runtime.integrationId, input.providerMessageId),
+      triggerProvider: this.provider,
+      triggerIntegrationId: runtime.integrationId,
+      providerMessageId: input.providerMessageId ?? undefined,
+      projectId: resolved.projectId,
+      sessionId: resolved.sessionId,
+      content: input.content,
+    });
+    if (!created.turnId) {
+      throw new Error('Failed to enqueue inbound turn');
+    }
+  }
+
+  private async ensureBindingForInbound(
+    runtime: DiscordRuntime,
+    input: {
+      channelId: string;
+      threadId: string | null;
+      channelName: string;
+      guildId: string | null;
+    },
+  ): Promise<{ projectId: string; sessionId: string }> {
+    const existingSessionId = findSessionIdByTarget(runtime.config, input.channelId, input.threadId);
+    if (existingSessionId) {
+      const existingSession = await this.readSessionForOwner(runtime.ownerUserId, existingSessionId);
+      if (existingSession) {
+        return {
+          projectId: existingSession.projectId,
+          sessionId: existingSession.sessionId,
+        };
+      }
+    }
+
+    let projectId = findProjectIdByChannel(runtime.config, input.channelId) ?? null;
+    if (projectId) {
+      const exists = await this.projectExistsForOwner(runtime.ownerUserId, projectId);
+      if (!exists) {
+        projectId = null;
+      }
+    }
+
+    if (!projectId) {
+      const createdProject = await this.requireContext().createProjectForUser(runtime.ownerUserId, {
+        name: buildDiscordProjectName(input.channelName, input.channelId),
+      });
+      projectId = readRequiredId(createdProject, 'project');
+    }
+
+    const createdSession = await this.requireContext().createSessionForProject(runtime.ownerUserId, projectId, {
+      title: buildDiscordSessionTitle(input.channelName, input.threadId),
+    });
+    const sessionId = readRequiredId(createdSession, 'session');
+
+    const nextConfig = upsertDiscordBindings(runtime.config, {
+      channelId: input.channelId,
+      threadId: input.threadId,
+      guildId: input.guildId,
+      projectId,
+      sessionId,
+    });
+    await this.persistRuntimeConfig(runtime, nextConfig);
+
+    return {
+      projectId,
+      sessionId,
+    };
+  }
+
+  private async persistRuntimeConfig(runtime: DiscordRuntime, nextConfig: DiscordPluginConfig): Promise<void> {
+    await this.requireContext().updateIntegrationPluginConfigForUser(
+      runtime.ownerUserId,
+      runtime.integrationId,
+      nextConfig as Record<string, unknown>,
+    );
+    runtime.config = nextConfig;
+  }
+
+  private async readSessionForOwner(
+    userId: string,
+    sessionId: string,
+  ): Promise<{ sessionId: string; projectId: string } | null> {
+    try {
+      const history = await this.requireContext().getSessionHistoryForUser(userId, sessionId);
+      const root = asRecord(history);
+      const session = asRecord(root?.session);
+      const resolvedSessionId = session ? normalizeOptionalString(session.id) : null;
+      const projectId = session ? normalizeOptionalString(session.projectId) : null;
+      if (!resolvedSessionId || !projectId) {
+        return null;
+      }
+      return {
+        sessionId: resolvedSessionId,
+        projectId,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async projectExistsForOwner(userId: string, projectId: string): Promise<boolean> {
+    try {
+      await this.requireContext().getProjectForUser(userId, projectId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private wasMessageProcessed(runtime: DiscordRuntime, messageId: string): boolean {
+    this.compactProcessedMessageIds(runtime);
+    return runtime.processedMessageIds.has(messageId);
+  }
+
+  private markMessageProcessed(runtime: DiscordRuntime, messageId: string): void {
+    if (!messageId) {
+      return;
+    }
+    runtime.processedMessageIds.set(messageId, Date.now());
+    this.compactProcessedMessageIds(runtime);
+  }
+
+  private compactProcessedMessageIds(runtime: DiscordRuntime): void {
+    const now = Date.now();
+    for (const [messageId, processedAt] of runtime.processedMessageIds) {
+      if (now - processedAt > PROCESSED_MESSAGE_TTL_MS) {
+        runtime.processedMessageIds.delete(messageId);
+      }
+    }
+    if (runtime.processedMessageIds.size <= PROCESSED_MESSAGE_MAX) {
+      return;
+    }
+    const overflow = runtime.processedMessageIds.size - PROCESSED_MESSAGE_MAX;
+    let removed = 0;
+    for (const messageId of runtime.processedMessageIds.keys()) {
+      runtime.processedMessageIds.delete(messageId);
+      removed += 1;
+      if (removed >= overflow) {
+        break;
+      }
+    }
+  }
+
+  private requireContext(): ChannelPluginContext {
+    if (!this.context) {
+      throw new Error('Discord plugin has not been booted');
+    }
+    return this.context;
+  }
+}
+
+function readBotToken(credentials: unknown): string | null {
+  if (!credentials || typeof credentials !== 'object' || Array.isArray(credentials)) {
+    return null;
+  }
+  const value = (credentials as Record<string, unknown>).botToken;
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function readDiscordPluginConfig(config: unknown): DiscordPluginConfig {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    return {};
+  }
+  return config as DiscordPluginConfig;
+}
+
+function normalizeStringList(input: unknown): string[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  return input
+    .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+    .filter((entry) => entry.length > 0);
+}
+
+function normalizeMaxInboundLength(input: unknown): number {
+  if (typeof input !== 'number' || !Number.isFinite(input)) {
+    return 2000;
+  }
+  const normalized = Math.floor(input);
+  if (normalized <= 0) {
+    return 2000;
+  }
+  return Math.min(normalized, 10_000);
+}
+
+function normalizeInboundContent(input: string, maxInboundLengthRaw: unknown): string {
+  const maxInboundLength = normalizeMaxInboundLength(maxInboundLengthRaw);
+  return input.length > maxInboundLength ? input.slice(0, maxInboundLength) : input;
+}
+
+function normalizeJsonRecordForDisplay(value: unknown): Record<string, unknown> {
+  const record = asRecord(value);
+  return record ?? {};
+}
+
+function isAllowedByList(id: string, rawList: unknown): boolean {
+  const list = normalizeStringList(rawList);
+  if (list.length === 0) {
+    return true;
+  }
+  return list.includes(id);
+}
+
+function resolveBindingTargetFromInteraction(interaction: ChatInputCommandInteraction): {
+  bindingChannelId: string;
+  bindingThreadId: string | null;
+  guildId: string | null;
+} {
+  const channel = interaction.channel;
+  if (!channel) {
+    return { bindingChannelId: '', bindingThreadId: null, guildId: interaction.guildId ?? null };
+  }
+  const channelRecord = channel as unknown as Record<string, unknown>;
+  const channelId = normalizeOptionalString(channelRecord.id) ?? '';
+  const parentId = normalizeOptionalString(channelRecord.parentId);
+  const type = channelRecord.type;
+  const isThread =
+    type === ChannelType.PublicThread ||
+    type === ChannelType.PrivateThread ||
+    type === ChannelType.AnnouncementThread;
+  return {
+    bindingChannelId: isThread ? (parentId ?? channelId) : channelId,
+    bindingThreadId: isThread ? channelId : null,
+    guildId: interaction.guildId ?? null,
+  };
+}
+
+function buildDiscordProjectCommandDefinitions(): ApplicationCommandDataResolvable[] {
+  return [
+    {
+      name: DISCORD_PROJECT_COMMAND,
+      description: 'Project operations',
+      options: [
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'list',
+          description: 'List all projects',
+        },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'info',
+          description: 'Get project details',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'project',
+              description: 'Project id (or exact project name). Omit to use current binding',
+              required: false,
+            },
+          ],
+        },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'create',
+          description: 'Create project and bind this channel',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'name',
+              description: 'Project name',
+              required: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'working_dir',
+              description: 'Project working directory',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'backend',
+              description: 'Backend (for example codex, claude)',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'model',
+              description: 'Default model',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'execution_mode',
+              description: 'Default execution mode',
+              required: false,
+              autocomplete: true,
+            },
+          ],
+        },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'bind',
+          description: 'Bind this channel to existing project',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'project',
+              description: 'Project id (or exact project name)',
+              required: true,
+            },
+          ],
+        },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'change',
+          description: 'Change bound project settings and rebind this channel',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'working_dir',
+              description: 'Project working directory',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'model',
+              description: 'Default model',
+              required: false,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'execution_mode',
+              description: 'Default execution mode',
+              required: false,
+              choices: EXECUTION_MODE_CHOICES.map((value) => ({
+                name: value,
+                value,
+              })),
+            },
+          ],
+        },
+      ],
+    },
+  ];
+}
+
+function buildAllowedMentions(allowEveryoneMention: boolean): { parse: Array<'users' | 'roles' | 'everyone'> } {
+  if (allowEveryoneMention) {
+    return {
+      parse: ['users', 'roles', 'everyone'],
+    };
+  }
+  return {
+    parse: ['users'],
+  };
+}
+
+function hasSameRuntimeIdentity(integration: BotIntegration, botToken: string, config: DiscordPluginConfig): boolean {
+  const nextToken = readBotToken(integration.credentialsEncrypted);
+  if (nextToken !== botToken) {
+    return false;
+  }
+  const nextConfig = readDiscordPluginConfig(integration.pluginConfig);
+  return JSON.stringify(nextConfig) === JSON.stringify(config);
+}
+
+function configureProxyFromEnvironment(logger: Logger): Dispatcher | null {
+  if (proxyConfigured) {
+    return sharedProxyDispatcher;
+  }
+  proxyConfigured = true;
+  const proxyUrl =
+    readProxyEnv('HTTPS_PROXY') ??
+    readProxyEnv('https_proxy') ??
+    readProxyEnv('HTTP_PROXY') ??
+    readProxyEnv('http_proxy') ??
+    readProxyEnv('ALL_PROXY') ??
+    readProxyEnv('all_proxy');
+  if (!proxyUrl) {
+    return null;
+  }
+
+  try {
+    const dispatcher = new ProxyAgent(proxyUrl);
+    sharedProxyDispatcher = dispatcher;
+
+    http.globalAgent = new HttpProxyAgent(proxyUrl);
+    https.globalAgent = new HttpsProxyAgent(proxyUrl);
+    patchHttpsRequestForWebSocketProxy(proxyUrl);
+    logger.log(`Discord proxy enabled via environment: ${redactProxyUrl(proxyUrl)}`);
+    return dispatcher;
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'unknown proxy setup error';
+    logger.warn(`Failed to configure Discord proxy, continuing without explicit proxy: ${message}`);
+    sharedProxyDispatcher = null;
+    return null;
+  }
+}
+
+function patchHttpsRequestForWebSocketProxy(proxyUrl: string): void {
+  if (httpsWebSocketProxyPatched) {
+    return;
+  }
+  httpsWebSocketProxyPatched = true;
+
+  const wsProxyAgent = new HttpsProxyAgent(proxyUrl);
+  const originalRequest = https.request.bind(https);
+  const patchedRequest: typeof https.request = ((...args: unknown[]) => {
+    if (args.length === 0) {
+      return originalRequest({});
+    }
+
+    // ws library sets createConnection directly for wss. Force proxy agent for upgrade handshakes.
+    if (args.length === 1 && isRequestOptions(args[0]) && isWebSocketUpgrade(args[0])) {
+      const options = { ...args[0], agent: wsProxyAgent };
+      delete (options as Record<string, unknown>).createConnection;
+      return originalRequest(options);
+    }
+
+    if (args.length >= 2 && isRequestOptions(args[1]) && isWebSocketUpgrade(args[1])) {
+      const options = { ...args[1], agent: wsProxyAgent };
+      delete (options as Record<string, unknown>).createConnection;
+      return originalRequest(args[0] as Parameters<typeof https.request>[0], options, args[2] as Parameters<typeof https.request>[2]);
+    }
+
+    return originalRequest(...(args as Parameters<typeof https.request>));
+  }) as typeof https.request;
+
+  (https as unknown as { request: typeof https.request }).request = patchedRequest;
+}
+
+function isRequestOptions(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !(value instanceof URL);
+}
+
+function isWebSocketUpgrade(options: Record<string, unknown>): boolean {
+  const headersValue = options.headers;
+  if (!headersValue || typeof headersValue !== 'object' || Array.isArray(headersValue)) {
+    return false;
+  }
+  const headers = headersValue as Record<string, unknown>;
+  const upgrade = headers.Upgrade ?? headers.upgrade;
+  return typeof upgrade === 'string' && upgrade.toLowerCase() === 'websocket';
+}
+
+function readProxyEnv(key: string): string | null {
+  const value = process.env[key];
+  if (!value) {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function resolveBindingTargetFromMessage(message: Message): {
+  bindingChannelId: string;
+  bindingThreadId: string | null;
+  channelName: string;
+} {
+  const channel = message.channel;
+  const channelRecord = channel as unknown as Record<string, unknown>;
+  const type = channelRecord.type;
+  const isThread =
+    type === ChannelType.PublicThread ||
+    type === ChannelType.PrivateThread ||
+    type === ChannelType.AnnouncementThread;
+  const bindingThreadId = isThread ? message.channelId : null;
+  const parentId = normalizeOptionalString(channelRecord.parentId);
+  const bindingChannelId = bindingThreadId ? (parentId ?? message.channelId) : message.channelId;
+  const channelName = normalizeOptionalString(channelRecord.name) ?? bindingChannelId;
+  return {
+    bindingChannelId,
+    bindingThreadId,
+    channelName,
+  };
+}
+
+function resolveBindingTargetFromChannel(channel: unknown): {
+  bindingChannelId: string;
+  bindingThreadId: string | null;
+  channelName: string;
+} {
+  const channelRecord = asRecord(channel);
+  if (!channelRecord) {
+    return {
+      bindingChannelId: '',
+      bindingThreadId: null,
+      channelName: 'discord',
+    };
+  }
+  const channelId = normalizeOptionalString(channelRecord.id) ?? '';
+  const type = channelRecord.type;
+  const isThread =
+    type === ChannelType.PublicThread ||
+    type === ChannelType.PrivateThread ||
+    type === ChannelType.AnnouncementThread;
+  const threadId = isThread ? channelId : null;
+  const parentId = normalizeOptionalString(channelRecord.parentId);
+  return {
+    bindingChannelId: threadId ? (parentId ?? channelId) : channelId,
+    bindingThreadId: threadId,
+    channelName: normalizeOptionalString(channelRecord.name) ?? (channelId || 'discord'),
+  };
+}
+
+function buildDiscordUnifiedIdentifier(integrationId: string, providerMessageId: string | null): string {
+  if (!providerMessageId) {
+    return `discord:${integrationId}:${Date.now()}`;
+  }
+  return `discord:${integrationId}:${providerMessageId}`;
+}
+
+function findProjectIdByChannel(config: DiscordPluginConfig, channelId: string): string | null {
+  const bindings = asRecord(config.channelBindings) ?? {};
+  const entry = asRecord(bindings[channelId]);
+  if (!entry) {
+    return null;
+  }
+  return normalizeOptionalString(entry.projectId);
+}
+
+function findSessionIdByTarget(config: DiscordPluginConfig, channelId: string, threadId: string | null): string | null {
+  const bindings = asRecord(config.sessionBindings) ?? {};
+  const expectedThread = normalizeOptionalString(threadId);
+  for (const [sessionId, rawBinding] of Object.entries(bindings)) {
+    const binding = asRecord(rawBinding);
+    if (!binding) {
+      continue;
+    }
+    const bindingChannel = normalizeOptionalString(binding.channel);
+    const bindingThread = normalizeOptionalString(binding.thread);
+    if (bindingChannel === channelId && bindingThread === expectedThread) {
+      return sessionId;
+    }
+  }
+  return null;
+}
+
+function upsertDiscordBindings(
+  config: DiscordPluginConfig,
+  input: {
+    channelId: string;
+    threadId: string | null;
+    guildId: string | null;
+    projectId: string;
+    sessionId: string;
+  },
+): DiscordPluginConfig {
+  const currentChannelBindings = readChannelBindings(config.channelBindings);
+  const currentSessionBindings = readSessionBindings(config.sessionBindings);
+  const nextChannelBindings = {
+    ...currentChannelBindings,
+    [input.channelId]: {
+      projectId: input.projectId,
+      channel: input.channelId,
+      guild: input.guildId,
+    } satisfies DiscordChannelBinding,
+  };
+  const nextSessionBindings = {
+    ...currentSessionBindings,
+    [input.sessionId]: {
+      channel: input.channelId,
+      thread: input.threadId,
+      guid: input.guildId,
+    } satisfies DiscordSessionBinding,
+  };
+  const sessionIds = new Set(normalizeStringList(config.sessionIds));
+  sessionIds.add(input.sessionId);
+  return {
+    ...config,
+    channelBindings: nextChannelBindings,
+    sessionBindings: nextSessionBindings,
+    sessionIds: [...sessionIds],
+  };
+}
+
+function applyChannelProjectBinding(
+  config: DiscordPluginConfig,
+  input: {
+    channelId: string;
+    guildId: string | null;
+    projectId: string;
+  },
+): DiscordPluginConfig {
+  const channelBindings = readChannelBindings(config.channelBindings);
+  channelBindings[input.channelId] = {
+    projectId: input.projectId,
+    channel: input.channelId,
+    guild: input.guildId,
+  };
+
+  const currentSessionBindings = readSessionBindings(config.sessionBindings);
+  const nextSessionBindings: Record<string, DiscordSessionBinding> = {};
+  for (const [sessionId, binding] of Object.entries(currentSessionBindings)) {
+    const isChannelChatBinding = binding.channel === input.channelId && !binding.thread;
+    if (isChannelChatBinding) {
+      continue;
+    }
+    nextSessionBindings[sessionId] = binding;
+  }
+
+  return {
+    ...config,
+    channelBindings,
+    sessionBindings: nextSessionBindings,
+    sessionIds: Object.keys(nextSessionBindings),
+  };
+}
+
+function buildProjectUpdateInput(
+  project: Record<string, unknown>,
+  input: {
+    repoPath: string | null;
+    model: string | null;
+    executionMode: string | null;
+  },
+): {
+  repoPath?: string | null;
+  backendConfig?: Record<string, unknown>;
+} {
+  const update: {
+    repoPath?: string | null;
+    backendConfig?: Record<string, unknown>;
+  } = {};
+
+  if (input.repoPath) {
+    update.repoPath = input.repoPath;
+  }
+
+  if (input.model || input.executionMode) {
+    const existingBackendConfig = normalizeJsonRecordForDisplay(project.backendConfig);
+    const model = input.model ?? normalizeOptionalString(existingBackendConfig.model);
+    const executionMode = input.executionMode ?? normalizeOptionalString(existingBackendConfig.executionMode);
+    if (!model || !executionMode) {
+      throw new Error('Both model and execution mode must be provided (or already set on project).');
+    }
+    if (!EXECUTION_MODE_CHOICES.includes(executionMode as (typeof EXECUTION_MODE_CHOICES)[number])) {
+      throw new Error(`Unsupported execution mode: ${executionMode}`);
+    }
+    update.backendConfig = {
+      ...existingBackendConfig,
+      model,
+      executionMode,
+    };
+  }
+
+  return update;
+}
+
+function resolveExecutionModesForBackend(backend: string | null): string[] {
+  const normalized = (backend ?? '').trim().toLowerCase();
+  if (normalized === 'codex' || normalized === 'claude' || normalized === 'mock') {
+    return [...EXECUTION_MODE_CHOICES];
+  }
+  return [...EXECUTION_MODE_CHOICES];
+}
+
+function readChannelBindings(value: unknown): Record<string, DiscordChannelBinding> {
+  const record = asRecord(value);
+  if (!record) {
+    return {};
+  }
+  const normalized: Record<string, DiscordChannelBinding> = {};
+  for (const [key, raw] of Object.entries(record)) {
+    const entry = asRecord(raw);
+    if (!entry) {
+      continue;
+    }
+    const projectId = normalizeOptionalString(entry.projectId);
+    const channel = normalizeOptionalString(entry.channel);
+    if (!projectId || !channel) {
+      continue;
+    }
+    normalized[key] = {
+      projectId,
+      channel,
+      guild: normalizeOptionalString(entry.guild),
+    };
+  }
+  return normalized;
+}
+
+function readSessionBindings(value: unknown): Record<string, DiscordSessionBinding> {
+  const record = asRecord(value);
+  if (!record) {
+    return {};
+  }
+  const normalized: Record<string, DiscordSessionBinding> = {};
+  for (const [key, raw] of Object.entries(record)) {
+    const entry = asRecord(raw);
+    if (!entry) {
+      continue;
+    }
+    const channel = normalizeOptionalString(entry.channel);
+    if (!channel) {
+      continue;
+    }
+    normalized[key] = {
+      channel,
+      thread: normalizeOptionalString(entry.thread),
+      guid: normalizeOptionalString(entry.guid),
+    };
+  }
+  return normalized;
+}
+
+function buildDiscordProjectName(channelName: string, channelId: string): string {
+  const slug = slugifyChannelName(channelName);
+  const normalizedChannelId = normalizeOptionalString(channelId) ?? 'unknown';
+  return limitProjectName(`discord-${slug}-${normalizedChannelId}`);
+}
+
+function slugifyChannelName(channelName: string): string {
+  const normalized = (normalizeOptionalString(channelName) ?? 'channel').toLowerCase();
+  const slug = normalized
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug.length > 0 ? slug : 'channel';
+}
+
+function buildDiscordSessionTitle(channelName: string, threadId: string | null): string {
+  const normalized = normalizeOptionalString(channelName) ?? 'Discord';
+  if (threadId) {
+    return limitSessionTitle(`Discord ${normalized} thread`);
+  }
+  return limitSessionTitle(`Discord ${normalized}`);
+}
+
+function limitProjectName(input: string): string {
+  const trimmed = input.trim();
+  if (trimmed.length <= 120) {
+    return trimmed;
+  }
+  return trimmed.slice(0, 120);
+}
+
+function limitSessionTitle(input: string): string {
+  const trimmed = input.trim();
+  if (trimmed.length <= 200) {
+    return trimmed;
+  }
+  return trimmed.slice(0, 200);
+}
+
+function readRequiredId(value: unknown, entity: string): string {
+  const record = asRecord(value);
+  const id = record ? normalizeOptionalString(record.id) : null;
+  if (!id) {
+    throw new Error(`Failed to read ${entity} id`);
+  }
+  return id;
+}
+
+function limitDiscordMessageLength(input: string): string {
+  if (input.length <= DISCORD_MESSAGE_MAX_LENGTH) {
+    return input;
+  }
+  return `${input.slice(0, DISCORD_MESSAGE_MAX_LENGTH - 1)}…`;
+}
+
+function buildDiscordOutboundText(message: BotMessage): string | null {
+  const payload = asRecord(message.payloadRaw);
+  if (!payload) {
+    return null;
+  }
+  if (message.kind === 'turn_message') {
+    const content = normalizeOptionalString(payload.content);
+    if (!content) {
+      return null;
+    }
+    return renderDiscordMessageMarkdown(content);
+  }
+  if (message.kind === 'approval_request') {
+    const summary = normalizeOptionalString(payload.summary) ?? normalizeOptionalString(payload.title) ?? 'Approval needed';
+    return `[Approval Required] ${summary}`;
+  }
+  if (message.kind === 'user_input_request') {
+    const prompt = normalizeOptionalString(payload.prompt) ?? 'Additional input is required.';
+    return `[Input Required] ${prompt}`;
+  }
+  return null;
+}
+
+function renderDiscordMessageMarkdown(content: string): string {
+  if (!content.includes('<think>')) {
+    return content;
+  }
+  const replaced = content.replace(/<think>([\s\S]*?)<\/think>/gi, (_full, inner: string) => {
+    const normalized = inner.trim();
+    if (!normalized) {
+      return '';
+    }
+    const italicLines = normalized
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .map((line) => `> _${line}_`)
+      .join('\n');
+    return italicLines.length > 0 ? `${italicLines}\n` : '';
+  });
+  return replaced
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^\n+/, '')
+    .trimEnd();
+}
+
+function extractDiscordApprovalRequest(message: BotMessage): DiscordApprovalRequest | null {
+  const root = asRecord(message.payloadRaw);
+  if (!root) {
+    return null;
+  }
+
+  if (message.kind === 'approval_request') {
+    const turnId = normalizeOptionalString(root.turnId);
+    const approvalId = normalizeOptionalString(root.approvalId) ?? normalizeOptionalString(root.requestId);
+    const kind = normalizeOptionalString(root.kind) ?? 'approval';
+    const payload = asRecord(root.payload) ?? root;
+    if (!turnId || !approvalId) {
+      return null;
+    }
+    return { turnId, approvalId, kind, payload };
+  }
+
+  return null;
+}
+
+function readDiscordTriggerMessageId(message: BotMessage): string | null {
+  const payload = asRecord(message.payloadRaw);
+  if (!payload) {
+    return null;
+  }
+  return normalizeOptionalString(payload.triggerMessageId);
+}
+
+function describeDiscordReactionEffect(message: BotMessage): {
+  action:
+    | 'watching'
+    | 'active'
+    | 'approval_pending'
+    | 'final_success'
+    | 'final_cancel'
+    | 'final_error';
+  onlyIfTracked: boolean;
+  skipOutboundText: boolean;
+} | null {
+  const payload = asRecord(message.payloadRaw);
+  if (!payload) {
+    return null;
+  }
+
+  if (message.kind === 'turn_message') {
+    return {
+      action: 'final_success',
+      onlyIfTracked: true,
+      skipOutboundText: false,
+    };
+  }
+
+  if (message.kind !== 'event') {
+    return null;
+  }
+
+  const eventType = normalizeOptionalString(payload.type);
+  if (!eventType) {
+    return null;
+  }
+  if (eventType === 'turn.completed' || eventType === 'turn.cancelled' || eventType === 'turn.failed') {
+    if (eventType === 'turn.cancelled') {
+      return {
+        action: 'final_cancel',
+        onlyIfTracked: true,
+        skipOutboundText: true,
+      };
+    }
+    if (eventType === 'turn.failed') {
+      return {
+        action: 'final_error',
+        onlyIfTracked: true,
+        skipOutboundText: true,
+      };
+    }
+    return {
+      action: 'final_success',
+      onlyIfTracked: true,
+      skipOutboundText: true,
+    };
+  }
+
+  if (eventType === 'turn.approval.requested') {
+    return {
+      action: 'approval_pending',
+      onlyIfTracked: true,
+      skipOutboundText: true,
+    };
+  }
+
+  if (eventType === 'turn.approval.resolved') {
+    return {
+      action: 'active',
+      onlyIfTracked: true,
+      skipOutboundText: true,
+    };
+  }
+
+  return {
+    action: 'active',
+    onlyIfTracked: true,
+    skipOutboundText: true,
+  };
+}
+
+function formatApprovalPromptContent(kind: string, payload: Record<string, unknown>): string {
+  const reason = readApprovalTextField(payload, 'reason') ?? 'Not provided by runtime';
+  const command = readApprovalCommand(payload) ?? 'Not provided by runtime';
+  const cwd = readApprovalTextField(payload, 'cwd') ?? 'Not provided by runtime';
+  return [
+    '**Approval Required**',
+    `Kind: ${formatApprovalKind(kind)}`,
+    `Purpose: ${reason}`,
+    `Command: ${command}`,
+    `CWD: ${cwd}`,
+  ].join('\n');
+}
+
+function formatApprovalKind(kind: string): string {
+  const normalized = kind.trim();
+  if (!normalized) {
+    return 'Approval';
+  }
+  if (normalized === 'command_execution') {
+    return 'Command Execution';
+  }
+  return normalized
+    .split(/[_\s-]+/g)
+    .filter((part) => part.length > 0)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(' ');
+}
+
+function readApprovalTextField(payload: Record<string, unknown>, key: 'reason' | 'cwd'): string | null {
+  const value = payload[key];
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function readApprovalCommand(payload: Record<string, unknown>): string | null {
+  const command = payload.command;
+  if (typeof command === 'string') {
+    const trimmed = command.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (Array.isArray(command)) {
+    const joined = command
+      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+      .filter((entry) => entry.length > 0)
+      .join(' ');
+    return joined.length > 0 ? joined : null;
+  }
+  if (command && typeof command === 'object') {
+    const record = command as Record<string, unknown>;
+    if (Array.isArray(record.argv)) {
+      const joined = record.argv
+        .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+        .filter((entry) => entry.length > 0)
+        .join(' ');
+      if (joined.length > 0) {
+        return joined;
+      }
+    }
+    if (typeof record.command === 'string' && record.command.trim().length > 0) {
+      return record.command.trim();
+    }
+  }
+  return null;
+}
+
+function getDiscordApprovalActionOptions(kind: string, payload: Record<string, unknown>): DiscordApprovalActionOption[] {
+  if (kind !== 'command_execution') {
+    return [
+      { key: 'accept', label: 'Approve', decision: 'accept' },
+      { key: 'decline', label: 'Reject', decision: 'decline', secondary: true },
+    ];
+  }
+
+  const options: DiscordApprovalActionOption[] = [];
+  const available = normalizeAvailableDecisions(payload.availableDecisions);
+  const allowed = new Set(available);
+
+  if (allowed.size === 0 || allowed.has('accept')) {
+    options.push({ key: 'accept', label: 'Approve', decision: 'accept' });
+  }
+  if (allowed.has('acceptForSession')) {
+    options.push({ key: 'acceptForSession', label: 'Approve for Session', decision: 'acceptForSession' });
+  }
+
+  const execPolicy = readExecpolicyAmendment(payload.proposedExecpolicyAmendment);
+  if (execPolicy.length > 0) {
+    options.push({
+      key: 'execpolicy',
+      label: 'Approve + Remember Rule',
+      decision: {
+        acceptWithExecpolicyAmendment: {
+          execpolicy_amendment: execPolicy,
+        },
+      },
+    });
+  }
+
+  const networkPolicies = readNetworkPolicyAmendments(payload.proposedNetworkPolicyAmendments);
+  networkPolicies.forEach((policy, index) => {
+    options.push({
+      key: `network-${index}`,
+      label: `${policy.action === 'allow' ? 'Allow' : 'Deny'} ${policy.host}`,
+      decision: {
+        applyNetworkPolicyAmendment: {
+          network_policy_amendment: policy,
+        },
+      },
+    });
+  });
+
+  if (allowed.size === 0 || allowed.has('decline')) {
+    options.push({ key: 'decline', label: 'Reject', decision: 'decline', secondary: true });
+  }
+  if (allowed.has('cancel')) {
+    options.push({ key: 'cancel', label: 'Reject + Cancel Turn', decision: 'cancel', secondary: true });
+  }
+
+  return options;
+}
+
+function normalizeAvailableDecisions(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry) => {
+    if (typeof entry === 'string') {
+      return [entry];
+    }
+    if (!entry || typeof entry !== 'object') {
+      return [];
+    }
+    if ('acceptWithExecpolicyAmendment' in entry) {
+      return ['acceptWithExecpolicyAmendment'];
+    }
+    if ('applyNetworkPolicyAmendment' in entry) {
+      return ['applyNetworkPolicyAmendment'];
+    }
+    return [];
+  });
+}
+
+function readExecpolicyAmendment(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+}
+
+function readNetworkPolicyAmendments(value: unknown): Array<{ action: 'allow' | 'deny'; host: string }> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      return [];
+    }
+    const record = entry as Record<string, unknown>;
+    const action = record.action;
+    const host = record.host;
+    if ((action === 'allow' || action === 'deny') && typeof host === 'string' && host.trim().length > 0) {
+      return [{ action, host: host.trim() }];
+    }
+    return [];
+  });
+}
+
+function isManagedActionEmoji(emojiName: string): boolean {
+  const normalized = normalizeEmojiName(emojiName);
+  return (
+    normalized === normalizeEmojiName(DISCORD_ACTION_EYE) ||
+    normalized === normalizeEmojiName(DISCORD_ACTION_FLASH) ||
+    normalized === normalizeEmojiName(DISCORD_ACTION_CHECK) ||
+    normalized === normalizeEmojiName(DISCORD_ACTION_CROSS) ||
+    normalized === normalizeEmojiName(DISCORD_ACTION_ALERT)
+  );
+}
+
+function resolveDesiredActionEmojis(
+  action: 'watching' | 'active' | 'approval_pending' | 'final_success' | 'final_cancel' | 'final_error',
+): string[] {
+  if (action === 'watching') {
+    return [DISCORD_ACTION_EYE];
+  }
+  if (action === 'active') {
+    return [DISCORD_ACTION_FLASH];
+  }
+  if (action === 'approval_pending') {
+    return [DISCORD_ACTION_FLASH, DISCORD_ACTION_ALERT];
+  }
+  if (action === 'final_cancel' || action === 'final_error') {
+    return [DISCORD_ACTION_CROSS];
+  }
+  return [DISCORD_ACTION_CHECK];
+}
+
+function resolveActionTrackingState(
+  action: 'watching' | 'active' | 'approval_pending' | 'final_success' | 'final_cancel' | 'final_error',
+): 'watching' | 'active' | 'final' {
+  if (action === 'watching') {
+    return 'watching';
+  }
+  if (action === 'active' || action === 'approval_pending') {
+    return 'active';
+  }
+  return 'final';
+}
+
+function normalizeEmojiName(value: string): string {
+  return value.replace(/\uFE0F/g, '');
+}
+
+function buildApprovalMenuId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function safeReply(interaction: ChatInputCommandInteraction, content: string): Promise<void> {
+  if (interaction.deferred || interaction.replied) {
+    await interaction.editReply(content);
+    return;
+  }
+  await interaction.reply({
+    content,
+    ephemeral: true,
+  });
+}
+
+async function safeMenuReply(interaction: StringSelectMenuInteraction, content: string): Promise<void> {
+  if (interaction.deferred || interaction.replied) {
+    await interaction.editReply({
+      content,
+    });
+    return;
+  }
+  await interaction.reply({
+    content,
+    ephemeral: true,
+  });
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function asRecordArray(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((entry) => asRecord(entry))
+    .filter((entry): entry is Record<string, unknown> => !!entry);
+}
+
+function normalizeOptionalString(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function redactProxyUrl(raw: string): string {
+  try {
+    const parsed = new URL(raw);
+    if (parsed.username || parsed.password) {
+      parsed.username = parsed.username ? '***' : '';
+      parsed.password = parsed.password ? '***' : '';
+    }
+    return parsed.toString();
+  } catch {
+    return 'configured';
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutHandle = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}

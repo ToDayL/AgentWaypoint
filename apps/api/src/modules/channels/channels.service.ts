@@ -20,6 +20,7 @@ import {
   GatewayResultBody,
 } from './gateway.schemas';
 import { ResolveTurnApprovalBody } from '../turns/turns.schemas';
+import { QueueSignalService } from '../queue-signal/queue-signal.service';
 
 const BOT_MESSAGE_QUEUED_STATUS = 'queued';
 
@@ -36,6 +37,7 @@ export class ChannelsService {
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(TurnsService) private readonly turnsService: TurnsService,
+    @Inject(QueueSignalService) private readonly queueSignalService: QueueSignalService,
   ) {}
 
   async createIntegration(userId: string, input: CreateIntegrationBody): Promise<BotIntegration> {
@@ -44,7 +46,7 @@ export class ChannelsService {
         ownerUserId: userId,
         provider: input.provider,
         name: input.name,
-        status: 'draft',
+        status: 'active',
         credentialsEncrypted: toOptionalJson(input.credentialsEncrypted),
         pluginConfig: toOptionalJson(input.pluginConfig),
       },
@@ -104,7 +106,7 @@ export class ChannelsService {
 
   async sendMessage(userId: string, input: SendMessageBody, kind: BotMessageKind): Promise<BotMessage> {
     await this.ensureProjectSessionOwnership(userId, input.projectId, input.sessionId);
-    return this.prisma.botMessage.create({
+    const created = await this.prisma.botMessage.create({
       data: {
         projectId: input.projectId,
         sessionId: input.sessionId,
@@ -113,6 +115,8 @@ export class ChannelsService {
         status: BOT_MESSAGE_QUEUED_STATUS,
       },
     });
+    await this.queueSignalService.publishOutboundWake();
+    return created;
   }
 
   async listMessages(userId: string, query: ListMessagesQuery): Promise<BotMessage[]> {

@@ -186,6 +186,35 @@ type AppSettings = {
   supportedBackends: string[];
 };
 
+type BotIntegrationStatus = 'active' | 'paused' | 'error';
+
+type DiscordPluginConfig = {
+  trigger?: {
+    requireMention?: boolean;
+    allowedUsers?: string[];
+    allowedGuilds?: string[];
+    allowedChannels?: string[];
+    allowDM?: boolean;
+  };
+  message?: {
+    sendStyle?: 'reply' | 'new_message';
+    allowEveryoneMention?: boolean;
+    ignoreBotMessages?: boolean;
+    maxInboundLength?: number;
+  };
+};
+
+type BotIntegration = {
+  id: string;
+  provider: string;
+  name: string;
+  status: BotIntegrationStatus;
+  credentialsEncrypted: Record<string, unknown> | null;
+  pluginConfig: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type WorkspaceTreeEntry = {
   name: string;
   path: string;
@@ -259,6 +288,27 @@ function normalizeSupportedBackends(input: unknown): string[] {
     .filter((item) => item === 'codex' || item === 'claude');
   const unique = Array.from(new Set(normalized));
   return unique.length > 0 ? unique : ['codex'];
+}
+
+function parseIdListInput(input: string): string[] {
+  return Array.from(
+    new Set(
+      input
+        .split(',')
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0),
+    ),
+  );
+}
+
+function formatIdListInput(input: unknown): string {
+  if (!Array.isArray(input)) {
+    return '';
+  }
+  return input
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter((item) => item.length > 0)
+    .join(', ');
 }
 
 function mapExecutionModeToRuntime(executionMode: string): { sandbox: string; approvalPolicy: string } {
@@ -372,6 +422,9 @@ const ALL_PROJECT_BACKEND_OPTIONS = [
   { value: 'codex', label: 'codex' },
   { value: 'claude', label: 'claude' },
 ];
+const INTEGRATION_CREATE_OPTIONS: Array<{ provider: string; label: string }> = [
+  { provider: 'discord', label: 'Discord' },
+];
 
 const STREAM_EVENTS = [
   'turn.started',
@@ -415,6 +468,8 @@ type ActionPanelMode =
   | 'createProject'
   | 'createSession'
   | 'projectConfig'
+  | 'createDiscordIntegration'
+  | 'discordIntegrationConfig'
   | 'createUser'
   | 'manageUser'
   | 'confirmCompactSession'
@@ -454,6 +509,19 @@ export default function HomePage() {
     defaultWorkspaceRoot: null,
     supportedBackends: ['codex'],
   });
+  const [botIntegrations, setBotIntegrations] = useState<BotIntegration[]>([]);
+  const [selectedDiscordIntegrationId, setSelectedDiscordIntegrationId] = useState('');
+  const [discordIntegrationName, setDiscordIntegrationName] = useState('Discord Bot');
+  const [discordBotTokenInput, setDiscordBotTokenInput] = useState('');
+  const [discordRequireMention, setDiscordRequireMention] = useState(true);
+  const [discordAllowedUsersInput, setDiscordAllowedUsersInput] = useState('');
+  const [discordAllowedGuildsInput, setDiscordAllowedGuildsInput] = useState('');
+  const [discordAllowedChannelsInput, setDiscordAllowedChannelsInput] = useState('');
+  const [discordAllowDm, setDiscordAllowDm] = useState(false);
+  const [discordSendStyle, setDiscordSendStyle] = useState<'reply' | 'new_message'>('reply');
+  const [discordAllowEveryoneMention, setDiscordAllowEveryoneMention] = useState(false);
+  const [discordIgnoreBotMessages, setDiscordIgnoreBotMessages] = useState(true);
+  const [discordMaxInboundLengthInput, setDiscordMaxInboundLengthInput] = useState('2000');
   const [accountRateLimits, setAccountRateLimits] = useState<{
     fiveHour: RateLimitWindow | null;
     weekly: RateLimitWindow | null;
@@ -934,6 +1002,14 @@ export default function HomePage() {
   }, [mounted, authenticated, leftSidebarTab, codexBackendEnabled]);
 
   useEffect(() => {
+    if (!mounted || !authenticated || leftSidebarTab !== 'config') {
+      return;
+    }
+    void loadBotIntegrations({ preserveSelection: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mounted, authenticated, leftSidebarTab]);
+
+  useEffect(() => {
     if (codexBackendEnabled) {
       return;
     }
@@ -1319,6 +1395,7 @@ export default function HomePage() {
           preferredSessionId: preferredProjectId ? readLastSessionId(userEmail, preferredProjectId) ?? undefined : undefined,
           hydrateAllSessions: true,
         });
+        await loadBotIntegrations();
         return;
       }
       setAuthenticated(false);
@@ -1409,6 +1486,19 @@ export default function HomePage() {
         defaultWorkspaceRoot: null,
         supportedBackends: ['codex'],
       });
+      setBotIntegrations([]);
+      setSelectedDiscordIntegrationId('');
+      setDiscordIntegrationName('Discord Bot');
+      setDiscordBotTokenInput('');
+      setDiscordRequireMention(true);
+      setDiscordAllowedUsersInput('');
+      setDiscordAllowedGuildsInput('');
+      setDiscordAllowedChannelsInput('');
+      setDiscordAllowDm(false);
+      setDiscordSendStyle('reply');
+      setDiscordAllowEveryoneMention(false);
+      setDiscordIgnoreBotMessages(true);
+      setDiscordMaxInboundLengthInput('2000');
       setFileBrowserNodes({});
       setFileBrowserExpandedPaths([]);
       setFileBrowserError('');
@@ -1566,6 +1656,208 @@ export default function HomePage() {
       });
     } finally {
       setAccountRateLimitsBusy(false);
+    }
+  }
+
+  function buildDiscordPluginConfigDraft(): DiscordPluginConfig {
+    const parsedMaxInboundLength = Number.parseInt(discordMaxInboundLengthInput.trim(), 10);
+    const safeMaxInboundLength =
+      Number.isFinite(parsedMaxInboundLength) && parsedMaxInboundLength > 0
+        ? Math.min(parsedMaxInboundLength, 10000)
+        : 2000;
+
+    return {
+      trigger: {
+        requireMention: discordRequireMention,
+        allowedUsers: parseIdListInput(discordAllowedUsersInput),
+        allowedGuilds: parseIdListInput(discordAllowedGuildsInput),
+        allowedChannels: parseIdListInput(discordAllowedChannelsInput),
+        allowDM: discordAllowDm,
+      },
+      message: {
+        sendStyle: discordSendStyle,
+        allowEveryoneMention: discordAllowEveryoneMention,
+        ignoreBotMessages: discordIgnoreBotMessages,
+        maxInboundLength: safeMaxInboundLength,
+      },
+    };
+  }
+
+  function applyDiscordDraftFromIntegration(integration: BotIntegration): void {
+    const config = (integration.pluginConfig ?? {}) as DiscordPluginConfig;
+    setSelectedDiscordIntegrationId(integration.id);
+    setDiscordIntegrationName(integration.name);
+    setDiscordBotTokenInput('');
+    setDiscordRequireMention(config.trigger?.requireMention ?? true);
+    setDiscordAllowedUsersInput(formatIdListInput(config.trigger?.allowedUsers));
+    setDiscordAllowedGuildsInput(formatIdListInput(config.trigger?.allowedGuilds));
+    setDiscordAllowedChannelsInput(formatIdListInput(config.trigger?.allowedChannels));
+    setDiscordAllowDm(config.trigger?.allowDM ?? false);
+    setDiscordSendStyle(config.message?.sendStyle === 'new_message' ? 'new_message' : 'reply');
+    setDiscordAllowEveryoneMention(config.message?.allowEveryoneMention ?? false);
+    setDiscordIgnoreBotMessages(config.message?.ignoreBotMessages ?? true);
+    setDiscordMaxInboundLengthInput(String(config.message?.maxInboundLength ?? 2000));
+  }
+
+  function resetDiscordDraftForCreate(): void {
+    setSelectedDiscordIntegrationId('');
+    setDiscordIntegrationName('Discord Bot');
+    setDiscordBotTokenInput('');
+    setDiscordRequireMention(true);
+    setDiscordAllowedUsersInput('');
+    setDiscordAllowedGuildsInput('');
+    setDiscordAllowedChannelsInput('');
+    setDiscordAllowDm(false);
+    setDiscordSendStyle('reply');
+    setDiscordAllowEveryoneMention(false);
+    setDiscordIgnoreBotMessages(true);
+    setDiscordMaxInboundLengthInput('2000');
+  }
+
+  function openCreateDiscordPanel(): void {
+    resetDiscordDraftForCreate();
+    openActionPanel('createDiscordIntegration');
+  }
+
+  function openDiscordConfigPanel(integration: BotIntegration): void {
+    applyDiscordDraftFromIntegration(integration);
+    openActionPanel('discordIntegrationConfig');
+  }
+
+  function openCreateIntegrationPanel(provider: string): void {
+    if (provider === 'discord') {
+      openCreateDiscordPanel();
+      return;
+    }
+    setError(`${provider} integration create flow is not implemented yet`);
+  }
+
+  async function loadBotIntegrations(options?: { preserveSelection?: boolean }): Promise<void> {
+    try {
+      const allIntegrations = await apiRequest<BotIntegration[]>('/api/channels/integrations', {
+        method: 'GET',
+      });
+      setBotIntegrations(allIntegrations);
+      const discordOnly = allIntegrations.filter((item) => item.provider === 'discord');
+      if (allIntegrations.length === 0) {
+        setSelectedDiscordIntegrationId('');
+        return;
+      }
+      if (options?.preserveSelection && selectedDiscordIntegrationId) {
+        const matched = discordOnly.find((item) => item.id === selectedDiscordIntegrationId);
+        if (matched) {
+          return;
+        }
+      }
+      const latest = discordOnly[0];
+      if (latest) {
+        applyDiscordDraftFromIntegration(latest);
+      }
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    }
+  }
+
+  async function handleCreateDiscordIntegration(): Promise<void> {
+    if (!discordIntegrationName.trim() || !discordBotTokenInput.trim()) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const created = await apiRequest<BotIntegration>('/api/channels/integrations', {
+        method: 'POST',
+        body: {
+          provider: 'discord',
+          name: discordIntegrationName.trim(),
+          credentialsEncrypted: {
+            botToken: discordBotTokenInput.trim(),
+          },
+          pluginConfig: buildDiscordPluginConfigDraft(),
+        },
+      });
+      setDiscordBotTokenInput('');
+      await loadBotIntegrations({ preserveSelection: true });
+      setSelectedDiscordIntegrationId(created.id);
+      return;
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+      throw requestError;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUpdateDiscordIntegration(): Promise<void> {
+    if (!selectedDiscordIntegrationId.trim() || !discordIntegrationName.trim()) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const body: Record<string, unknown> = {
+        name: discordIntegrationName.trim(),
+        pluginConfig: buildDiscordPluginConfigDraft(),
+      };
+      if (discordBotTokenInput.trim()) {
+        body.credentialsEncrypted = {
+          botToken: discordBotTokenInput.trim(),
+        };
+      }
+      await apiRequest<BotIntegration>(`/api/channels/integrations/${selectedDiscordIntegrationId}`, {
+        method: 'PATCH',
+        body,
+      });
+      setDiscordBotTokenInput('');
+      await loadBotIntegrations({ preserveSelection: true });
+      return;
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+      throw requestError;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCreateDiscordIntegrationFromPanel(): Promise<void> {
+    try {
+      await handleCreateDiscordIntegration();
+      closeActionPanel();
+    } catch {
+      // Keep panel open so user can fix fields.
+    }
+  }
+
+  async function handleUpdateDiscordIntegrationFromPanel(): Promise<void> {
+    try {
+      await handleUpdateDiscordIntegration();
+      closeActionPanel();
+    } catch {
+      // Keep panel open so user can fix fields.
+    }
+  }
+
+  async function handleRemoveBotIntegration(integrationId: string): Promise<void> {
+    if (!integrationId.trim()) {
+      return;
+    }
+    if (typeof window !== 'undefined' && !window.confirm('Remove this integration?')) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      await apiRequest(`/api/channels/integrations/${integrationId}`, {
+        method: 'DELETE',
+      });
+      if (selectedDiscordIntegrationId === integrationId) {
+        setSelectedDiscordIntegrationId('');
+      }
+      await loadBotIntegrations({ preserveSelection: true });
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -2794,6 +3086,7 @@ export default function HomePage() {
     setProjectConfigRepoPath('');
     setProjectConfigDefaultModel(DEFAULT_CODEX_MODEL);
     setProjectConfigExecutionMode(DEFAULT_CODEX_EXECUTION_MODE);
+    setDiscordBotTokenInput('');
   }
 
   async function handleApplyManagedUserFromPanel(): Promise<void> {
@@ -3300,6 +3593,134 @@ export default function HomePage() {
                   </div>
                 </div>
               ) : null}
+              {actionPanelMode === 'createDiscordIntegration' || actionPanelMode === 'discordIntegrationConfig' ? (
+                <div className="action-panel-body">
+                  <h3>{actionPanelMode === 'createDiscordIntegration' ? 'Add Discord Integration' : 'Discord Config'}</h3>
+                  <label>
+                    Integration Name
+                    <input
+                      value={discordIntegrationName}
+                      onChange={(event) => setDiscordIntegrationName(event.target.value)}
+                      placeholder="Discord Bot"
+                    />
+                  </label>
+                  <label>
+                    Bot Token
+                    <input
+                      type="password"
+                      value={discordBotTokenInput}
+                      onChange={(event) => setDiscordBotTokenInput(event.target.value)}
+                      placeholder={
+                        actionPanelMode === 'discordIntegrationConfig'
+                          ? 'Leave empty to keep current token'
+                          : 'Paste Discord bot token'
+                      }
+                    />
+                  </label>
+                  <label className="inline-checkbox">
+                    <span>Require @mention to trigger</span>
+                    <input
+                      type="checkbox"
+                      checked={discordRequireMention}
+                      onChange={(event) => setDiscordRequireMention(event.target.checked)}
+                      disabled={busy}
+                    />
+                  </label>
+                  <label className="inline-checkbox">
+                    <span>Allow DM triggers</span>
+                    <input
+                      type="checkbox"
+                      checked={discordAllowDm}
+                      onChange={(event) => setDiscordAllowDm(event.target.checked)}
+                      disabled={busy}
+                    />
+                  </label>
+                  <label>
+                    Allowed User IDs (comma-separated)
+                    <input
+                      value={discordAllowedUsersInput}
+                      onChange={(event) => setDiscordAllowedUsersInput(event.target.value)}
+                      placeholder="empty = all users"
+                    />
+                  </label>
+                  <label>
+                    Allowed Guild IDs (comma-separated)
+                    <input
+                      value={discordAllowedGuildsInput}
+                      onChange={(event) => setDiscordAllowedGuildsInput(event.target.value)}
+                      placeholder="empty = all guilds"
+                    />
+                  </label>
+                  <label>
+                    Allowed Channel IDs (comma-separated)
+                    <input
+                      value={discordAllowedChannelsInput}
+                      onChange={(event) => setDiscordAllowedChannelsInput(event.target.value)}
+                      placeholder="empty = all channels"
+                    />
+                  </label>
+                  <label>
+                    Send Style
+                    <select
+                      value={discordSendStyle}
+                      onChange={(event) =>
+                        setDiscordSendStyle(event.target.value === 'new_message' ? 'new_message' : 'reply')
+                      }
+                    >
+                      <option value="reply">Reply to triggering message</option>
+                      <option value="new_message">Send a new message</option>
+                    </select>
+                  </label>
+                  <label className="inline-checkbox">
+                    <span>Allow @everyone/@here mentions in outbound</span>
+                    <input
+                      type="checkbox"
+                      checked={discordAllowEveryoneMention}
+                      onChange={(event) => setDiscordAllowEveryoneMention(event.target.checked)}
+                      disabled={busy}
+                    />
+                  </label>
+                  <label className="inline-checkbox">
+                    <span>Ignore messages from other bots</span>
+                    <input
+                      type="checkbox"
+                      checked={discordIgnoreBotMessages}
+                      onChange={(event) => setDiscordIgnoreBotMessages(event.target.checked)}
+                      disabled={busy}
+                    />
+                  </label>
+                  <label>
+                    Max Inbound Message Length
+                    <input
+                      value={discordMaxInboundLengthInput}
+                      onChange={(event) => setDiscordMaxInboundLengthInput(event.target.value)}
+                      placeholder="2000"
+                    />
+                  </label>
+                  <div className="sim-actions action-panel-actions-inline">
+                    {actionPanelMode === 'createDiscordIntegration' ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleCreateDiscordIntegrationFromPanel()}
+                        disabled={busy || !discordIntegrationName.trim() || !discordBotTokenInput.trim()}
+                      >
+                        Add
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void handleUpdateDiscordIntegrationFromPanel()}
+                        disabled={busy || !selectedDiscordIntegrationId || !discordIntegrationName.trim()}
+                      >
+                        Save
+                      </button>
+                    )}
+                    <button type="button" className="button-secondary" onClick={() => closeActionPanel()}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               {actionPanelMode === 'createUser' ? (
                 <div className="action-panel-body">
                   <h3>Create User</h3>
@@ -3796,6 +4217,86 @@ export default function HomePage() {
                             ) : null}
                           </>
                         ) : null}
+                        <h3>Bot Integrations</h3>
+                        <div className="sim-actions action-panel-actions-inline">
+                          {INTEGRATION_CREATE_OPTIONS.map((option) => (
+                            <button
+                              key={`create-plugin-${option.provider}`}
+                              type="button"
+                              className="icon-button"
+                              aria-label={`Create ${option.label} integration`}
+                              title={`Create ${option.label} integration`}
+                              onClick={() => openCreateIntegrationPanel(option.provider)}
+                              disabled={busy}
+                            >
+                              <Plus />
+                            </button>
+                          ))}
+                          <button
+                            type="button"
+                            className="icon-button"
+                            aria-label="Refresh integrations"
+                            title="Refresh integrations"
+                            onClick={() => void loadBotIntegrations({ preserveSelection: true })}
+                            disabled={busy}
+                          >
+                            <RefreshCw />
+                          </button>
+                        </div>
+                        <table className="admin-user-table">
+                          <thead>
+                            <tr>
+                              <th>Plugin</th>
+                              <th>Name</th>
+                              <th>Status</th>
+                              <th>Updated</th>
+                              <th />
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {botIntegrations.length === 0 ? (
+                              <tr>
+                                <td colSpan={5}>No bot integrations.</td>
+                              </tr>
+                            ) : null}
+                            {botIntegrations.map((integration) => (
+                              <tr key={integration.id}>
+                                <td>{integration.provider}</td>
+                                <td>{integration.name}</td>
+                                <td>{integration.status}</td>
+                                <td>{new Date(integration.updatedAt).toLocaleString()}</td>
+                                <td>
+                                  <div className="row-actions">
+                                    <button
+                                      type="button"
+                                      className="icon-button"
+                                      aria-label={`Configure ${integration.name}`}
+                                      title={`Configure ${integration.name}`}
+                                      onClick={() => {
+                                        if (integration.provider === 'discord') {
+                                          openDiscordConfigPanel(integration);
+                                        }
+                                      }}
+                                      disabled={busy || integration.provider !== 'discord'}
+                                    >
+                                      <Settings />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="icon-button"
+                                      aria-label={`Remove ${integration.name}`}
+                                      title={`Remove ${integration.name}`}
+                                      onClick={() => void handleRemoveBotIntegration(integration.id)}
+                                      disabled={busy}
+                                    >
+                                      <Trash2 />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
                         <label className="inline-checkbox">
                           <span>Turn Steering</span>
                           <input

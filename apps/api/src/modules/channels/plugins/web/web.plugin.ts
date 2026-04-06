@@ -76,7 +76,15 @@ export class WebPlugin implements ChannelPlugin {
     return this.requireContext().listProjectsForUser(userId);
   }
 
-  async createProjectForUser(userId: string, input: { name: string; repoPath?: string }): Promise<unknown> {
+  async createProjectForUser(
+    userId: string,
+    input: {
+      name: string;
+      repoPath?: string;
+      backend?: string;
+      backendConfig?: Record<string, unknown>;
+    },
+  ): Promise<unknown> {
     return this.requireContext().createProjectForUser(userId, input);
   }
 
@@ -87,7 +95,12 @@ export class WebPlugin implements ChannelPlugin {
   async updateProjectForUser(
     userId: string,
     projectId: string,
-    input: { name?: string; repoPath?: string | null },
+    input: {
+      name?: string;
+      repoPath?: string | null;
+      backend?: string;
+      backendConfig?: Record<string, unknown>;
+    },
   ): Promise<unknown> {
     return this.requireContext().updateProjectForUser(userId, projectId, input);
   }

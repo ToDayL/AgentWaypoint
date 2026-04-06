@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RUNNER_ADAPTER, RunnerAdapter, RunnerStreamEvent } from '../runner/runner.types';
 import { SettingsService } from '../settings/settings.service';
 import { CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from './turns.schemas';
+import { QueueSignalService } from '../queue-signal/queue-signal.service';
 
 const ACTIVE_TURN_STATUSES = ['queued', 'running', 'waiting_approval'];
 const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
@@ -61,6 +62,7 @@ export class TurnsService implements OnModuleInit {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(RUNNER_ADAPTER) private readonly runnerAdapter: RunnerAdapter,
     @Inject(SettingsService) private readonly settingsService: SettingsService,
+    @Inject(QueueSignalService) private readonly queueSignalService: QueueSignalService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -501,6 +503,27 @@ export class TurnsService implements OnModuleInit {
               payload: normalizedPayload,
             },
           });
+
+          if (turn.triggerIdentifier !== 'web') {
+            await tx.botMessage.create({
+              data: {
+                projectId: turn.session.projectId,
+                sessionId: turn.sessionId,
+                kind: 'approval_request',
+                payloadRaw: {
+                  turnId: turn.id,
+                  approvalId: requestId,
+                  kind,
+                  payload: normalizedPayload,
+                  triggerIdentifier: turn.triggerIdentifier,
+                  triggerProvider: turn.triggerProvider,
+                  triggerIntegrationId: turn.triggerIntegrationId,
+                  triggerMessageId: turn.triggerMessageId,
+                },
+                status: 'queued',
+              },
+            });
+          }
         });
 
         await this.appendEvent(turnId, 'turn.approval.requested', normalizedPayload);
@@ -731,6 +754,7 @@ export class TurnsService implements OnModuleInit {
         status: 'queued',
       },
     });
+    await this.queueSignalService.publishOutboundWake();
   }
 
   private normalizePayload(payload: Record<string, unknown>): Prisma.InputJsonValue {
