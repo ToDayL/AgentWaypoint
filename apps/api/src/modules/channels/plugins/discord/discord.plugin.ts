@@ -215,11 +215,14 @@ export class DiscordPlugin implements ChannelPlugin {
     const outboundText = buildDiscordOutboundText(message);
     let providerMessageId: string | null = null;
     if (outboundText) {
-      const sent = await channel.send({
-        content: limitDiscordMessageLength(outboundText),
-        allowedMentions: buildAllowedMentions(runtime.config.message?.allowEveryoneMention ?? false),
-      });
-      providerMessageId = sent.id;
+      const chunks = splitDiscordMessageChunks(outboundText);
+      for (const chunk of chunks) {
+        const sent = await channel.send({
+          content: chunk,
+          allowedMentions: buildAllowedMentions(runtime.config.message?.allowEveryoneMention ?? false),
+        });
+        providerMessageId = sent.id;
+      }
     }
 
     if (reactionEffect) {
@@ -2757,6 +2760,53 @@ function limitDiscordMessageLength(input: string): string {
     return input;
   }
   return `${input.slice(0, DISCORD_MESSAGE_MAX_LENGTH - 1)}…`;
+}
+
+function splitDiscordMessageChunks(input: string): string[] {
+  if (input.length <= DISCORD_MESSAGE_MAX_LENGTH) {
+    return [input];
+  }
+
+  const chunks: string[] = [];
+  let remaining = input;
+  while (remaining.length > DISCORD_MESSAGE_MAX_LENGTH) {
+    const window = remaining.slice(0, DISCORD_MESSAGE_MAX_LENGTH);
+
+    // Prefer splitting at the latest line end within the limit.
+    const newlineIndex = window.lastIndexOf('\n');
+    if (newlineIndex > 0) {
+      const splitAt = newlineIndex + 1;
+      chunks.push(remaining.slice(0, splitAt));
+      remaining = remaining.slice(splitAt);
+      continue;
+    }
+
+    // If no line-end split is available, split on whitespace.
+    const whitespaceIndex = findLastWhitespaceIndex(window);
+    if (whitespaceIndex > 0) {
+      const splitAt = whitespaceIndex + 1;
+      chunks.push(remaining.slice(0, splitAt));
+      remaining = remaining.slice(splitAt);
+      continue;
+    }
+
+    // Fallback for long unbreakable content.
+    chunks.push(window);
+    remaining = remaining.slice(DISCORD_MESSAGE_MAX_LENGTH);
+  }
+  if (remaining.length > 0) {
+    chunks.push(remaining);
+  }
+  return chunks;
+}
+
+function findLastWhitespaceIndex(input: string): number {
+  for (let index = input.length - 1; index >= 0; index -= 1) {
+    if (/\s/.test(input[index] ?? '')) {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function buildDiscordOutboundText(message: BotMessage): string | null {
