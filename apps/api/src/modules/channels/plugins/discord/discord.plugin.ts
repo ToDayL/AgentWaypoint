@@ -207,6 +207,9 @@ export class DiscordPlugin implements ChannelPlugin {
       );
       return { providerMessageId };
     }
+    if (shouldSkipUserMessageForSourceBinding(message, context)) {
+      return { providerMessageId: `discord-source-skipped-${message.id}` };
+    }
 
     const reactionEffect = describeDiscordReactionEffect(message);
     const outboundText = buildDiscordOutboundText(message);
@@ -1631,6 +1634,7 @@ export class DiscordPlugin implements ChannelPlugin {
       channelName: input.channelName,
       guildId: input.guildId,
     });
+    const unifiedIdentifier = buildDiscordUnifiedIdentifier(runtime.integrationId, input.providerMessageId);
 
     const activeTurn = await this.readSteerableTurnForSession(runtime.ownerUserId, resolved.sessionId);
     if (activeTurn) {
@@ -1644,6 +1648,22 @@ export class DiscordPlugin implements ChannelPlugin {
       try {
         await this.requireContext().steerTurnForUser(runtime.ownerUserId, activeTurn.turnId, {
           content: input.content,
+        });
+        await this.requireContext().publishUserMessageForSession({
+          projectId: resolved.projectId,
+          sessionId: resolved.sessionId,
+          content: input.content,
+          triggerIdentifier: unifiedIdentifier,
+          triggerProvider: this.provider,
+          triggerIntegrationId: runtime.integrationId,
+          triggerMessageId: input.providerMessageId,
+          sourceBinding: {
+            provider: this.provider,
+            integrationId: runtime.integrationId,
+            guid: null,
+            channel: input.bindingChannelId,
+            thread: input.bindingThreadId,
+          },
         });
         if (input.providerMessageId) {
           runtime.steerTriggerByTurnId.set(activeTurn.turnId, {
@@ -1673,13 +1693,22 @@ export class DiscordPlugin implements ChannelPlugin {
     }
 
     const created = await this.requireContext().ingestInbound({
-      unifiedIdentifier: buildDiscordUnifiedIdentifier(runtime.integrationId, input.providerMessageId),
+      unifiedIdentifier,
       triggerProvider: this.provider,
       triggerIntegrationId: runtime.integrationId,
       providerMessageId: input.providerMessageId ?? undefined,
       projectId: resolved.projectId,
       sessionId: resolved.sessionId,
       content: input.content,
+      metadata: {
+        sourceBinding: {
+          provider: this.provider,
+          integrationId: runtime.integrationId,
+          guid: null,
+          channel: input.bindingChannelId,
+          thread: input.bindingThreadId,
+        },
+      },
     });
     if (!created.turnId) {
       throw new Error('Failed to enqueue inbound turn');
@@ -2750,7 +2779,23 @@ function buildDiscordOutboundText(message: BotMessage): string | null {
     const prompt = normalizeOptionalString(payload.prompt) ?? 'Additional input is required.';
     return `[Input Required] ${prompt}`;
   }
+  if (message.kind === 'event') {
+    const eventType = normalizeOptionalString(payload.type);
+    if (eventType === 'user_message') {
+      const content = normalizeOptionalString(payload.content);
+      if (!content) {
+        return null;
+      }
+      return formatDiscordMirroredUserMessage(content);
+    }
+  }
   return null;
+}
+
+function formatDiscordMirroredUserMessage(content: string): string {
+  const normalized = content.trim();
+  const fenced = normalized.replace(/```/g, '`' + '\u200b' + '`' + '\u200b' + '`');
+  return `> **User:**\n\`\`\`\n${fenced}\n\`\`\``;
 }
 
 function renderSessionHistoryLines(messages: Record<string, unknown>[], limit: number): string[] {
@@ -2927,6 +2972,49 @@ function describeDiscordReactionEffect(message: BotMessage): {
     onlyIfTracked: true,
     skipOutboundText: true,
   };
+}
+
+function shouldSkipUserMessageForSourceBinding(message: BotMessage, context: PluginDispatchContext): boolean {
+  if (message.kind !== 'event') {
+    return false;
+  }
+  const payload = asRecord(message.payloadRaw);
+  if (!payload) {
+    return false;
+  }
+  const eventType = normalizeOptionalString(payload.type);
+  if (eventType !== 'user_message') {
+    return false;
+  }
+  const sourceBinding = asRecord(payload.sourceBinding);
+  if (!sourceBinding) {
+    return false;
+  }
+
+  const sourceProvider = normalizeOptionalString(sourceBinding.provider);
+  if (sourceProvider && sourceProvider !== 'discord') {
+    return false;
+  }
+  const sourceIntegrationId = normalizeOptionalString(sourceBinding.integrationId);
+  const bindingIntegrationId = normalizeOptionalString(context.bindingIntegrationId);
+  if (sourceIntegrationId && bindingIntegrationId && sourceIntegrationId !== bindingIntegrationId) {
+    return false;
+  }
+
+  const sourceGuid = normalizeOptionalString(sourceBinding.guid);
+  const bindingGuid = normalizeOptionalString(context.bindingGuid);
+  if (sourceGuid && bindingGuid && sourceGuid === bindingGuid) {
+    return true;
+  }
+
+  const sourceChannel = normalizeOptionalString(sourceBinding.channel);
+  const sourceThread = normalizeOptionalString(sourceBinding.thread);
+  const bindingChannel = normalizeOptionalString(context.bindingChannel);
+  const bindingThread = normalizeOptionalString(context.bindingThread);
+  if (sourceChannel && bindingChannel && sourceChannel === bindingChannel && sourceThread === bindingThread) {
+    return true;
+  }
+  return false;
 }
 
 function formatApprovalPromptContent(kind: string, payload: Record<string, unknown>): string {

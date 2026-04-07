@@ -24,6 +24,25 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
   private readonly gatewayInstanceId = 'internal-channels-gateway';
   private readonly plugins: ChannelPlugin[];
   private readonly pluginContext: ChannelPluginContext = {
+    publishUserMessageForSession: async (input) =>
+      this.channelsService.publishUserMessageForSession({
+        projectId: input.projectId,
+        sessionId: input.sessionId,
+        content: input.content,
+        triggerIdentifier: input.triggerIdentifier,
+        triggerProvider: input.triggerProvider ?? null,
+        triggerIntegrationId: input.triggerIntegrationId ?? null,
+        triggerMessageId: input.triggerMessageId ?? null,
+        sourceBinding: input.sourceBinding
+          ? {
+            provider: normalizeOptionalString(input.sourceBinding.provider),
+            integrationId: normalizeOptionalString(input.sourceBinding.integrationId),
+            guid: normalizeOptionalString(input.sourceBinding.guid),
+            channel: normalizeOptionalString(input.sourceBinding.channel),
+            thread: normalizeOptionalString(input.sourceBinding.thread),
+          }
+          : null,
+      }),
     ingestInbound: async (input) => this.channelsService.ingestInboundForGateway(input),
     resolveApproval: async (input) => this.channelsService.resolveApprovalForGateway(input),
     listProjectsForUser: async (userId) => this.projectsService.listForUser(userId),
@@ -57,10 +76,39 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
     },
     forkSessionForUser: async (userId, sessionId, input) => this.sessionsService.forkSessionForUser(userId, sessionId, input),
     compactSessionForUser: async (userId, sessionId) => this.sessionsService.compactSessionForUser(userId, sessionId),
-    createTurnForSession: async (userId, sessionId, input) => this.turnsService.createTurnForSession(userId, sessionId, input),
     getTurnStatusForUser: async (userId, turnId) => this.turnsService.getTurnStatusForUser(userId, turnId),
     cancelTurnForUser: async (userId, turnId) => this.turnsService.cancelTurnForUser(userId, turnId),
-    steerTurnForUser: async (userId, turnId, input) => this.turnsService.steerTurnForUser(userId, turnId, input),
+    createTurnForSession: async (userId, sessionId, input) => {
+      const created = await this.turnsService.createTurnForSession(userId, sessionId, input);
+      const projectId = await this.resolveProjectIdForSession(userId, sessionId);
+      await this.channelsService.publishUserMessageForSession({
+        projectId,
+        sessionId,
+        content: input.content,
+        triggerIdentifier: buildWebUserMessageIdentifier(sessionId),
+        triggerProvider: 'web',
+        triggerIntegrationId: null,
+        triggerMessageId: null,
+        sourceBinding: null,
+      });
+      return created;
+    },
+    steerTurnForUser: async (userId, turnId, input) => {
+      const turn = await this.turnsService.getTurnForUser(userId, turnId);
+      const steered = await this.turnsService.steerTurnForUser(userId, turnId, input);
+      const projectId = await this.resolveProjectIdForSession(userId, turn.sessionId);
+      await this.channelsService.publishUserMessageForSession({
+        projectId,
+        sessionId: turn.sessionId,
+        content: input.content,
+        triggerIdentifier: buildWebUserMessageIdentifier(turn.sessionId),
+        triggerProvider: 'web',
+        triggerIntegrationId: null,
+        triggerMessageId: null,
+        sourceBinding: null,
+      });
+      return steered;
+    },
     resolveTurnApprovalForUser: async (userId, turnId, input) =>
       this.turnsService.resolveTurnApprovalForUser(userId, turnId, input),
     updateIntegrationPluginConfigForUser: async (userId, integrationId, pluginConfig) => {
@@ -244,6 +292,17 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
 
   async resolveTurnApprovalForUser(userId: string, turnId: string, input: ResolveTurnApprovalBody) {
     return this.turnsService.resolveTurnApprovalForUser(userId, turnId, input);
+  }
+
+  private async resolveProjectIdForSession(userId: string, sessionId: string): Promise<string> {
+    const history = await this.sessionsService.getHistoryForSession(userId, sessionId);
+    const root = asRecord(history);
+    const session = asRecord(root?.session);
+    const projectId = normalizeOptionalString(session?.projectId);
+    if (!projectId) {
+      throw new Error(`Failed to resolve project id for session ${sessionId}`);
+    }
+    return projectId;
   }
 
   private requestDispatch(): void {
@@ -459,6 +518,17 @@ function normalizeOptionalString(value: unknown): string | null {
   }
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function buildWebUserMessageIdentifier(sessionId: string): string {
+  return `web:${sessionId}:${Date.now()}`;
 }
 
 function compactProjectUpdateInput(input: {

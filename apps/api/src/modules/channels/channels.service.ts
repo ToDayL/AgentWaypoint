@@ -299,6 +299,16 @@ export class ChannelsService {
     turnId: string;
   }> {
     await this.ensureGatewayResolvedSessionExists(input.projectId, input.sessionId);
+    await this.publishUserMessageForSession({
+      projectId: input.projectId,
+      sessionId: input.sessionId,
+      content: input.content,
+      triggerIdentifier: input.unifiedIdentifier,
+      triggerProvider: input.triggerProvider ?? null,
+      triggerIntegrationId: input.triggerIntegrationId ?? null,
+      triggerMessageId: input.providerMessageId ?? null,
+      sourceBinding: extractSourceBindingFromInboundMetadata(input.metadata),
+    });
     const created = await this.turnsService.createTurnForGateway(input.sessionId, {
       content: input.content,
       triggerIdentifier: input.unifiedIdentifier,
@@ -327,6 +337,16 @@ export class ChannelsService {
     },
   ): Promise<{ accepted: true; unifiedIdentifier: string; messageId: string; turnId: string }> {
     await this.ensureProjectSessionOwnership(userId, input.projectId, input.sessionId);
+    await this.publishUserMessageForSession({
+      projectId: input.projectId,
+      sessionId: input.sessionId,
+      content: input.content,
+      triggerIdentifier: input.unifiedIdentifier,
+      triggerProvider: input.triggerProvider ?? null,
+      triggerIntegrationId: input.triggerIntegrationId ?? null,
+      triggerMessageId: input.providerMessageId ?? null,
+      sourceBinding: null,
+    });
     const created = await this.turnsService.createTurnForGateway(input.sessionId, {
       content: input.content,
       triggerIdentifier: input.unifiedIdentifier,
@@ -381,6 +401,25 @@ export class ChannelsService {
     input: ResolveTurnApprovalBody,
   ) {
     return this.turnsService.resolveTurnApprovalForUser(userId, turnId, input);
+  }
+
+  async publishUserMessageForSession(input: {
+    projectId: string;
+    sessionId: string;
+    content: string;
+    triggerIdentifier: string;
+    triggerProvider: string | null;
+    triggerIntegrationId: string | null;
+    triggerMessageId: string | null;
+    sourceBinding: {
+      provider: string | null;
+      integrationId: string | null;
+      guid: string | null;
+      channel: string | null;
+      thread: string | null;
+    } | null;
+  }): Promise<void> {
+    await this.enqueueInboundUserMessageFanout(input);
   }
 
   private async ensureProjectOwnedByUser(userId: string, projectId: string): Promise<void> {
@@ -439,6 +478,42 @@ export class ChannelsService {
     if (session.projectId !== projectId) {
       throw new ForbiddenException({ message: 'Session does not belong to project' });
     }
+  }
+
+  private async enqueueInboundUserMessageFanout(input: {
+    projectId: string;
+    sessionId: string;
+    content: string;
+    triggerIdentifier: string;
+    triggerProvider: string | null;
+    triggerIntegrationId: string | null;
+    triggerMessageId: string | null;
+    sourceBinding: {
+      provider: string | null;
+      integrationId: string | null;
+      guid: string | null;
+      channel: string | null;
+      thread: string | null;
+    } | null;
+  }): Promise<void> {
+    await this.prisma.botMessage.create({
+      data: {
+        projectId: input.projectId,
+        sessionId: input.sessionId,
+        kind: 'event',
+        payloadRaw: {
+          type: 'user_message',
+          content: input.content,
+          triggerIdentifier: input.triggerIdentifier,
+          triggerProvider: input.triggerProvider,
+          triggerIntegrationId: input.triggerIntegrationId,
+          triggerMessageId: input.triggerMessageId,
+          sourceBinding: input.sourceBinding,
+        },
+        status: BOT_MESSAGE_QUEUED_STATUS,
+      },
+    });
+    await this.queueSignalService.publishOutboundWake();
   }
 }
 
@@ -571,4 +646,27 @@ function asOptionalString(value: unknown): string | null {
   }
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : null;
+}
+
+function extractSourceBindingFromInboundMetadata(
+  metadata: Record<string, unknown> | undefined,
+): {
+  provider: string | null;
+  integrationId: string | null;
+  guid: string | null;
+  channel: string | null;
+  thread: string | null;
+} | null {
+  const root = asRecord(metadata);
+  const sourceBinding = asRecord(root?.sourceBinding);
+  if (!sourceBinding) {
+    return null;
+  }
+  return {
+    provider: asOptionalString(sourceBinding.provider),
+    integrationId: asOptionalString(sourceBinding.integrationId),
+    guid: asOptionalString(sourceBinding.guid),
+    channel: asOptionalString(sourceBinding.channel),
+    thread: asOptionalString(sourceBinding.thread),
+  };
 }

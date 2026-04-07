@@ -31,6 +31,22 @@ export type PluginBindingPolicy = {
 };
 
 export interface ChannelPluginContext {
+  publishUserMessageForSession(input: {
+    projectId: string;
+    sessionId: string;
+    content: string;
+    triggerIdentifier: string;
+    triggerProvider?: string;
+    triggerIntegrationId?: string;
+    triggerMessageId?: string | null;
+    sourceBinding?: {
+      provider?: string | null;
+      integrationId?: string | null;
+      guid?: string | null;
+      channel?: string | null;
+      thread?: string | null;
+    } | null;
+  }): Promise<void>;
   ingestInbound(input: GatewayInboundBody): Promise<{
     accepted: true;
     unifiedIdentifier: string;
