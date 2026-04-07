@@ -107,6 +107,7 @@ const PROCESSED_MESSAGE_TTL_MS = 5 * 60_000;
 const PROCESSED_MESSAGE_MAX = 4_000;
 const DISCORD_MESSAGE_MAX_LENGTH = 2_000;
 const DISCORD_PROJECT_COMMAND = 'project';
+const DISCORD_SESSION_COMMAND = 'session';
 const EXECUTION_MODE_CHOICES = ['read-only', 'safe-write', 'yolo'] as const;
 const AUTOCOMPLETE_MODEL_TIMEOUT_MS = 1_200;
 const AUTOCOMPLETE_MODEL_CACHE_TTL_MS = 60_000;
@@ -326,7 +327,7 @@ export class DiscordPlugin implements ChannelPlugin {
     client.on('interactionCreate', async (interaction) => {
       if (interaction.isAutocomplete()) {
         try {
-          await this.handleProjectAutocomplete(runtime, interaction);
+          await this.handleCommandAutocomplete(runtime, interaction);
         } catch {
           await interaction.respond([]);
         }
@@ -345,11 +346,15 @@ export class DiscordPlugin implements ChannelPlugin {
       if (!interaction.isChatInputCommand()) {
         return;
       }
-      if (interaction.commandName !== DISCORD_PROJECT_COMMAND) {
-        return;
-      }
       try {
-        await this.handleProjectCommand(runtime, interaction);
+        if (interaction.commandName === DISCORD_PROJECT_COMMAND) {
+          await this.handleProjectCommand(runtime, interaction);
+          return;
+        }
+        if (interaction.commandName === DISCORD_SESSION_COMMAND) {
+          await this.handleSessionCommand(runtime, interaction);
+          return;
+        }
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'unknown interaction error';
         this.logger.warn(`Discord interaction failed for integration ${runtime.integrationId}: ${message}`);
@@ -502,7 +507,7 @@ export class DiscordPlugin implements ChannelPlugin {
     if (!runtime.client.application) {
       return;
     }
-    const definitions = buildDiscordProjectCommandDefinitions();
+    const definitions = buildDiscordCommandDefinitions();
     await runtime.client.application.commands.set(definitions);
     for (const guild of runtime.client.guilds.cache.values()) {
       try {
@@ -533,6 +538,31 @@ export class DiscordPlugin implements ChannelPlugin {
     }
     if (subcommand === 'change') {
       await this.handleProjectChangeCommand(runtime, interaction);
+      return;
+    }
+    await safeReply(interaction, `Unsupported subcommand: ${subcommand}`);
+  }
+
+  private async handleSessionCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    const subcommand = interaction.options.getSubcommand(true);
+    if (subcommand === 'list') {
+      await this.handleSessionListCommand(runtime, interaction);
+      return;
+    }
+    if (subcommand === 'create') {
+      await this.handleSessionCreateCommand(runtime, interaction);
+      return;
+    }
+    if (subcommand === 'bind') {
+      await this.handleSessionBindCommand(runtime, interaction);
+      return;
+    }
+    if (subcommand === 'info') {
+      await this.handleSessionInfoCommand(runtime, interaction);
+      return;
+    }
+    if (subcommand === 'history') {
+      await this.handleSessionHistoryCommand(runtime, interaction);
       return;
     }
     await safeReply(interaction, `Unsupported subcommand: ${subcommand}`);
@@ -750,6 +780,237 @@ export class DiscordPlugin implements ChannelPlugin {
     await interaction.editReply(`Updated and rebound project \`${projectId}\` for this channel.`);
   }
 
+  private async handleSessionListCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply({ ephemeral: true });
+    const projectRef = normalizeOptionalString(interaction.options.getString('project'));
+    const project = projectRef
+      ? await this.resolveProjectByRef(runtime.ownerUserId, projectRef)
+      : await this.resolveBoundProjectForInteraction(runtime, interaction);
+    if (!project) {
+      await interaction.editReply(projectRef ? `Project not found: ${projectRef}` : 'No bound project found.');
+      return;
+    }
+    const projectId = readRequiredId(project, 'project');
+    const sessions = asRecordArray(await this.requireContext().listSessionsForProject(runtime.ownerUserId, projectId));
+    if (sessions.length === 0) {
+      await interaction.editReply(`No sessions found for project \`${projectId}\`.`);
+      return;
+    }
+    const lines = sessions
+      .map((session) => {
+        const id = normalizeOptionalString(session.id) ?? 'unknown';
+        const title = normalizeOptionalString(session.title) ?? 'untitled';
+        const status = normalizeOptionalString(session.status) ?? 'unknown';
+        return `- \`${id}\` ${title} | status=${status}`;
+      })
+      .join('\n');
+    await interaction.editReply(`Sessions for project \`${projectId}\`:\n${lines}`);
+  }
+
+  private async handleSessionCreateCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply({ ephemeral: true });
+    const target = resolveBindingTargetFromInteraction(interaction);
+    if (!target.bindingChannelId) {
+      await interaction.editReply('Unable to resolve channel binding target.');
+      return;
+    }
+    const targetChannelRecord = asRecord(interaction.channel);
+    const targetChannelName = normalizeOptionalString(targetChannelRecord?.name) ?? target.bindingChannelId;
+
+    const title =
+      normalizeOptionalString(interaction.options.getString('title')) ??
+      buildDiscordSessionTitle(targetChannelName, target.bindingThreadId);
+    const projectRef = normalizeOptionalString(interaction.options.getString('project'));
+    const baseProject = projectRef
+      ? await this.resolveProjectByRef(runtime.ownerUserId, projectRef)
+      : await this.resolveBoundProjectForInteraction(runtime, interaction);
+    if (!baseProject) {
+      await interaction.editReply(projectRef ? `Project not found: ${projectRef}` : 'No bound project found.');
+      return;
+    }
+
+    const workingDir = normalizeOptionalString(interaction.options.getString('working_dir'));
+    const backend = normalizeOptionalString(interaction.options.getString('backend'))?.toLowerCase() ?? null;
+    const model = normalizeOptionalString(interaction.options.getString('model'));
+    const executionMode = normalizeOptionalString(interaction.options.getString('execution_mode'));
+
+    const targetProject = await this.resolveProjectForSessionCreate(runtime.ownerUserId, baseProject, {
+      backend,
+      repoPath: workingDir,
+      model,
+      executionMode,
+      channelName: targetChannelName,
+      channelId: target.bindingChannelId,
+    });
+
+    const projectId = readRequiredId(targetProject, 'project');
+    const createdSession = await this.requireContext().createSessionForProject(runtime.ownerUserId, projectId, {
+      title,
+    });
+    const sessionId = readRequiredId(createdSession, 'session');
+
+    const nextConfig = bindSessionToTarget(runtime.config, {
+      channelId: target.bindingChannelId,
+      threadId: target.bindingThreadId,
+      guildId: target.guildId,
+      projectId,
+      sessionId,
+      updateChannelProject: !target.bindingThreadId,
+    });
+    await this.persistRuntimeConfig(runtime, nextConfig);
+    await interaction.editReply(`Created and bound session \`${sessionId}\` to this ${target.bindingThreadId ? 'thread' : 'channel'}.`);
+  }
+
+  private async handleSessionBindCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply({ ephemeral: true });
+    const target = resolveBindingTargetFromInteraction(interaction);
+    if (!target.bindingChannelId) {
+      await interaction.editReply('Unable to resolve channel binding target.');
+      return;
+    }
+    const sessionRef = normalizeOptionalString(interaction.options.getString('session'));
+    if (!sessionRef) {
+      await interaction.editReply('Please provide a session id (or exact title).');
+      return;
+    }
+    const projectRef = normalizeOptionalString(interaction.options.getString('project'));
+    const project = projectRef
+      ? await this.resolveProjectByRef(runtime.ownerUserId, projectRef)
+      : await this.resolveBoundProjectForInteraction(runtime, interaction);
+    if (!project) {
+      await interaction.editReply(projectRef ? `Project not found: ${projectRef}` : 'No bound project found.');
+      return;
+    }
+    const projectId = readRequiredId(project, 'project');
+    const session = await this.resolveSessionByRef(runtime.ownerUserId, projectId, sessionRef);
+    if (!session) {
+      await interaction.editReply(`Session not found in project \`${projectId}\`: ${sessionRef}`);
+      return;
+    }
+    const sessionId = readRequiredId(session, 'session');
+
+    const nextConfig = bindSessionToTarget(runtime.config, {
+      channelId: target.bindingChannelId,
+      threadId: target.bindingThreadId,
+      guildId: target.guildId,
+      projectId,
+      sessionId,
+      updateChannelProject: !target.bindingThreadId,
+    });
+    await this.persistRuntimeConfig(runtime, nextConfig);
+    await interaction.editReply(`Bound this ${target.bindingThreadId ? 'thread' : 'channel'} to session \`${sessionId}\`.`);
+  }
+
+  private async handleSessionInfoCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply({ ephemeral: true });
+    const target = resolveBindingTargetFromInteraction(interaction);
+    if (!target.bindingChannelId) {
+      await interaction.editReply('Unable to resolve channel binding target.');
+      return;
+    }
+    const projectRef = normalizeOptionalString(interaction.options.getString('project'));
+    const sessionRef = normalizeOptionalString(interaction.options.getString('session'));
+    const project = projectRef
+      ? await this.resolveProjectByRef(runtime.ownerUserId, projectRef)
+      : await this.resolveBoundProjectForInteraction(runtime, interaction);
+    if (!project) {
+      await interaction.editReply(projectRef ? `Project not found: ${projectRef}` : 'No bound project found.');
+      return;
+    }
+    const projectId = readRequiredId(project, 'project');
+    const projectBackend = normalizeOptionalString(project.backend) ?? 'unknown';
+    const projectRepoPath = normalizeOptionalString(project.repoPath) ?? '(auto)';
+    const projectBackendConfig = normalizeJsonRecordForDisplay(project.backendConfig);
+    const boundSessionId = findSessionIdByTarget(runtime.config, target.bindingChannelId, target.bindingThreadId);
+    const session = sessionRef
+      ? await this.resolveSessionByRef(runtime.ownerUserId, projectId, sessionRef)
+      : boundSessionId
+        ? await this.resolveSessionByRef(runtime.ownerUserId, projectId, boundSessionId)
+        : null;
+    if (!session) {
+      await interaction.editReply(sessionRef ? `Session not found: ${sessionRef}` : 'No bound session found for this target.');
+      return;
+    }
+    const sessionId = readRequiredId(session, 'session');
+    const history = await this.requireContext().getSessionHistoryForUser(runtime.ownerUserId, sessionId);
+    const historyRecord = asRecord(history) ?? {};
+    const sessionRecord = asRecord(historyRecord.session) ?? session;
+    const messages = asRecordArray(historyRecord.messages);
+    const turns = asRecordArray(historyRecord.turns);
+    const info =
+      `id: ${normalizeOptionalString(sessionRecord.id) ?? sessionId}\n` +
+      `title: ${normalizeOptionalString(sessionRecord.title) ?? 'untitled'}\n` +
+      `status: ${normalizeOptionalString(sessionRecord.status) ?? 'unknown'}\n` +
+      `projectId: ${normalizeOptionalString(sessionRecord.projectId) ?? projectId}\n` +
+      `backend: ${projectBackend}\n` +
+      `workspace: ${projectRepoPath}\n` +
+      `backendConfig: ${JSON.stringify(projectBackendConfig)}\n` +
+      `messages: ${messages.length}\n` +
+      `turns: ${turns.length}`;
+    await interaction.editReply(`Session info:\n\`\`\`\n${info}\n\`\`\``);
+  }
+
+  private async handleSessionHistoryCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply({ ephemeral: true });
+    const target = resolveBindingTargetFromInteraction(interaction);
+    if (!target.bindingChannelId) {
+      await interaction.editReply('Unable to resolve channel binding target.');
+      return;
+    }
+
+    const projectRef = normalizeOptionalString(interaction.options.getString('project'));
+    const sessionRef = normalizeOptionalString(interaction.options.getString('session'));
+    const requestedLimit = interaction.options.getInteger('limit');
+    const limit = Math.max(1, Math.min(requestedLimit ?? 6, 50));
+
+    const project = projectRef
+      ? await this.resolveProjectByRef(runtime.ownerUserId, projectRef)
+      : await this.resolveBoundProjectForInteraction(runtime, interaction);
+    if (!project) {
+      await interaction.editReply(projectRef ? `Project not found: ${projectRef}` : 'No bound project found.');
+      return;
+    }
+    const projectId = readRequiredId(project, 'project');
+    const boundSessionId = findSessionIdByTarget(runtime.config, target.bindingChannelId, target.bindingThreadId);
+    const session = sessionRef
+      ? await this.resolveSessionByRef(runtime.ownerUserId, projectId, sessionRef)
+      : boundSessionId
+        ? await this.resolveSessionByRef(runtime.ownerUserId, projectId, boundSessionId)
+        : null;
+    if (!session) {
+      await interaction.editReply(
+        sessionRef ? `Session not found: ${sessionRef}` : 'No bound session found for this target.',
+      );
+      return;
+    }
+
+    const sessionId = readRequiredId(session, 'session');
+    const history = await this.requireContext().getSessionHistoryForUser(runtime.ownerUserId, sessionId);
+    const historyRecord = asRecord(history) ?? {};
+    const messages = asRecordArray(historyRecord.messages);
+    const rendered = renderSessionHistoryLines(messages, limit);
+    if (rendered.length === 0) {
+      await interaction.editReply(`No messages found for session \`${sessionId}\`.`);
+      return;
+    }
+    await interaction.editReply(limitDiscordMessageLength(`Session history (\`${sessionId}\`, last ${rendered.length}):\n${rendered.join('\n')}`));
+  }
+
+  private async handleCommandAutocomplete(
+    runtime: DiscordRuntime,
+    interaction: AutocompleteInteraction,
+  ): Promise<void> {
+    if (interaction.commandName === DISCORD_PROJECT_COMMAND) {
+      await this.handleProjectAutocomplete(runtime, interaction);
+      return;
+    }
+    if (interaction.commandName === DISCORD_SESSION_COMMAND) {
+      await this.handleSessionAutocomplete(runtime, interaction);
+      return;
+    }
+    await interaction.respond([]);
+  }
+
   private async handleProjectAutocomplete(
     runtime: DiscordRuntime,
     interaction: AutocompleteInteraction,
@@ -830,6 +1091,218 @@ export class DiscordPlugin implements ChannelPlugin {
     }
 
     await interaction.respond([]);
+  }
+
+  private async handleSessionAutocomplete(
+    runtime: DiscordRuntime,
+    interaction: AutocompleteInteraction,
+  ): Promise<void> {
+    if (interaction.commandName !== DISCORD_SESSION_COMMAND) {
+      await interaction.respond([]);
+      return;
+    }
+
+    const focused = interaction.options.getFocused(true);
+    const focusedRawValue = String(focused.value ?? '');
+    const focusedValue = focusedRawValue.toLowerCase();
+    const subcommand = interaction.options.getSubcommand(false);
+
+    if (focused.name === 'working_dir') {
+      const suggestions = await this.requireContext().suggestWorkspaceDirectories({
+        prefix: focusedRawValue,
+        limit: 25,
+      });
+      await interaction.respond(
+        suggestions.slice(0, 25).map((item) => ({
+          name: item,
+          value: item,
+        })),
+      );
+      return;
+    }
+
+    if (focused.name === 'backend') {
+      const suggestions = ['codex', 'claude', 'mock']
+        .filter((item) => item.includes(focusedValue))
+        .slice(0, 25)
+        .map((item) => ({ name: item, value: item }));
+      await interaction.respond(suggestions);
+      return;
+    }
+
+    if (focused.name === 'model') {
+      const selectedBackend = normalizeOptionalString(interaction.options.getString('backend'))?.toLowerCase() ?? null;
+      const uniqueModels = await this.getModelAutocompleteOptions(selectedBackend);
+      const suggestions = uniqueModels
+        .filter((item) => item.toLowerCase().includes(focusedValue))
+        .slice(0, 25)
+        .map((item) => ({ name: item, value: item }));
+      await interaction.respond(suggestions);
+      return;
+    }
+
+    if (focused.name === 'execution_mode') {
+      const selectedBackend = normalizeOptionalString(interaction.options.getString('backend'))?.toLowerCase() ?? null;
+      const candidates = resolveExecutionModesForBackend(selectedBackend);
+      const suggestions = candidates
+        .filter((item) => item.includes(focusedValue))
+        .slice(0, 25)
+        .map((item) => ({ name: item, value: item }));
+      await interaction.respond(suggestions);
+      return;
+    }
+
+    if (focused.name === 'project') {
+      const projects = asRecordArray(await this.requireContext().listProjectsForUser(runtime.ownerUserId));
+      const suggestions = projects
+        .map((project) => ({
+          id: normalizeOptionalString(project.id) ?? '',
+          name: normalizeOptionalString(project.name) ?? '',
+        }))
+        .filter((item) => item.id.length > 0)
+        .map((item) => ({
+          name: item.name.length > 0 ? `${item.name} (${item.id})` : item.id,
+          value: item.id,
+        }))
+        .filter(
+          (item) =>
+            item.name.toLowerCase().includes(focusedValue) || item.value.toLowerCase().includes(focusedValue),
+        )
+        .slice(0, 25);
+      await interaction.respond(suggestions);
+      return;
+    }
+
+    if (focused.name === 'session' && (subcommand === 'bind' || subcommand === 'info' || subcommand === 'history')) {
+      const projectRef = normalizeOptionalString(interaction.options.getString('project'));
+      const project = projectRef
+        ? await this.resolveProjectByRef(runtime.ownerUserId, projectRef)
+        : await this.resolveBoundProjectForInteraction(
+            runtime,
+            interaction as unknown as ChatInputCommandInteraction,
+          );
+      if (!project) {
+        await interaction.respond([]);
+        return;
+      }
+      const projectId = readRequiredId(project, 'project');
+      const sessions = asRecordArray(await this.requireContext().listSessionsForProject(runtime.ownerUserId, projectId));
+      const suggestions = sessions
+        .map((session) => ({
+          id: normalizeOptionalString(session.id) ?? '',
+          title: normalizeOptionalString(session.title) ?? '',
+        }))
+        .filter((item) => item.id.length > 0)
+        .map((item) => ({
+          name: item.title.length > 0 ? `${item.title} (${item.id})` : item.id,
+          value: item.id,
+        }))
+        .filter(
+          (item) =>
+            item.name.toLowerCase().includes(focusedValue) || item.value.toLowerCase().includes(focusedValue),
+        )
+        .slice(0, 25);
+      await interaction.respond(suggestions);
+      return;
+    }
+
+    await interaction.respond([]);
+  }
+
+  private async resolveProjectForSessionCreate(
+    userId: string,
+    baseProject: Record<string, unknown>,
+    input: {
+      backend: string | null;
+      repoPath: string | null;
+      model: string | null;
+      executionMode: string | null;
+      channelName: string;
+      channelId: string;
+    },
+  ): Promise<Record<string, unknown>> {
+    const baseBackend = normalizeOptionalString(baseProject.backend) ?? 'codex';
+    const baseRepoPath = normalizeOptionalString(baseProject.repoPath);
+    const baseBackendConfig = normalizeJsonRecordForDisplay(baseProject.backendConfig);
+    const baseModel = normalizeOptionalString(baseBackendConfig.model);
+    const baseExecutionMode = normalizeOptionalString(baseBackendConfig.executionMode);
+
+    const targetBackend = input.backend ?? baseBackend;
+    const targetRepoPath = input.repoPath ?? baseRepoPath;
+    const targetModel = input.model ?? baseModel;
+    const targetExecutionMode = input.executionMode ?? baseExecutionMode;
+
+    const hasOverrides =
+      !!input.backend || !!input.repoPath || !!input.model || !!input.executionMode;
+    if (!hasOverrides) {
+      return baseProject;
+    }
+
+    if (targetExecutionMode) {
+      if (!EXECUTION_MODE_CHOICES.includes(targetExecutionMode as (typeof EXECUTION_MODE_CHOICES)[number])) {
+        throw new Error(`Unsupported execution_mode: ${targetExecutionMode}`);
+      }
+    }
+
+    const requiresBackendConfig = targetBackend === 'codex' || targetBackend === 'claude';
+    let nextBackendConfig: Record<string, unknown> | undefined;
+    if (requiresBackendConfig) {
+      if (!targetModel || !targetExecutionMode) {
+        throw new Error(
+          `Creating a session override for backend \`${targetBackend}\` requires model and execution_mode (provided or inherited).`,
+        );
+      }
+      nextBackendConfig = {
+        ...baseBackendConfig,
+        model: targetModel,
+        executionMode: targetExecutionMode,
+      };
+    } else if (targetModel || targetExecutionMode) {
+      if (!targetModel || !targetExecutionMode) {
+        throw new Error('Please provide both model and execution_mode together.');
+      }
+      nextBackendConfig = {
+        ...baseBackendConfig,
+        model: targetModel,
+        executionMode: targetExecutionMode,
+      };
+    }
+
+    const created = await this.requireContext().createProjectForUser(userId, {
+      name: buildDiscordProjectName(input.channelName, input.channelId),
+      repoPath: targetRepoPath ?? undefined,
+      backend: targetBackend,
+      backendConfig: nextBackendConfig,
+    });
+    const project = asRecord(created);
+    if (!project) {
+      throw new Error('Failed to create project for session overrides.');
+    }
+    return project;
+  }
+
+  private async resolveSessionByRef(
+    userId: string,
+    projectId: string,
+    sessionRef: string,
+  ): Promise<Record<string, unknown> | null> {
+    const normalizedRef = sessionRef.trim();
+    if (!normalizedRef) {
+      return null;
+    }
+    const byId = await this.readSessionForOwner(userId, normalizedRef);
+    if (byId && byId.projectId === projectId) {
+      const history = await this.requireContext().getSessionHistoryForUser(userId, byId.sessionId);
+      const root = asRecord(history);
+      const session = asRecord(root?.session);
+      if (session) {
+        return session;
+      }
+      return { id: byId.sessionId, projectId: byId.projectId };
+    }
+    const sessions = asRecordArray(await this.requireContext().listSessionsForProject(userId, projectId));
+    const byTitle = sessions.find((session) => normalizeOptionalString(session.title) === normalizedRef) ?? null;
+    return byTitle;
   }
 
   private async resolveProjectByRef(userId: string, projectRef: string): Promise<Record<string, unknown> | null> {
@@ -1428,6 +1901,10 @@ function resolveBindingTargetFromInteraction(interaction: ChatInputCommandIntera
   };
 }
 
+function buildDiscordCommandDefinitions(): ApplicationCommandDataResolvable[] {
+  return [...buildDiscordProjectCommandDefinitions(), ...buildDiscordSessionCommandDefinitions()];
+}
+
 function buildDiscordProjectCommandDefinitions(): ApplicationCommandDataResolvable[] {
   return [
     {
@@ -1533,6 +2010,150 @@ function buildDiscordProjectCommandDefinitions(): ApplicationCommandDataResolvab
                 name: value,
                 value,
               })),
+            },
+          ],
+        },
+      ],
+    },
+  ];
+}
+
+function buildDiscordSessionCommandDefinitions(): ApplicationCommandDataResolvable[] {
+  return [
+    {
+      name: DISCORD_SESSION_COMMAND,
+      description: 'Session operations',
+      options: [
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'list',
+          description: 'List sessions by project',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'project',
+              description: 'Project id (or exact project name). Omit to use current binding',
+              required: false,
+              autocomplete: true,
+            },
+          ],
+        },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'create',
+          description: 'Create a new session and bind this target',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'title',
+              description: 'Session title',
+              required: false,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'project',
+              description: 'Base project id (or exact project name). Omit to use current binding',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'working_dir',
+              description: 'Override working directory',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'backend',
+              description: 'Override backend (for example codex, claude)',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'model',
+              description: 'Override model (inherits from project when omitted)',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'execution_mode',
+              description: 'Override execution mode (inherits from project when omitted)',
+              required: false,
+              autocomplete: true,
+            },
+          ],
+        },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'bind',
+          description: 'Bind this target to an existing session',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'project',
+              description: 'Project id (or exact project name). Omit to use current binding',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'session',
+              description: 'Session id (or exact session title)',
+              required: false,
+              autocomplete: true,
+            },
+          ],
+        },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'info',
+          description: 'Get session details',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'project',
+              description: 'Project id (or exact project name). Omit to use current binding',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'session',
+              description: 'Session id (or exact session title). Omit to use current binding',
+              required: false,
+              autocomplete: true,
+            },
+          ],
+        },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'history',
+          description: 'Show recent messages for a session',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'project',
+              description: 'Project id (or exact project name). Omit to use current binding',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'session',
+              description: 'Session id (or exact session title). Omit to use current binding',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.Integer,
+              name: 'limit',
+              description: 'How many recent messages to show (default 6)',
+              required: false,
+              min_value: 1,
+              max_value: 50,
             },
           ],
         },
@@ -1771,6 +2392,50 @@ function upsertDiscordBindings(
   };
 }
 
+function bindSessionToTarget(
+  config: DiscordPluginConfig,
+  input: {
+    channelId: string;
+    threadId: string | null;
+    guildId: string | null;
+    projectId: string;
+    sessionId: string;
+    updateChannelProject: boolean;
+  },
+): DiscordPluginConfig {
+  const channelBindings = readChannelBindings(config.channelBindings);
+  if (input.updateChannelProject) {
+    channelBindings[input.channelId] = {
+      projectId: input.projectId,
+      channel: input.channelId,
+      guild: input.guildId,
+    };
+  }
+
+  const currentSessionBindings = readSessionBindings(config.sessionBindings);
+  const nextSessionBindings: Record<string, DiscordSessionBinding> = {};
+  const expectedThread = normalizeOptionalString(input.threadId);
+  for (const [existingSessionId, binding] of Object.entries(currentSessionBindings)) {
+    const sameTarget = binding.channel === input.channelId && normalizeOptionalString(binding.thread) === expectedThread;
+    if (sameTarget) {
+      continue;
+    }
+    nextSessionBindings[existingSessionId] = binding;
+  }
+  nextSessionBindings[input.sessionId] = {
+    channel: input.channelId,
+    thread: input.threadId,
+    guid: input.guildId,
+  };
+
+  return {
+    ...config,
+    channelBindings,
+    sessionBindings: nextSessionBindings,
+    sessionIds: Object.keys(nextSessionBindings),
+  };
+}
+
 function applyChannelProjectBinding(
   config: DiscordPluginConfig,
   input: {
@@ -1976,6 +2641,46 @@ function buildDiscordOutboundText(message: BotMessage): string | null {
     return `[Input Required] ${prompt}`;
   }
   return null;
+}
+
+function renderSessionHistoryLines(messages: Record<string, unknown>[], limit: number): string[] {
+  if (messages.length === 0) {
+    return [];
+  }
+  const selected = messages.slice(-limit);
+  return selected.map((message, index) => {
+    const role = normalizeOptionalString(message.role) ?? normalizeOptionalString(message.kind) ?? 'message';
+    const content = readSessionHistoryMessageContent(message);
+    const lineNo = messages.length - selected.length + index + 1;
+    return `${lineNo}. [${role}] ${content}`;
+  });
+}
+
+function readSessionHistoryMessageContent(message: Record<string, unknown>): string {
+  const direct = normalizeOptionalString(message.content);
+  if (direct) {
+    return collapseInlineWhitespace(direct, 160);
+  }
+
+  const payload = asRecord(message.payloadRaw);
+  const payloadContent =
+    normalizeOptionalString(payload?.content) ??
+    normalizeOptionalString(payload?.summary) ??
+    normalizeOptionalString(payload?.title) ??
+    normalizeOptionalString(payload?.prompt);
+  if (payloadContent) {
+    return collapseInlineWhitespace(payloadContent, 160);
+  }
+
+  return '(no text)';
+}
+
+function collapseInlineWhitespace(input: string, maxLength: number): string {
+  const singleLine = input.replace(/\s+/g, ' ').trim();
+  if (singleLine.length <= maxLength) {
+    return singleLine;
+  }
+  return `${singleLine.slice(0, maxLength - 1)}…`;
 }
 
 function renderDiscordMessageMarkdown(content: string): string {
