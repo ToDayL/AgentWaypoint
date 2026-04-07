@@ -814,38 +814,30 @@ export class DiscordPlugin implements ChannelPlugin {
       await interaction.editReply('Unable to resolve channel binding target.');
       return;
     }
-    const targetChannelRecord = asRecord(interaction.channel);
-    const targetChannelName = normalizeOptionalString(targetChannelRecord?.name) ?? target.bindingChannelId;
-
-    const title =
-      normalizeOptionalString(interaction.options.getString('title')) ??
-      buildDiscordSessionTitle(targetChannelName, target.bindingThreadId);
+    const title = normalizeOptionalString(interaction.options.getString('title')) ?? buildDiscordSessionTitle(target.bindingChannelId, target.bindingThreadId);
     const projectRef = normalizeOptionalString(interaction.options.getString('project'));
-    const baseProject = projectRef
+    const project = projectRef
       ? await this.resolveProjectByRef(runtime.ownerUserId, projectRef)
       : await this.resolveBoundProjectForInteraction(runtime, interaction);
-    if (!baseProject) {
+    if (!project) {
       await interaction.editReply(projectRef ? `Project not found: ${projectRef}` : 'No bound project found.');
       return;
     }
+    const projectId = readRequiredId(project, 'project');
 
     const workingDir = normalizeOptionalString(interaction.options.getString('working_dir'));
     const backend = normalizeOptionalString(interaction.options.getString('backend'))?.toLowerCase() ?? null;
     const model = normalizeOptionalString(interaction.options.getString('model'));
     const executionMode = normalizeOptionalString(interaction.options.getString('execution_mode'));
-
-    const targetProject = await this.resolveProjectForSessionCreate(runtime.ownerUserId, baseProject, {
+    const createSessionInput = buildSessionCreateInputFromProject(project, {
+      title,
+      workingDir,
       backend,
-      repoPath: workingDir,
       model,
       executionMode,
-      channelName: targetChannelName,
-      channelId: target.bindingChannelId,
     });
-
-    const projectId = readRequiredId(targetProject, 'project');
     const createdSession = await this.requireContext().createSessionForProject(runtime.ownerUserId, projectId, {
-      title,
+      ...createSessionInput,
     });
     const sessionId = readRequiredId(createdSession, 'session');
 
@@ -918,9 +910,6 @@ export class DiscordPlugin implements ChannelPlugin {
       return;
     }
     const projectId = readRequiredId(project, 'project');
-    const projectBackend = normalizeOptionalString(project.backend) ?? 'unknown';
-    const projectRepoPath = normalizeOptionalString(project.repoPath) ?? '(auto)';
-    const projectBackendConfig = normalizeJsonRecordForDisplay(project.backendConfig);
     const boundSessionId = findSessionIdByTarget(runtime.config, target.bindingChannelId, target.bindingThreadId);
     const session = sessionRef
       ? await this.resolveSessionByRef(runtime.ownerUserId, projectId, sessionRef)
@@ -935,6 +924,7 @@ export class DiscordPlugin implements ChannelPlugin {
     const history = await this.requireContext().getSessionHistoryForUser(runtime.ownerUserId, sessionId);
     const historyRecord = asRecord(history) ?? {};
     const sessionRecord = asRecord(historyRecord.session) ?? session;
+    const sessionRuntime = readSessionRuntimeMetaForDisplay(sessionRecord.meta);
     const messages = asRecordArray(historyRecord.messages);
     const turns = asRecordArray(historyRecord.turns);
     const info =
@@ -942,9 +932,9 @@ export class DiscordPlugin implements ChannelPlugin {
       `title: ${normalizeOptionalString(sessionRecord.title) ?? 'untitled'}\n` +
       `status: ${normalizeOptionalString(sessionRecord.status) ?? 'unknown'}\n` +
       `projectId: ${normalizeOptionalString(sessionRecord.projectId) ?? projectId}\n` +
-      `backend: ${projectBackend}\n` +
-      `workspace: ${projectRepoPath}\n` +
-      `backendConfig: ${JSON.stringify(projectBackendConfig)}\n` +
+      `backend: ${sessionRuntime.backend}\n` +
+      `workspace: ${sessionRuntime.workspace}\n` +
+      `backendConfig: ${JSON.stringify(sessionRuntime.backendConfig)}\n` +
       `messages: ${messages.length}\n` +
       `turns: ${turns.length}`;
     await interaction.editReply(`Session info:\n\`\`\`\n${info}\n\`\`\``);
@@ -1207,78 +1197,6 @@ export class DiscordPlugin implements ChannelPlugin {
     }
 
     await interaction.respond([]);
-  }
-
-  private async resolveProjectForSessionCreate(
-    userId: string,
-    baseProject: Record<string, unknown>,
-    input: {
-      backend: string | null;
-      repoPath: string | null;
-      model: string | null;
-      executionMode: string | null;
-      channelName: string;
-      channelId: string;
-    },
-  ): Promise<Record<string, unknown>> {
-    const baseBackend = normalizeOptionalString(baseProject.backend) ?? 'codex';
-    const baseRepoPath = normalizeOptionalString(baseProject.repoPath);
-    const baseBackendConfig = normalizeJsonRecordForDisplay(baseProject.backendConfig);
-    const baseModel = normalizeOptionalString(baseBackendConfig.model);
-    const baseExecutionMode = normalizeOptionalString(baseBackendConfig.executionMode);
-
-    const targetBackend = input.backend ?? baseBackend;
-    const targetRepoPath = input.repoPath ?? baseRepoPath;
-    const targetModel = input.model ?? baseModel;
-    const targetExecutionMode = input.executionMode ?? baseExecutionMode;
-
-    const hasOverrides =
-      !!input.backend || !!input.repoPath || !!input.model || !!input.executionMode;
-    if (!hasOverrides) {
-      return baseProject;
-    }
-
-    if (targetExecutionMode) {
-      if (!EXECUTION_MODE_CHOICES.includes(targetExecutionMode as (typeof EXECUTION_MODE_CHOICES)[number])) {
-        throw new Error(`Unsupported execution_mode: ${targetExecutionMode}`);
-      }
-    }
-
-    const requiresBackendConfig = targetBackend === 'codex' || targetBackend === 'claude';
-    let nextBackendConfig: Record<string, unknown> | undefined;
-    if (requiresBackendConfig) {
-      if (!targetModel || !targetExecutionMode) {
-        throw new Error(
-          `Creating a session override for backend \`${targetBackend}\` requires model and execution_mode (provided or inherited).`,
-        );
-      }
-      nextBackendConfig = {
-        ...baseBackendConfig,
-        model: targetModel,
-        executionMode: targetExecutionMode,
-      };
-    } else if (targetModel || targetExecutionMode) {
-      if (!targetModel || !targetExecutionMode) {
-        throw new Error('Please provide both model and execution_mode together.');
-      }
-      nextBackendConfig = {
-        ...baseBackendConfig,
-        model: targetModel,
-        executionMode: targetExecutionMode,
-      };
-    }
-
-    const created = await this.requireContext().createProjectForUser(userId, {
-      name: buildDiscordProjectName(input.channelName, input.channelId),
-      repoPath: targetRepoPath ?? undefined,
-      backend: targetBackend,
-      backendConfig: nextBackendConfig,
-    });
-    const project = asRecord(created);
-    if (!project) {
-      throw new Error('Failed to create project for session overrides.');
-    }
-    return project;
   }
 
   private async resolveSessionByRef(
@@ -2507,6 +2425,76 @@ function buildProjectUpdateInput(
   }
 
   return update;
+}
+
+function buildSessionCreateInputFromProject(
+  project: Record<string, unknown>,
+  input: {
+    title: string;
+    workingDir: string | null;
+    backend: string | null;
+    model: string | null;
+    executionMode: string | null;
+  },
+): {
+  title: string;
+  repoPath?: string;
+  backend?: string;
+  backendConfig?: Record<string, unknown>;
+} {
+  const projectBackend = normalizeOptionalString(project.backend) ?? 'codex';
+  const projectBackendConfig = normalizeJsonRecordForDisplay(project.backendConfig);
+
+  const backend = input.backend ?? projectBackend;
+  const model = input.model ?? normalizeOptionalString(projectBackendConfig.model);
+  const executionMode = input.executionMode ?? normalizeOptionalString(projectBackendConfig.executionMode);
+
+  if (executionMode && !EXECUTION_MODE_CHOICES.includes(executionMode as (typeof EXECUTION_MODE_CHOICES)[number])) {
+    throw new Error(`Unsupported execution_mode: ${executionMode}`);
+  }
+
+  if ((input.model && !executionMode) || (!input.model && input.executionMode)) {
+    throw new Error('Please provide both model and execution_mode together.');
+  }
+
+  const next: {
+    title: string;
+    repoPath?: string;
+    backend?: string;
+    backendConfig?: Record<string, unknown>;
+  } = {
+    title: input.title,
+  };
+  if (input.workingDir) {
+    next.repoPath = input.workingDir;
+  }
+  if (input.backend) {
+    next.backend = backend;
+  }
+  if (input.model || input.executionMode || input.backend) {
+    if (!model || !executionMode) {
+      throw new Error(`Session runtime for backend \`${backend}\` requires model and execution_mode.`);
+    }
+    next.backendConfig = {
+      ...projectBackendConfig,
+      model,
+      executionMode,
+    };
+  }
+  return next;
+}
+
+function readSessionRuntimeMetaForDisplay(meta: unknown): {
+  backend: string;
+  workspace: string;
+  backendConfig: Record<string, unknown>;
+} {
+  const root = asRecord(meta);
+  const runtime = asRecord(root?.runtime);
+  const backend = normalizeOptionalString(runtime?.backend) ?? 'unknown';
+  const workspace = normalizeOptionalString(runtime?.cwd) ?? '(auto)';
+  const backendConfig = normalizeJsonRecordForDisplay(runtime?.backendConfig);
+  return { backend, workspace, backendConfig };
 }
 
 function resolveExecutionModesForBackend(backend: string | null): string[] {

@@ -547,6 +547,10 @@ export default function HomePage() {
   const [projectConfigDefaultModel, setProjectConfigDefaultModel] = useState(DEFAULT_CODEX_MODEL);
   const [projectConfigExecutionMode, setProjectConfigExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
   const [newSessionTitle, setNewSessionTitle] = useState('First Simulation Session');
+  const [newSessionRepoPath, setNewSessionRepoPath] = useState('');
+  const [newSessionBackend, setNewSessionBackend] = useState('codex');
+  const [newSessionDefaultModel, setNewSessionDefaultModel] = useState(DEFAULT_CODEX_MODEL);
+  const [newSessionExecutionMode, setNewSessionExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
   const [availableSkills, setAvailableSkills] = useState<SkillOption[]>([]);
   const [prompt, setPrompt] = useState('');
   const [promptCursor, setPromptCursor] = useState(0);
@@ -954,7 +958,11 @@ export default function HomePage() {
     }
 
     const prefix =
-      actionPanelMode === 'projectConfig' ? projectConfigRepoPath.trim() : newProjectRepoPath.trim();
+      actionPanelMode === 'projectConfig'
+        ? projectConfigRepoPath.trim()
+        : actionPanelMode === 'createSession'
+          ? newSessionRepoPath.trim()
+          : newProjectRepoPath.trim();
     if (!prefix) {
       setWorkspaceSuggestions([]);
       setWorkspaceSuggestionBusy(false);
@@ -991,7 +999,7 @@ export default function HomePage() {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [mounted, newProjectRepoPath, projectConfigRepoPath, actionPanelMode, authenticated]);
+  }, [mounted, newProjectRepoPath, projectConfigRepoPath, newSessionRepoPath, actionPanelMode, authenticated]);
 
   useEffect(() => {
     if (!mounted || !authenticated || leftSidebarTab !== 'config' || !codexBackendEnabled) {
@@ -1033,12 +1041,18 @@ export default function HomePage() {
       setProjectConfigBackend(fallback);
       void loadAvailableModels(fallback, { target: 'config' });
     }
+    if (!supportedBackends.includes(newSessionBackend)) {
+      const fallback = supportedBackends[0] ?? 'codex';
+      setNewSessionBackend(fallback);
+      void loadAvailableModels(fallback, { target: 'session' });
+    }
   }, [
     mounted,
     authenticated,
     supportedBackends,
     newProjectBackend,
     projectConfigBackend,
+    newSessionBackend,
   ]);
 
   useEffect(() => {
@@ -1863,7 +1877,7 @@ export default function HomePage() {
 
   async function loadAvailableModels(
     backend = 'codex',
-    options?: { target?: 'new' | 'config' | 'both'; preferredModel?: string | null },
+    options?: { target?: 'new' | 'config' | 'session' | 'both'; preferredModel?: string | null },
   ): Promise<void> {
     try {
       const query = new URLSearchParams();
@@ -1898,6 +1912,9 @@ export default function HomePage() {
       }
       if (target === 'both' || target === 'config') {
         setProjectConfigDefaultModel((current) => resolvePreferredModel(current));
+      }
+      if (target === 'both' || target === 'session') {
+        setNewSessionDefaultModel((current) => resolvePreferredModel(current));
       }
     } catch (requestError) {
       setError(extractMessage(requestError));
@@ -2308,10 +2325,17 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
+      const backendConfig = buildCodexBackendConfig({
+        model: newSessionDefaultModel,
+        executionMode: newSessionExecutionMode,
+      });
       const created = await apiRequest<Session>(`/api/channels/plugins/web/app/projects/${selectedProjectId}/sessions`, {
         method: 'POST',
         body: {
           title: newSessionTitle.trim(),
+          backend: newSessionBackend,
+          ...(backendConfig ? { backendConfig } : {}),
+          ...(newSessionRepoPath.trim() ? { repoPath: newSessionRepoPath.trim() } : {}),
         },
       });
       await loadSessions(selectedProjectId);
@@ -2914,7 +2938,32 @@ export default function HomePage() {
       setNewProjectExecutionMode(DEFAULT_CODEX_EXECUTION_MODE);
       void loadAvailableModels(fallbackProjectBackend, { target: 'new' });
     }
+    if (mode === 'createSession' && selectedProject) {
+      const backendConfig = readCodexBackendConfig(selectedProject.backendConfig);
+      const backend = selectedProject.backend?.trim() || fallbackProjectBackend;
+      const resolvedBackend = supportedBackends.includes(backend) ? backend : fallbackProjectBackend;
+      setNewSessionTitle('First Simulation Session');
+      setNewSessionRepoPath(selectedProject.repoPath ?? '');
+      setNewSessionBackend(resolvedBackend);
+      setNewSessionExecutionMode(backendConfig.executionMode);
+      setNewSessionDefaultModel(backendConfig.model);
+      void loadAvailableModels(resolvedBackend, { target: 'session', preferredModel: backendConfig.model });
+    }
     setActionPanelMode(mode);
+  }
+
+  function openCreateSessionPanel(project: Project): void {
+    const backendConfig = readCodexBackendConfig(project.backendConfig);
+    const backend = project.backend?.trim() || fallbackProjectBackend;
+    const resolvedBackend = supportedBackends.includes(backend) ? backend : fallbackProjectBackend;
+    setSelectedProjectId(project.id);
+    setNewSessionTitle('First Simulation Session');
+    setNewSessionRepoPath(project.repoPath ?? '');
+    setNewSessionBackend(resolvedBackend);
+    setNewSessionExecutionMode(backendConfig.executionMode);
+    setNewSessionDefaultModel(backendConfig.model);
+    void loadAvailableModels(resolvedBackend, { target: 'session', preferredModel: backendConfig.model });
+    setActionPanelMode('createSession');
   }
 
   function openManageUserPanel(user: AdminManagedUser): void {
@@ -3086,6 +3135,10 @@ export default function HomePage() {
     setProjectConfigRepoPath('');
     setProjectConfigDefaultModel(DEFAULT_CODEX_MODEL);
     setProjectConfigExecutionMode(DEFAULT_CODEX_EXECUTION_MODE);
+    setNewSessionRepoPath('');
+    setNewSessionBackend(fallbackProjectBackend);
+    setNewSessionDefaultModel(DEFAULT_CODEX_MODEL);
+    setNewSessionExecutionMode(DEFAULT_CODEX_EXECUTION_MODE);
     setDiscordBotTokenInput('');
   }
 
@@ -3479,6 +3532,91 @@ export default function HomePage() {
                   <label>
                     Title
                     <input value={newSessionTitle} onChange={(event) => setNewSessionTitle(event.target.value)} />
+                  </label>
+                  <label>
+                    Workspace Path
+                    <div className="path-input-wrap">
+                      <input
+                        value={newSessionRepoPath}
+                        onFocus={() => setProjectPathInputFocused(true)}
+                        onChange={(event) => setNewSessionRepoPath(event.target.value)}
+                        onBlur={(event) => {
+                          setNewSessionRepoPath(
+                            applyDirectorySuggestionSelection(event.target.value, workspaceSuggestions),
+                          );
+                          setProjectPathInputFocused(false);
+                        }}
+                        list={disableNativePathDatalist ? undefined : WORKSPACE_SUGGESTIONS_LIST_ID}
+                      />
+                      {disableNativePathDatalist && projectPathInputFocused && workspaceSuggestions.length > 0 ? (
+                        <div className="path-suggestions">
+                          {workspaceSuggestions.map((suggestion) => (
+                            <button
+                              key={suggestion}
+                              type="button"
+                              className="path-suggestion-item"
+                              onPointerDown={(event) => event.preventDefault()}
+                              onClick={() => {
+                                setNewSessionRepoPath(ensureTrailingSlash(suggestion));
+                                setProjectPathInputFocused(true);
+                              }}
+                            >
+                              {suggestion}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                    {disableNativePathDatalist ? null : (
+                      <datalist id={WORKSPACE_SUGGESTIONS_LIST_ID}>
+                        {workspaceSuggestions.map((suggestion) => (
+                          <option key={suggestion} value={suggestion} />
+                        ))}
+                      </datalist>
+                    )}
+                    <span className="sim-input-hint">
+                      {workspaceSuggestionBusy ? 'Loading suggestions…' : 'Directory suggestions by prefix.'}
+                    </span>
+                  </label>
+                  <label>
+                    Backend
+                    <select
+                      value={newSessionBackend}
+                      onChange={(event) => {
+                        const nextBackend = event.target.value.trim() || 'codex';
+                        setNewSessionBackend(nextBackend);
+                        void loadAvailableModels(nextBackend, { target: 'session' });
+                      }}
+                    >
+                      {projectBackendOptions.map((option) => (
+                        <option key={`session-backend-${option.value}`} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Default Model
+                    <select
+                      value={newSessionDefaultModel}
+                      onChange={(event) => setNewSessionDefaultModel(event.target.value)}
+                    >
+                      {availableModels.map((model) => (
+                        <option key={model.id} value={model.model}>
+                          {model.displayName}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Execution Mode
+                    <select value={newSessionExecutionMode} onChange={(event) => setNewSessionExecutionMode(event.target.value)}>
+                      {EXECUTION_MODE_OPTIONS.map((option) => (
+                        <option key={`session-execution-mode-${option.value}`} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                   <div className="sim-actions action-panel-actions-inline">
                     <button type="button" onClick={() => void handleCreateSessionFromPanel()} disabled={busy}>
@@ -4024,8 +4162,7 @@ export default function HomePage() {
                                     aria-label="Create Session"
                                     onClick={(event) => {
                                       event.stopPropagation();
-                                      setSelectedProjectId(project.id);
-                                      openActionPanel('createSession');
+                                      openCreateSessionPanel(project);
                                     }}
                                   >
                                     <Plus />

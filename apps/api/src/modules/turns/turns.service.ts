@@ -79,14 +79,8 @@ export class TurnsService implements OnModuleInit {
       },
       select: {
         id: true,
+        meta: true,
         backendThreadId: true,
-        project: {
-          select: {
-            repoPath: true,
-            backend: true,
-            backendConfig: true,
-          },
-        },
       },
     });
     if (!session) {
@@ -104,14 +98,8 @@ export class TurnsService implements OnModuleInit {
       where: { id: sessionId },
       select: {
         id: true,
+        meta: true,
         backendThreadId: true,
-        project: {
-          select: {
-            repoPath: true,
-            backend: true,
-            backendConfig: true,
-          },
-        },
       },
     });
     if (!session) {
@@ -124,23 +112,17 @@ export class TurnsService implements OnModuleInit {
   private async createTurnWithResolvedSession(
     session: {
       id: string;
+      meta: Prisma.JsonValue | null;
       backendThreadId: string | null;
-      project: {
-        repoPath: string | null;
-        backend: string;
-        backendConfig: Prisma.JsonValue | null;
-      };
     },
     input: InternalCreateTurnInput,
   ) {
     const sessionId = session.id;
 
-    const cwd = session.project.repoPath?.trim() || null;
-    const backend = session.project.backend?.trim() || null;
-    const backendConfig =
-      session.project.backendConfig && typeof session.project.backendConfig === 'object' && !Array.isArray(session.project.backendConfig)
-        ? (session.project.backendConfig as Record<string, unknown>)
-        : null;
+    const runtime = readSessionRuntimeFromMeta(session.meta);
+    const cwd = runtime.cwd;
+    const backend = runtime.backend;
+    const backendConfig = runtime.backendConfig;
 
     const activeTurn = await this.prisma.turn.findFirst({
       where: {
@@ -989,6 +971,31 @@ function normalizeJsonRecord(value: Prisma.JsonValue | null): Record<string, unk
     return null;
   }
   return value as Record<string, unknown>;
+}
+
+function readSessionRuntimeFromMeta(meta: Prisma.JsonValue | null): {
+  backend: string | null;
+  cwd: string | null;
+  backendConfig: Record<string, unknown> | null;
+} {
+  const root = normalizeJsonRecord(meta);
+  const runtime = normalizeJsonRecord((root?.runtime as Prisma.JsonValue | undefined) ?? null);
+  if (!runtime) {
+    throw new ConflictException({ message: 'Session runtime metadata is missing' });
+  }
+  const backend = typeof runtime.backend === 'string' && runtime.backend.trim().length > 0
+    ? runtime.backend.trim()
+    : null;
+  if (!backend) {
+    throw new ConflictException({ message: 'Session runtime backend is missing' });
+  }
+  const cwd = typeof runtime.cwd === 'string' && runtime.cwd.trim().length > 0 ? runtime.cwd.trim() : null;
+  const backendConfig = normalizeJsonRecord((runtime.backendConfig as Prisma.JsonValue | undefined) ?? null) ?? null;
+  return {
+    backend,
+    cwd,
+    backendConfig,
+  };
 }
 
 function buildRequestedBackendConfig(

@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ProjectsService } from '../projects/projects.service';
@@ -5,6 +6,22 @@ import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
 import { CreateSessionBody, ForkSessionBody } from './sessions.schemas';
 
 const ACTIVE_TURN_STATUSES = new Set(['queued', 'running', 'waiting_approval']);
+const EXECUTION_MODES = new Set(['read-only', 'safe-write', 'yolo']);
+
+type SessionRuntimeConfig = {
+  backend: string;
+  cwd: string | null;
+  backendConfig: Record<string, unknown>;
+};
+
+type SessionRuntimeMeta = {
+  runtime: SessionRuntimeConfig;
+  override: {
+    backend?: string;
+    cwd?: string;
+    backendConfig?: Record<string, unknown>;
+  };
+};
 
 @Injectable()
 export class SessionsService {
@@ -33,6 +50,9 @@ export class SessionsService {
       },
       select: {
         id: true,
+        backend: true,
+        repoPath: true,
+        backendConfig: true,
       },
     });
 
@@ -40,11 +60,18 @@ export class SessionsService {
       throw new NotFoundException({ message: 'Project not found' });
     }
 
+    const normalizedRepoPath = input.repoPath?.trim()
+      ? (await this.runnerAdapter.ensureDirectory({ path: input.repoPath.trim() })).path
+      : null;
+
+    const meta = buildSessionRuntimeMeta(project, input, normalizedRepoPath);
+
     return this.prisma.session.create({
       data: {
         projectId,
         title: input.title,
         status: 'active',
+        meta: toPrismaJson(meta),
       },
     });
   }
@@ -63,6 +90,7 @@ export class SessionsService {
         title: true,
         status: true,
         updatedAt: true,
+        meta: true,
         messages: {
           orderBy: { createdAt: 'asc' },
           select: {
@@ -114,6 +142,7 @@ export class SessionsService {
         title: session.title,
         status: session.status,
         updatedAt: session.updatedAt,
+        meta: normalizeJsonRecord(session.meta),
       },
       messages: session.messages,
       turns: session.turns.map((turn) => ({
@@ -141,14 +170,8 @@ export class SessionsService {
         id: true,
         projectId: true,
         title: true,
+        meta: true,
         backendThreadId: true,
-        project: {
-          select: {
-            repoPath: true,
-            backend: true,
-            backendConfig: true,
-          },
-        },
         messages: {
           orderBy: { createdAt: 'asc' },
           select: {
@@ -179,20 +202,13 @@ export class SessionsService {
       throw new ConflictException({ message: 'Cannot fork a session while a turn is active' });
     }
 
-    const cwd = sourceSession.project.repoPath?.trim() || null;
-    const backend = sourceSession.project.backend?.trim() || null;
-    const backendConfig =
-      sourceSession.project.backendConfig &&
-      typeof sourceSession.project.backendConfig === 'object' &&
-      !Array.isArray(sourceSession.project.backendConfig)
-        ? (sourceSession.project.backendConfig as Record<string, unknown>)
-        : null;
+    const runtime = readSessionRuntimeForExecution(sourceSession.meta);
 
     const forked = await this.runnerAdapter.forkThread({
       threadId: sourceSession.backendThreadId,
-      backend,
-      backendConfig,
-      cwd,
+      backend: runtime.backend,
+      backendConfig: runtime.backendConfig,
+      cwd: runtime.cwd,
     });
 
     const title = input.title?.trim() || `${sourceSession.title} (Fork)`;
@@ -203,6 +219,10 @@ export class SessionsService {
           projectId: sourceSession.projectId,
           title,
           status: 'active',
+          meta: toPrismaJson({
+            runtime,
+            override: {},
+          }),
           backendThreadId: forked.threadId,
         },
       });
@@ -234,12 +254,7 @@ export class SessionsService {
       select: {
         id: true,
         backendThreadId: true,
-        project: {
-          select: {
-            backend: true,
-            repoPath: true,
-          },
-        },
+        meta: true,
       },
     });
 
@@ -263,11 +278,12 @@ export class SessionsService {
 
     const threadId = session.backendThreadId?.trim();
     if (threadId) {
+      const runtime = readSessionRuntimeForExecution(session.meta);
       try {
         await this.runnerAdapter.closeThread({
           threadId,
-          backend: session.project.backend?.trim() || null,
-          cwd: session.project.repoPath?.trim() || null,
+          backend: runtime.backend,
+          cwd: runtime.cwd,
         });
       } catch (error: unknown) {
         if (error instanceof Error) {
@@ -296,13 +312,7 @@ export class SessionsService {
       select: {
         id: true,
         backendThreadId: true,
-        project: {
-          select: {
-            repoPath: true,
-            backend: true,
-            backendConfig: true,
-          },
-        },
+        meta: true,
       },
     });
 
@@ -314,14 +324,8 @@ export class SessionsService {
     if (!threadId) {
       throw new ConflictException({ message: 'Session cannot be compacted before the first turn starts' });
     }
-    const cwd = session.project.repoPath?.trim() || null;
-    const backend = session.project.backend?.trim() || null;
-    const backendConfig =
-      session.project.backendConfig &&
-      typeof session.project.backendConfig === 'object' &&
-      !Array.isArray(session.project.backendConfig)
-        ? (session.project.backendConfig as Record<string, unknown>)
-        : null;
+
+    const runtime = readSessionRuntimeForExecution(session.meta);
 
     const activeTurn = await this.prisma.turn.findFirst({
       where: {
@@ -340,9 +344,9 @@ export class SessionsService {
     try {
       await this.runnerAdapter.compactThread({
         threadId,
-        backend,
-        backendConfig,
-        cwd,
+        backend: runtime.backend,
+        backendConfig: runtime.backendConfig,
+        cwd: runtime.cwd,
       });
 
       const latestTurn = await this.prisma.turn.findFirst({
@@ -382,4 +386,118 @@ function normalizeJsonRecord(value: unknown): Record<string, unknown> | null {
     return null;
   }
   return value as Record<string, unknown>;
+}
+
+function normalizeBackend(inputBackend: string | undefined | null): string {
+  const backend = (inputBackend ?? 'codex').trim().toLowerCase();
+  return backend.length > 0 ? backend : 'codex';
+}
+
+function buildSessionRuntimeMeta(
+  project: { backend: string; repoPath: string | null; backendConfig: Prisma.JsonValue | null },
+  input: CreateSessionBody,
+  normalizedRepoPath: string | null,
+): SessionRuntimeMeta {
+  const projectBackend = normalizeBackend(project.backend);
+  const projectCwd = project.repoPath?.trim() || null;
+  const projectBackendConfig = normalizeJsonRecord(project.backendConfig) ?? {};
+
+  const backendOverride = typeof input.backend === 'string' ? normalizeBackend(input.backend) : undefined;
+  const cwdOverride = normalizedRepoPath ?? undefined;
+  const backendConfigOverride =
+    input.backendConfig && typeof input.backendConfig === 'object' && !Array.isArray(input.backendConfig)
+      ? input.backendConfig
+      : undefined;
+
+  const runtimeBackend = backendOverride ?? projectBackend;
+  const runtimeCwd = cwdOverride ?? projectCwd;
+  const runtimeBackendConfig = resolveRuntimeBackendConfig({
+    backend: runtimeBackend,
+    inherited: projectBackendConfig,
+    override: backendConfigOverride,
+  });
+
+  const override: SessionRuntimeMeta['override'] = {};
+  if (backendOverride) {
+    override.backend = backendOverride;
+  }
+  if (typeof cwdOverride === 'string' && cwdOverride.trim().length > 0) {
+    override.cwd = cwdOverride;
+  }
+  if (backendConfigOverride) {
+    override.backendConfig = backendConfigOverride;
+  }
+
+  return {
+    runtime: {
+      backend: runtimeBackend,
+      cwd: runtimeCwd,
+      backendConfig: runtimeBackendConfig,
+    },
+    override,
+  };
+}
+
+function resolveRuntimeBackendConfig(input: {
+  backend: string;
+  inherited: Record<string, unknown>;
+  override: Record<string, unknown> | undefined;
+}): Record<string, unknown> {
+  const merged = {
+    ...input.inherited,
+    ...(input.override ?? {}),
+  };
+
+  if (input.backend === 'codex' || input.backend === 'claude') {
+    const model = typeof merged.model === 'string' ? merged.model.trim() : '';
+    const executionMode = typeof merged.executionMode === 'string' ? merged.executionMode.trim() : '';
+    if (!model || !EXECUTION_MODES.has(executionMode)) {
+      throw new ConflictException({
+        message: `Session runtime for backend ${input.backend} requires backendConfig.model and backendConfig.executionMode`,
+      });
+    }
+    return {
+      ...merged,
+      model,
+      executionMode,
+    };
+  }
+
+  return merged;
+}
+
+function readSessionRuntimeForExecution(meta: unknown): SessionRuntimeConfig {
+  const root = normalizeJsonRecord(meta);
+  const runtimeRecord = normalizeJsonRecord(root?.runtime);
+  if (!runtimeRecord) {
+    throw new ConflictException({
+      message: 'Session runtime metadata is missing. Please recreate the session.',
+    });
+  }
+
+  const backend = typeof runtimeRecord.backend === 'string' ? runtimeRecord.backend.trim().toLowerCase() : '';
+  if (!backend) {
+    throw new ConflictException({
+      message: 'Session runtime backend is missing. Please recreate the session.',
+    });
+  }
+
+  const cwd = typeof runtimeRecord.cwd === 'string' && runtimeRecord.cwd.trim().length > 0 ? runtimeRecord.cwd.trim() : null;
+  const backendConfig = normalizeJsonRecord(runtimeRecord.backendConfig) ?? {};
+
+  const normalizedBackendConfig = resolveRuntimeBackendConfig({
+    backend,
+    inherited: {},
+    override: backendConfig,
+  });
+
+  return {
+    backend,
+    cwd,
+    backendConfig: normalizedBackendConfig,
+  };
+}
+
+function toPrismaJson(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
