@@ -611,24 +611,22 @@ export class TurnsService implements OnModuleInit {
             },
           });
 
-          if (turn.triggerIdentifier !== 'web') {
-            await tx.botMessage.create({
-              data: {
-                projectId: turn.session.projectId,
-                sessionId: turn.sessionId,
-                kind: 'turn_message',
-                payloadRaw: {
-                  turnId: turn.id,
-                  triggerIdentifier: turn.triggerIdentifier,
-                  triggerProvider: turn.triggerProvider,
-                  triggerIntegrationId: turn.triggerIntegrationId,
-                  triggerMessageId: turn.triggerMessageId,
-                  content: normalizedAssistantContent,
-                },
-                status: 'queued',
+          await tx.botMessage.create({
+            data: {
+              projectId: turn.session.projectId,
+              sessionId: turn.sessionId,
+              kind: 'turn_message',
+              payloadRaw: {
+                turnId: turn.id,
+                triggerIdentifier: turn.triggerIdentifier,
+                triggerProvider: turn.triggerProvider,
+                triggerIntegrationId: turn.triggerIntegrationId,
+                triggerMessageId: turn.triggerMessageId,
+                content: normalizedAssistantContent,
               },
-            });
-          }
+              status: 'queued',
+            },
+          });
         });
 
         await this.appendEvent(turnId, 'turn.completed', this.normalizePayload(payload));
@@ -660,6 +658,25 @@ export class TurnsService implements OnModuleInit {
               startedAt: turn.status === 'queued' ? new Date() : undefined,
             },
           });
+
+          if (assistantContent.length > 0) {
+            await tx.botMessage.create({
+              data: {
+                projectId: turn.session.projectId,
+                sessionId: turn.sessionId,
+                kind: 'turn_message',
+                payloadRaw: {
+                  turnId: turn.id,
+                  triggerIdentifier: turn.triggerIdentifier,
+                  triggerProvider: turn.triggerProvider,
+                  triggerIntegrationId: turn.triggerIntegrationId,
+                  triggerMessageId: turn.triggerMessageId,
+                  content: assistantContent,
+                },
+                status: 'queued',
+              },
+            });
+          }
         });
         await this.appendEvent(turnId, 'turn.cancelled', this.normalizePayload(payload));
         return;

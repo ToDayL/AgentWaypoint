@@ -175,25 +175,44 @@ export class ChannelsService {
 
   async pullOutboundForGateway(limit: number): Promise<BotMessage[]> {
     const now = new Date();
-    return this.prisma.botMessage.findMany({
+    const claimableWhere: Prisma.BotMessageWhereInput = {
+      OR: [
+        {
+          status: BOT_MESSAGE_QUEUED_STATUS,
+        },
+        {
+          status: 'sending',
+          leaseExpireAt: {
+            lte: now,
+          },
+        },
+      ],
+    };
+
+    const primary = await this.prisma.botMessage.findMany({
       where: {
-        OR: [
-          {
-            status: BOT_MESSAGE_QUEUED_STATUS,
-          },
-          {
-            status: 'sending',
-            leaseExpireAt: {
-              lte: now,
-            },
-          },
-        ],
+        AND: [claimableWhere, { kind: { not: 'event' } }],
       },
       orderBy: {
         createdAt: 'asc',
       },
       take: limit,
     });
+    if (primary.length >= limit) {
+      return primary;
+    }
+
+    const remaining = limit - primary.length;
+    const events = await this.prisma.botMessage.findMany({
+      where: {
+        AND: [claimableWhere, { kind: 'event' }],
+      },
+      orderBy: {
+        createdAt: 'asc',
+      },
+      take: remaining,
+    });
+    return [...primary, ...events];
   }
 
   async resolveBindingsForMessage(message: Pick<BotMessage, 'projectId' | 'sessionId'>): Promise<SessionProviderBinding[]> {

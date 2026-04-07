@@ -64,6 +64,8 @@ type DiscordRuntime = {
   processedMessageIds: Map<string, number>;
   approvalMenus: Map<string, DiscordApprovalMenuState>;
   triggerMessageActions: Map<string, 'watching' | 'active' | 'final'>;
+  triggerMessageEffects: Map<string, 'watching' | 'active' | 'approval_pending' | 'final_success' | 'final_cancel' | 'final_error'>;
+  steerTriggerByTurnId: Map<string, { channelId: string; messageId: string }>;
   typingByMessageKey: Map<string, string>;
   typingIntervals: Map<string, ReturnType<typeof setInterval>>;
 };
@@ -108,6 +110,7 @@ const PROCESSED_MESSAGE_MAX = 4_000;
 const DISCORD_MESSAGE_MAX_LENGTH = 2_000;
 const DISCORD_PROJECT_COMMAND = 'project';
 const DISCORD_SESSION_COMMAND = 'session';
+const DISCORD_CANCEL_COMMAND = 'cancel';
 const EXECUTION_MODE_CHOICES = ['read-only', 'safe-write', 'yolo'] as const;
 const AUTOCOMPLETE_MODEL_TIMEOUT_MS = 1_200;
 const AUTOCOMPLETE_MODEL_CACHE_TTL_MS = 60_000;
@@ -206,28 +209,46 @@ export class DiscordPlugin implements ChannelPlugin {
     }
 
     const reactionEffect = describeDiscordReactionEffect(message);
+    const outboundText = buildDiscordOutboundText(message);
+    let providerMessageId: string | null = null;
+    if (outboundText) {
+      const sent = await channel.send({
+        content: limitDiscordMessageLength(outboundText),
+        allowedMentions: buildAllowedMentions(runtime.config.message?.allowEveryoneMention ?? false),
+      });
+      providerMessageId = sent.id;
+    }
+
     if (reactionEffect) {
       const triggerMessageId = readDiscordTriggerMessageId(message);
+      const turnId = readDiscordTurnId(message);
       const reactionTargetChannelId =
         normalizeOptionalString(context.bindingThread) ?? normalizeOptionalString(context.bindingChannel);
       if (triggerMessageId && reactionTargetChannelId) {
         await this.applyTriggerMessageAction(runtime, reactionTargetChannelId, triggerMessageId, reactionEffect);
       }
-      if (reactionEffect.skipOutboundText) {
+      if (turnId) {
+        const steerTarget = runtime.steerTriggerByTurnId.get(turnId);
+        if (steerTarget) {
+          await this.applyTriggerMessageAction(runtime, steerTarget.channelId, steerTarget.messageId, reactionEffect);
+          if (
+            reactionEffect.action === 'final_success' ||
+            reactionEffect.action === 'final_cancel' ||
+            reactionEffect.action === 'final_error'
+          ) {
+            runtime.steerTriggerByTurnId.delete(turnId);
+          }
+        }
+      }
+      if (reactionEffect.skipOutboundText && !providerMessageId) {
         return { providerMessageId: `discord-reaction-${message.id}` };
       }
     }
 
-    const outboundText = buildDiscordOutboundText(message);
-    if (!outboundText) {
-      return { providerMessageId: `discord-skipped-${message.id}` };
+    if (providerMessageId) {
+      return { providerMessageId };
     }
-
-    const sent = await channel.send({
-      content: limitDiscordMessageLength(outboundText),
-      allowedMentions: buildAllowedMentions(runtime.config.message?.allowEveryoneMention ?? false),
-    });
-    return { providerMessageId: sent.id };
+    return { providerMessageId: `discord-skipped-${message.id}` };
   }
 
   private async reconcileRuntimes(): Promise<void> {
@@ -295,6 +316,11 @@ export class DiscordPlugin implements ChannelPlugin {
       processedMessageIds: new Map<string, number>(),
       approvalMenus: new Map<string, DiscordApprovalMenuState>(),
       triggerMessageActions: new Map<string, 'watching' | 'active' | 'final'>(),
+      triggerMessageEffects: new Map<
+        string,
+        'watching' | 'active' | 'approval_pending' | 'final_success' | 'final_cancel' | 'final_error'
+      >(),
+      steerTriggerByTurnId: new Map<string, { channelId: string; messageId: string }>(),
       typingByMessageKey: new Map<string, string>(),
       typingIntervals: new Map<string, ReturnType<typeof setInterval>>(),
     };
@@ -355,6 +381,10 @@ export class DiscordPlugin implements ChannelPlugin {
           await this.handleSessionCommand(runtime, interaction);
           return;
         }
+        if (interaction.commandName === DISCORD_CANCEL_COMMAND) {
+          await this.handleCancelCommand(runtime, interaction);
+          return;
+        }
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'unknown interaction error';
         this.logger.warn(`Discord interaction failed for integration ${runtime.integrationId}: ${message}`);
@@ -404,6 +434,8 @@ export class DiscordPlugin implements ChannelPlugin {
     runtime.stopped = true;
     runtime.approvalMenus.clear();
     runtime.triggerMessageActions.clear();
+    runtime.triggerMessageEffects.clear();
+    runtime.steerTriggerByTurnId.clear();
     runtime.typingByMessageKey.clear();
     for (const interval of runtime.typingIntervals.values()) {
       clearInterval(interval);
@@ -566,6 +598,27 @@ export class DiscordPlugin implements ChannelPlugin {
       return;
     }
     await safeReply(interaction, `Unsupported subcommand: ${subcommand}`);
+  }
+
+  private async handleCancelCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply({ ephemeral: true });
+    const target = resolveBindingTargetFromInteraction(interaction);
+    if (!target.bindingChannelId) {
+      await interaction.editReply('Unable to resolve channel binding target.');
+      return;
+    }
+    const sessionId = findSessionIdByTarget(runtime.config, target.bindingChannelId, target.bindingThreadId);
+    if (!sessionId) {
+      await interaction.editReply('No bound session found for this target.');
+      return;
+    }
+    const active = await this.readSteerableTurnForSession(runtime.ownerUserId, sessionId);
+    if (!active) {
+      await interaction.editReply(`No active steerable turn for session \`${sessionId}\`.`);
+      return;
+    }
+    await this.requireContext().cancelTurnForUser(runtime.ownerUserId, active.turnId);
+    await interaction.editReply(`Cancel requested for turn \`${active.turnId}\`.`);
   }
 
   private async handleProjectListCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
@@ -1312,12 +1365,6 @@ export class DiscordPlugin implements ChannelPlugin {
       return;
     }
 
-    await this.applyTriggerMessageAction(runtime, message.channelId, message.id, {
-      action: 'watching',
-      onlyIfTracked: false,
-      skipOutboundText: false,
-    });
-
     const { bindingChannelId, bindingThreadId, channelName } = resolveBindingTargetFromMessage(message);
     await this.enqueueInboundTurn(runtime, {
       content: normalizeInboundContent(inputText, runtime.config.message?.maxInboundLength),
@@ -1394,13 +1441,6 @@ export class DiscordPlugin implements ChannelPlugin {
     }
 
     try {
-      if (messageId) {
-        await this.applyTriggerMessageAction(runtime, channelId, messageId, {
-          action: 'watching',
-          onlyIfTracked: false,
-          skipOutboundText: false,
-        });
-      }
       const channel = await runtime.client.channels.fetch(channelId);
       if (!channel?.isSendable()) {
         return;
@@ -1440,6 +1480,10 @@ export class DiscordPlugin implements ChannelPlugin {
     const key = `${channelId}:${messageId}`;
     const current = runtime.triggerMessageActions.get(key);
     if (effect.onlyIfTracked && !current) {
+      return;
+    }
+    const currentEffect = runtime.triggerMessageEffects.get(key);
+    if (currentEffect === effect.action) {
       return;
     }
 
@@ -1484,6 +1528,7 @@ export class DiscordPlugin implements ChannelPlugin {
       }
 
       runtime.triggerMessageActions.set(key, resolveActionTrackingState(effect.action));
+      runtime.triggerMessageEffects.set(key, effect.action);
     } catch {
       // ignore reaction failures; chat flow should continue.
     }
@@ -1587,6 +1632,46 @@ export class DiscordPlugin implements ChannelPlugin {
       guildId: input.guildId,
     });
 
+    const activeTurn = await this.readSteerableTurnForSession(runtime.ownerUserId, resolved.sessionId);
+    if (activeTurn) {
+      if (input.providerMessageId) {
+        await this.applyTriggerMessageAction(runtime, input.bindingChannelId, input.providerMessageId, {
+          action: 'watching',
+          onlyIfTracked: false,
+          skipOutboundText: true,
+        });
+      }
+      try {
+        await this.requireContext().steerTurnForUser(runtime.ownerUserId, activeTurn.turnId, {
+          content: input.content,
+        });
+        if (input.providerMessageId) {
+          runtime.steerTriggerByTurnId.set(activeTurn.turnId, {
+            channelId: input.bindingChannelId,
+            messageId: input.providerMessageId,
+          });
+        }
+        return;
+      } catch {
+        if (input.providerMessageId) {
+          await this.applyTriggerMessageAction(runtime, input.bindingChannelId, input.providerMessageId, {
+            action: 'final_error',
+            onlyIfTracked: true,
+            skipOutboundText: true,
+          });
+        }
+        // Fall through to normal inbound creation if steer raced with terminal state.
+      }
+    }
+
+    if (input.providerMessageId) {
+      void this.applyTriggerMessageAction(runtime, input.bindingChannelId, input.providerMessageId, {
+        action: 'watching',
+        onlyIfTracked: false,
+        skipOutboundText: false,
+      });
+    }
+
     const created = await this.requireContext().ingestInbound({
       unifiedIdentifier: buildDiscordUnifiedIdentifier(runtime.integrationId, input.providerMessageId),
       triggerProvider: this.provider,
@@ -1598,6 +1683,30 @@ export class DiscordPlugin implements ChannelPlugin {
     });
     if (!created.turnId) {
       throw new Error('Failed to enqueue inbound turn');
+    }
+  }
+
+  private async readSteerableTurnForSession(
+    userId: string,
+    sessionId: string,
+  ): Promise<{ turnId: string; status: string } | null> {
+    try {
+      const history = await this.requireContext().getSessionHistoryForUser(userId, sessionId);
+      const root = asRecord(history);
+      const activeTurnId = normalizeOptionalString(root?.activeTurnId);
+      const activeTurnStatus = normalizeOptionalString(root?.activeTurnStatus);
+      if (!activeTurnId || !activeTurnStatus) {
+        return null;
+      }
+      if (activeTurnStatus !== 'queued' && activeTurnStatus !== 'running') {
+        return null;
+      }
+      return {
+        turnId: activeTurnId,
+        status: activeTurnStatus,
+      };
+    } catch {
+      return null;
     }
   }
 
@@ -1820,7 +1929,11 @@ function resolveBindingTargetFromInteraction(interaction: ChatInputCommandIntera
 }
 
 function buildDiscordCommandDefinitions(): ApplicationCommandDataResolvable[] {
-  return [...buildDiscordProjectCommandDefinitions(), ...buildDiscordSessionCommandDefinitions()];
+  return [
+    ...buildDiscordProjectCommandDefinitions(),
+    ...buildDiscordSessionCommandDefinitions(),
+    ...buildDiscordCancelCommandDefinitions(),
+  ];
 }
 
 function buildDiscordProjectCommandDefinitions(): ApplicationCommandDataResolvable[] {
@@ -2076,6 +2189,15 @@ function buildDiscordSessionCommandDefinitions(): ApplicationCommandDataResolvab
           ],
         },
       ],
+    },
+  ];
+}
+
+function buildDiscordCancelCommandDefinitions(): ApplicationCommandDataResolvable[] {
+  return [
+    {
+      name: DISCORD_CANCEL_COMMAND,
+      description: 'Cancel the active turn for current bound session',
     },
   ];
 }
@@ -2720,6 +2842,14 @@ function readDiscordTriggerMessageId(message: BotMessage): string | null {
     return null;
   }
   return normalizeOptionalString(payload.triggerMessageId);
+}
+
+function readDiscordTurnId(message: BotMessage): string | null {
+  const payload = asRecord(message.payloadRaw);
+  if (!payload) {
+    return null;
+  }
+  return normalizeOptionalString(payload.turnId);
 }
 
 function describeDiscordReactionEffect(message: BotMessage): {
