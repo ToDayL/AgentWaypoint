@@ -155,7 +155,7 @@ describe('API e2e', () => {
     expect(createSessionResponse.statusCode).toBe(201);
   });
 
-  it('uses latest project execution settings when creating a turn', async () => {
+  it('uses session runtime settings when creating a turn', async () => {
     const email = randomEmail('session-persisted-settings');
 
     const projectResponse = await app.inject({
@@ -213,7 +213,7 @@ describe('API e2e', () => {
     expect(turnStatusResponse.statusCode).toBe(200);
     expect(turnStatusResponse.json()).toMatchObject({
       effectiveBackendConfig: {
-        model: 'gpt-5-mini',
+        model: 'gpt-5-codex',
       },
     });
   });
