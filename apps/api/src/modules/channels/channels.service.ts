@@ -299,6 +299,13 @@ export class ChannelsService {
     turnId: string;
   }> {
     await this.ensureGatewayResolvedSessionExists(input.projectId, input.sessionId);
+    const created = await this.turnsService.createTurnForGateway(input.sessionId, {
+      content: input.content,
+      triggerIdentifier: input.unifiedIdentifier,
+      triggerProvider: input.triggerProvider,
+      triggerIntegrationId: input.triggerIntegrationId,
+      triggerMessageId: input.providerMessageId ?? null,
+    });
     await this.publishUserMessageForSession({
       projectId: input.projectId,
       sessionId: input.sessionId,
@@ -308,13 +315,6 @@ export class ChannelsService {
       triggerIntegrationId: input.triggerIntegrationId ?? null,
       triggerMessageId: input.providerMessageId ?? null,
       sourceBinding: extractSourceBindingFromInboundMetadata(input.metadata),
-    });
-    const created = await this.turnsService.createTurnForGateway(input.sessionId, {
-      content: input.content,
-      triggerIdentifier: input.unifiedIdentifier,
-      triggerProvider: input.triggerProvider,
-      triggerIntegrationId: input.triggerIntegrationId,
-      triggerMessageId: input.providerMessageId ?? null,
     });
     return {
       accepted: true,
@@ -337,6 +337,13 @@ export class ChannelsService {
     },
   ): Promise<{ accepted: true; unifiedIdentifier: string; messageId: string; turnId: string }> {
     await this.ensureProjectSessionOwnership(userId, input.projectId, input.sessionId);
+    const created = await this.turnsService.createTurnForGateway(input.sessionId, {
+      content: input.content,
+      triggerIdentifier: input.unifiedIdentifier,
+      triggerProvider: input.triggerProvider,
+      triggerIntegrationId: input.triggerIntegrationId,
+      triggerMessageId: input.providerMessageId ?? null,
+    });
     await this.publishUserMessageForSession({
       projectId: input.projectId,
       sessionId: input.sessionId,
@@ -346,13 +353,6 @@ export class ChannelsService {
       triggerIntegrationId: input.triggerIntegrationId ?? null,
       triggerMessageId: input.providerMessageId ?? null,
       sourceBinding: null,
-    });
-    const created = await this.turnsService.createTurnForGateway(input.sessionId, {
-      content: input.content,
-      triggerIdentifier: input.unifiedIdentifier,
-      triggerProvider: input.triggerProvider,
-      triggerIntegrationId: input.triggerIntegrationId,
-      triggerMessageId: input.providerMessageId ?? null,
     });
     return {
       accepted: true,

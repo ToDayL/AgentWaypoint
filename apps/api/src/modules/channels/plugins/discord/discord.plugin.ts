@@ -1351,7 +1351,7 @@ export class DiscordPlugin implements ChannelPlugin {
       return;
     }
 
-    if (!isAllowedByList(message.guildId ?? '', runtime.config.trigger?.allowedGuilds)) {
+    if (message.guildId && !isAllowedByList(message.guildId, runtime.config.trigger?.allowedGuilds)) {
       return;
     }
 
@@ -1418,7 +1418,7 @@ export class DiscordPlugin implements ChannelPlugin {
       return;
     }
 
-    if (!isAllowedByList(guildId ?? '', runtime.config.trigger?.allowedGuilds)) {
+    if (guildId && !isAllowedByList(guildId, runtime.config.trigger?.allowedGuilds)) {
       return;
     }
 
@@ -1651,22 +1651,6 @@ export class DiscordPlugin implements ChannelPlugin {
       try {
         await this.requireContext().steerTurnForUser(runtime.ownerUserId, activeTurn.turnId, {
           content: input.content,
-        });
-        await this.requireContext().publishUserMessageForSession({
-          projectId: resolved.projectId,
-          sessionId: resolved.sessionId,
-          content: input.content,
-          triggerIdentifier: unifiedIdentifier,
-          triggerProvider: this.provider,
-          triggerIntegrationId: runtime.integrationId,
-          triggerMessageId: input.providerMessageId,
-          sourceBinding: {
-            provider: this.provider,
-            integrationId: runtime.integrationId,
-            guid: null,
-            channel: input.bindingChannelId,
-            thread: input.bindingThreadId,
-          },
         });
         if (input.providerMessageId) {
           runtime.steerTriggerByTurnId.set(activeTurn.turnId, {
