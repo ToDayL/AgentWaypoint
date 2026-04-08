@@ -189,8 +189,8 @@ export class DiscordPlugin implements ChannelPlugin {
     }
 
     const approval = extractDiscordApprovalRequest(message);
+    const triggerMessageId = readDiscordTriggerMessageId(message);
     if (approval) {
-      const triggerMessageId = readDiscordTriggerMessageId(message);
       const reactionTargetChannelId =
         normalizeOptionalString(context.bindingThread) ?? normalizeOptionalString(context.bindingChannel);
       if (triggerMessageId && reactionTargetChannelId) {
@@ -217,16 +217,12 @@ export class DiscordPlugin implements ChannelPlugin {
     if (outboundText) {
       const chunks = splitDiscordMessageChunks(outboundText);
       for (const chunk of chunks) {
-        const sent = await channel.send({
-          content: chunk,
-          allowedMentions: buildAllowedMentions(runtime.config.message?.allowEveryoneMention ?? false),
-        });
+        const sent = await this.sendDiscordOutboundChunk(runtime, channel, chunk, triggerMessageId, context);
         providerMessageId = sent.id;
       }
     }
 
     if (reactionEffect) {
-      const triggerMessageId = readDiscordTriggerMessageId(message);
       const turnId = readDiscordTurnId(message);
       const reactionTargetChannelId =
         normalizeOptionalString(context.bindingThread) ?? normalizeOptionalString(context.bindingChannel);
@@ -1620,6 +1616,33 @@ export class DiscordPlugin implements ChannelPlugin {
     }
   }
 
+  private async sendDiscordOutboundChunk(
+    runtime: DiscordRuntime,
+    channel: { send: (options: Record<string, unknown>) => Promise<{ id: string }> },
+    content: string,
+    triggerMessageId: string | null,
+    context: PluginDispatchContext,
+  ): Promise<{ id: string }> {
+    const base: Record<string, unknown> = {
+      content,
+      allowedMentions: buildAllowedMentions(runtime.config.message?.allowEveryoneMention ?? false),
+    };
+    if (!shouldUseDiscordReplySendStyle(runtime.config, context, triggerMessageId)) {
+      return channel.send(base);
+    }
+    try {
+      return await channel.send({
+        ...base,
+        reply: {
+          messageReference: triggerMessageId,
+          failIfNotExists: false,
+        },
+      });
+    } catch {
+      return channel.send(base);
+    }
+  }
+
   private async enqueueInboundTurn(
     runtime: DiscordRuntime,
     input: {
@@ -3006,6 +3029,21 @@ function describeDiscordReactionEffect(message: BotMessage): {
     onlyIfTracked: true,
     skipOutboundText: true,
   };
+}
+
+function shouldUseDiscordReplySendStyle(
+  config: DiscordPluginConfig,
+  context: PluginDispatchContext,
+  triggerMessageId: string | null,
+): boolean {
+  if (config.message?.sendStyle !== 'reply') {
+    return false;
+  }
+  if (!triggerMessageId) {
+    return false;
+  }
+  // Only reply on the source integration route where trigger message ids are expected to be valid.
+  return context.isTriggeredByYou;
 }
 
 function shouldSkipUserMessageForSourceBinding(message: BotMessage, context: PluginDispatchContext): boolean {
