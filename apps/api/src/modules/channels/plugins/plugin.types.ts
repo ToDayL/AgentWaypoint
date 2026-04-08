@@ -31,6 +31,22 @@ export type PluginBindingPolicy = {
 };
 
 export interface ChannelPluginContext {
+  publishUserMessageForSession(input: {
+    projectId: string;
+    sessionId: string;
+    content: string;
+    triggerIdentifier: string;
+    triggerProvider?: string;
+    triggerIntegrationId?: string;
+    triggerMessageId?: string | null;
+    sourceBinding?: {
+      provider?: string | null;
+      integrationId?: string | null;
+      guid?: string | null;
+      channel?: string | null;
+      thread?: string | null;
+    } | null;
+  }): Promise<void>;
   ingestInbound(input: GatewayInboundBody): Promise<{
     accepted: true;
     unifiedIdentifier: string;
@@ -39,12 +55,25 @@ export interface ChannelPluginContext {
   }>;
   resolveApproval(input: GatewayApprovalBody): Promise<{ turnId: string; status: string; accepted: true }>;
   listProjectsForUser(userId: string): Promise<unknown>;
-  createProjectForUser(userId: string, input: { name: string; repoPath?: string }): Promise<unknown>;
+  createProjectForUser(
+    userId: string,
+    input: {
+      name: string;
+      repoPath?: string;
+      backend?: string;
+      backendConfig?: Record<string, unknown>;
+    },
+  ): Promise<unknown>;
   getProjectForUser(userId: string, projectId: string): Promise<unknown>;
   updateProjectForUser(
     userId: string,
     projectId: string,
-    input: { name?: string; repoPath?: string | null },
+    input: {
+      name?: string;
+      repoPath?: string | null;
+      backend?: string;
+      backendConfig?: Record<string, unknown>;
+    },
   ): Promise<unknown>;
   deleteProjectForUser(userId: string, projectId: string): Promise<void>;
   listSessionsForProject(userId: string, projectId: string): Promise<unknown>;
@@ -58,6 +87,11 @@ export interface ChannelPluginContext {
   cancelTurnForUser(userId: string, turnId: string): Promise<unknown>;
   steerTurnForUser(userId: string, turnId: string, input: SteerTurnBody): Promise<unknown>;
   resolveTurnApprovalForUser(userId: string, turnId: string, input: ResolveTurnApprovalBody): Promise<unknown>;
+  updateIntegrationPluginConfigForUser(
+    userId: string,
+    integrationId: string,
+    pluginConfig: Record<string, unknown>,
+  ): Promise<void>;
   listModels(input: { backend?: string | null }): Promise<AvailableModel[]>;
   listSkills(input: { cwd?: string | null; backend?: string | null }): Promise<AvailableSkill[]>;
   suggestWorkspaceDirectories(input: { prefix: string; limit?: number }): Promise<string[]>;

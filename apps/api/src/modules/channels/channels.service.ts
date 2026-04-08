@@ -20,6 +20,7 @@ import {
   GatewayResultBody,
 } from './gateway.schemas';
 import { ResolveTurnApprovalBody } from '../turns/turns.schemas';
+import { QueueSignalService } from '../queue-signal/queue-signal.service';
 
 const BOT_MESSAGE_QUEUED_STATUS = 'queued';
 
@@ -36,6 +37,7 @@ export class ChannelsService {
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(TurnsService) private readonly turnsService: TurnsService,
+    @Inject(QueueSignalService) private readonly queueSignalService: QueueSignalService,
   ) {}
 
   async createIntegration(userId: string, input: CreateIntegrationBody): Promise<BotIntegration> {
@@ -44,7 +46,7 @@ export class ChannelsService {
         ownerUserId: userId,
         provider: input.provider,
         name: input.name,
-        status: 'draft',
+        status: 'active',
         credentialsEncrypted: toOptionalJson(input.credentialsEncrypted),
         pluginConfig: toOptionalJson(input.pluginConfig),
       },
@@ -104,7 +106,7 @@ export class ChannelsService {
 
   async sendMessage(userId: string, input: SendMessageBody, kind: BotMessageKind): Promise<BotMessage> {
     await this.ensureProjectSessionOwnership(userId, input.projectId, input.sessionId);
-    return this.prisma.botMessage.create({
+    const created = await this.prisma.botMessage.create({
       data: {
         projectId: input.projectId,
         sessionId: input.sessionId,
@@ -113,6 +115,8 @@ export class ChannelsService {
         status: BOT_MESSAGE_QUEUED_STATUS,
       },
     });
+    await this.queueSignalService.publishOutboundWake();
+    return created;
   }
 
   async listMessages(userId: string, query: ListMessagesQuery): Promise<BotMessage[]> {
@@ -171,25 +175,44 @@ export class ChannelsService {
 
   async pullOutboundForGateway(limit: number): Promise<BotMessage[]> {
     const now = new Date();
-    return this.prisma.botMessage.findMany({
+    const claimableWhere: Prisma.BotMessageWhereInput = {
+      OR: [
+        {
+          status: BOT_MESSAGE_QUEUED_STATUS,
+        },
+        {
+          status: 'sending',
+          leaseExpireAt: {
+            lte: now,
+          },
+        },
+      ],
+    };
+
+    const primary = await this.prisma.botMessage.findMany({
       where: {
-        OR: [
-          {
-            status: BOT_MESSAGE_QUEUED_STATUS,
-          },
-          {
-            status: 'sending',
-            leaseExpireAt: {
-              lte: now,
-            },
-          },
-        ],
+        AND: [claimableWhere, { kind: { not: 'event' } }],
       },
       orderBy: {
         createdAt: 'asc',
       },
       take: limit,
     });
+    if (primary.length >= limit) {
+      return primary;
+    }
+
+    const remaining = limit - primary.length;
+    const events = await this.prisma.botMessage.findMany({
+      where: {
+        AND: [claimableWhere, { kind: 'event' }],
+      },
+      orderBy: {
+        createdAt: 'asc',
+      },
+      take: remaining,
+    });
+    return [...primary, ...events];
   }
 
   async resolveBindingsForMessage(message: Pick<BotMessage, 'projectId' | 'sessionId'>): Promise<SessionProviderBinding[]> {
@@ -283,6 +306,16 @@ export class ChannelsService {
       triggerIntegrationId: input.triggerIntegrationId,
       triggerMessageId: input.providerMessageId ?? null,
     });
+    await this.publishUserMessageForSession({
+      projectId: input.projectId,
+      sessionId: input.sessionId,
+      content: input.content,
+      triggerIdentifier: input.unifiedIdentifier,
+      triggerProvider: input.triggerProvider ?? null,
+      triggerIntegrationId: input.triggerIntegrationId ?? null,
+      triggerMessageId: input.providerMessageId ?? null,
+      sourceBinding: extractSourceBindingFromInboundMetadata(input.metadata),
+    });
     return {
       accepted: true,
       unifiedIdentifier: input.unifiedIdentifier,
@@ -310,6 +343,16 @@ export class ChannelsService {
       triggerProvider: input.triggerProvider,
       triggerIntegrationId: input.triggerIntegrationId,
       triggerMessageId: input.providerMessageId ?? null,
+    });
+    await this.publishUserMessageForSession({
+      projectId: input.projectId,
+      sessionId: input.sessionId,
+      content: input.content,
+      triggerIdentifier: input.unifiedIdentifier,
+      triggerProvider: input.triggerProvider ?? null,
+      triggerIntegrationId: input.triggerIntegrationId ?? null,
+      triggerMessageId: input.providerMessageId ?? null,
+      sourceBinding: null,
     });
     return {
       accepted: true,
@@ -358,6 +401,25 @@ export class ChannelsService {
     input: ResolveTurnApprovalBody,
   ) {
     return this.turnsService.resolveTurnApprovalForUser(userId, turnId, input);
+  }
+
+  async publishUserMessageForSession(input: {
+    projectId: string;
+    sessionId: string;
+    content: string;
+    triggerIdentifier: string;
+    triggerProvider: string | null;
+    triggerIntegrationId: string | null;
+    triggerMessageId: string | null;
+    sourceBinding: {
+      provider: string | null;
+      integrationId: string | null;
+      guid: string | null;
+      channel: string | null;
+      thread: string | null;
+    } | null;
+  }): Promise<void> {
+    await this.enqueueInboundUserMessageFanout(input);
   }
 
   private async ensureProjectOwnedByUser(userId: string, projectId: string): Promise<void> {
@@ -416,6 +478,42 @@ export class ChannelsService {
     if (session.projectId !== projectId) {
       throw new ForbiddenException({ message: 'Session does not belong to project' });
     }
+  }
+
+  private async enqueueInboundUserMessageFanout(input: {
+    projectId: string;
+    sessionId: string;
+    content: string;
+    triggerIdentifier: string;
+    triggerProvider: string | null;
+    triggerIntegrationId: string | null;
+    triggerMessageId: string | null;
+    sourceBinding: {
+      provider: string | null;
+      integrationId: string | null;
+      guid: string | null;
+      channel: string | null;
+      thread: string | null;
+    } | null;
+  }): Promise<void> {
+    await this.prisma.botMessage.create({
+      data: {
+        projectId: input.projectId,
+        sessionId: input.sessionId,
+        kind: 'event',
+        payloadRaw: {
+          type: 'user_message',
+          content: input.content,
+          triggerIdentifier: input.triggerIdentifier,
+          triggerProvider: input.triggerProvider,
+          triggerIntegrationId: input.triggerIntegrationId,
+          triggerMessageId: input.triggerMessageId,
+          sourceBinding: input.sourceBinding,
+        },
+        status: BOT_MESSAGE_QUEUED_STATUS,
+      },
+    });
+    await this.queueSignalService.publishOutboundWake();
   }
 }
 
@@ -548,4 +646,27 @@ function asOptionalString(value: unknown): string | null {
   }
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : null;
+}
+
+function extractSourceBindingFromInboundMetadata(
+  metadata: Record<string, unknown> | undefined,
+): {
+  provider: string | null;
+  integrationId: string | null;
+  guid: string | null;
+  channel: string | null;
+  thread: string | null;
+} | null {
+  const root = asRecord(metadata);
+  const sourceBinding = asRecord(root?.sourceBinding);
+  if (!sourceBinding) {
+    return null;
+  }
+  return {
+    provider: asOptionalString(sourceBinding.provider),
+    integrationId: asOptionalString(sourceBinding.integrationId),
+    guid: asOptionalString(sourceBinding.guid),
+    channel: asOptionalString(sourceBinding.channel),
+    thread: asOptionalString(sourceBinding.thread),
+  };
 }

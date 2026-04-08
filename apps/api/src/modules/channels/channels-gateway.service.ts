@@ -6,18 +6,43 @@ import { CreateSessionBody, ForkSessionBody } from '../sessions/sessions.schemas
 import { SessionsService } from '../sessions/sessions.service';
 import { CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from '../turns/turns.schemas';
 import { TurnsService } from '../turns/turns.service';
+import { DiscordPlugin } from './plugins/discord/discord.plugin';
 import { WebPlugin } from './plugins/web/web.plugin';
 import { ChannelsService, SessionProviderBinding } from './channels.service';
 import { ChannelPlugin, ChannelPluginContext, PluginDispatchContext } from './plugins/plugin.types';
+import { QueueSignalService } from '../queue-signal/queue-signal.service';
+
+const FALLBACK_DISPATCH_POLL_MS = 5_000;
 
 @Injectable()
 export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ChannelsGatewayService.name);
   private timer: ReturnType<typeof setInterval> | null = null;
+  private unsubscribeWake: (() => void) | null = null;
   private dispatching = false;
+  private dispatchRequested = false;
   private readonly gatewayInstanceId = 'internal-channels-gateway';
   private readonly plugins: ChannelPlugin[];
   private readonly pluginContext: ChannelPluginContext = {
+    publishUserMessageForSession: async (input) =>
+      this.channelsService.publishUserMessageForSession({
+        projectId: input.projectId,
+        sessionId: input.sessionId,
+        content: input.content,
+        triggerIdentifier: input.triggerIdentifier,
+        triggerProvider: input.triggerProvider ?? null,
+        triggerIntegrationId: input.triggerIntegrationId ?? null,
+        triggerMessageId: input.triggerMessageId ?? null,
+        sourceBinding: input.sourceBinding
+          ? {
+            provider: normalizeOptionalString(input.sourceBinding.provider),
+            integrationId: normalizeOptionalString(input.sourceBinding.integrationId),
+            guid: normalizeOptionalString(input.sourceBinding.guid),
+            channel: normalizeOptionalString(input.sourceBinding.channel),
+            thread: normalizeOptionalString(input.sourceBinding.thread),
+          }
+          : null,
+      }),
     ingestInbound: async (input) => this.channelsService.ingestInboundForGateway(input),
     resolveApproval: async (input) => this.channelsService.resolveApprovalForGateway(input),
     listProjectsForUser: async (userId) => this.projectsService.listForUser(userId),
@@ -25,13 +50,21 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
       this.projectsService.createForUser(userId, {
         name: input.name,
         repoPath: input.repoPath,
+        backend: input.backend,
+        backendConfig: input.backendConfig,
       }),
     getProjectForUser: async (userId, projectId) => this.projectsService.getByIdForUser(userId, projectId),
     updateProjectForUser: async (userId, projectId, input) =>
-      this.projectsService.updateByIdForUser(userId, projectId, {
-        name: input.name,
-        repoPath: input.repoPath,
-      }),
+      this.projectsService.updateByIdForUser(
+        userId,
+        projectId,
+        compactProjectUpdateInput({
+          name: input.name,
+          repoPath: input.repoPath,
+          backend: input.backend,
+          backendConfig: input.backendConfig,
+        }),
+      ),
     deleteProjectForUser: async (userId, projectId) => {
       await this.projectsService.deleteByIdForUser(userId, projectId);
     },
@@ -43,12 +76,46 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
     },
     forkSessionForUser: async (userId, sessionId, input) => this.sessionsService.forkSessionForUser(userId, sessionId, input),
     compactSessionForUser: async (userId, sessionId) => this.sessionsService.compactSessionForUser(userId, sessionId),
-    createTurnForSession: async (userId, sessionId, input) => this.turnsService.createTurnForSession(userId, sessionId, input),
     getTurnStatusForUser: async (userId, turnId) => this.turnsService.getTurnStatusForUser(userId, turnId),
     cancelTurnForUser: async (userId, turnId) => this.turnsService.cancelTurnForUser(userId, turnId),
-    steerTurnForUser: async (userId, turnId, input) => this.turnsService.steerTurnForUser(userId, turnId, input),
+    createTurnForSession: async (userId, sessionId, input) => {
+      const created = await this.turnsService.createTurnForSession(userId, sessionId, input);
+      const projectId = await this.resolveProjectIdForSession(userId, sessionId);
+      await this.channelsService.publishUserMessageForSession({
+        projectId,
+        sessionId,
+        content: input.content,
+        triggerIdentifier: buildWebUserMessageIdentifier(sessionId),
+        triggerProvider: 'web',
+        triggerIntegrationId: null,
+        triggerMessageId: null,
+        sourceBinding: null,
+      });
+      return created;
+    },
+    steerTurnForUser: async (userId, turnId, input) => {
+      const turn = await this.turnsService.getTurnForUser(userId, turnId);
+      const steered = await this.turnsService.steerTurnForUser(userId, turnId, input);
+      const projectId = await this.resolveProjectIdForSession(userId, turn.sessionId);
+      await this.channelsService.publishUserMessageForSession({
+        projectId,
+        sessionId: turn.sessionId,
+        content: input.content,
+        triggerIdentifier: buildWebUserMessageIdentifier(turn.sessionId),
+        triggerProvider: 'web',
+        triggerIntegrationId: null,
+        triggerMessageId: null,
+        sourceBinding: null,
+      });
+      return steered;
+    },
     resolveTurnApprovalForUser: async (userId, turnId, input) =>
       this.turnsService.resolveTurnApprovalForUser(userId, turnId, input),
+    updateIntegrationPluginConfigForUser: async (userId, integrationId, pluginConfig) => {
+      await this.channelsService.updateIntegration(userId, integrationId, {
+        pluginConfig,
+      });
+    },
     listModels: async (input) =>
       this.runnerAdapter.listModels({
         backend: input.backend ?? null,
@@ -94,22 +161,32 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
     @Inject(ProjectsService) private readonly projectsService: ProjectsService,
     @Inject(SessionsService) private readonly sessionsService: SessionsService,
     @Inject(WebPlugin) private readonly webPluginPlugin: WebPlugin,
+    @Inject(DiscordPlugin) private readonly discordPlugin: DiscordPlugin,
     @Inject(RUNNER_ADAPTER) private readonly runnerAdapter: RunnerAdapter,
+    @Inject(QueueSignalService) private readonly queueSignalService: QueueSignalService,
   ) {
-    this.plugins = [this.webPluginPlugin];
+    this.plugins = [this.webPluginPlugin, this.discordPlugin];
   }
 
   async onModuleInit(): Promise<void> {
     await Promise.all(this.plugins.map((plugin) => plugin.boot(this.pluginContext)));
+    this.unsubscribeWake = this.queueSignalService.subscribeOutboundWake(() => {
+      this.requestDispatch();
+    });
     this.timer = setInterval(() => {
-      void this.dispatchLoop();
-    }, 1000);
+      this.requestDispatch();
+    }, FALLBACK_DISPATCH_POLL_MS);
+    this.requestDispatch();
   }
 
   async onModuleDestroy(): Promise<void> {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+    if (this.unsubscribeWake) {
+      this.unsubscribeWake();
+      this.unsubscribeWake = null;
     }
     await Promise.all(this.plugins.map((plugin) => plugin.shutdown()));
   }
@@ -126,10 +203,20 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
     return this.projectsService.listForUser(userId);
   }
 
-  async createProjectForUser(userId: string, input: { name: string; repoPath?: string }) {
+  async createProjectForUser(
+    userId: string,
+    input: {
+      name: string;
+      repoPath?: string;
+      backend?: string;
+      backendConfig?: Record<string, unknown>;
+    },
+  ) {
     return this.projectsService.createForUser(userId, {
       name: input.name,
       repoPath: input.repoPath,
+      backend: input.backend,
+      backendConfig: input.backendConfig,
     });
   }
 
@@ -137,11 +224,26 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
     return this.projectsService.getByIdForUser(userId, projectId);
   }
 
-  async updateProjectForUser(userId: string, projectId: string, input: { name?: string; repoPath?: string | null }) {
-    return this.projectsService.updateByIdForUser(userId, projectId, {
-      name: input.name,
-      repoPath: input.repoPath,
-    });
+  async updateProjectForUser(
+    userId: string,
+    projectId: string,
+    input: {
+      name?: string;
+      repoPath?: string | null;
+      backend?: string;
+      backendConfig?: Record<string, unknown>;
+    },
+  ) {
+    return this.projectsService.updateByIdForUser(
+      userId,
+      projectId,
+      compactProjectUpdateInput({
+        name: input.name,
+        repoPath: input.repoPath,
+        backend: input.backend,
+        backendConfig: input.backendConfig,
+      }),
+    );
   }
 
   async deleteProjectForUser(userId: string, projectId: string) {
@@ -192,20 +294,44 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
     return this.turnsService.resolveTurnApprovalForUser(userId, turnId, input);
   }
 
+  private async resolveProjectIdForSession(userId: string, sessionId: string): Promise<string> {
+    const history = await this.sessionsService.getHistoryForSession(userId, sessionId);
+    const root = asRecord(history);
+    const session = asRecord(root?.session);
+    const projectId = normalizeOptionalString(session?.projectId);
+    if (!projectId) {
+      throw new Error(`Failed to resolve project id for session ${sessionId}`);
+    }
+    return projectId;
+  }
+
+  private requestDispatch(): void {
+    if (this.dispatching) {
+      this.dispatchRequested = true;
+      return;
+    }
+    void this.dispatchLoop();
+  }
+
   private async dispatchLoop(): Promise<void> {
     if (this.dispatching) {
       return;
     }
     this.dispatching = true;
     try {
-      const queued = await this.channelsService.pullOutboundForGateway(20);
-      for (const message of queued) {
-        const deliveries = await this.findDeliveriesForMessage(message);
-        if (deliveries.length === 0) {
-          await this.markSentWithoutRecipients(message);
-          continue;
+      while (true) {
+        const queued = await this.channelsService.pullOutboundForGateway(20);
+        if (queued.length === 0) {
+          break;
         }
-        await this.dispatchOne(message, deliveries);
+        for (const message of queued) {
+          const deliveries = await this.findDeliveriesForMessage(message);
+          if (deliveries.length === 0) {
+            await this.markSentWithoutRecipients(message);
+            continue;
+          }
+          await this.dispatchOne(message, deliveries);
+        }
       }
     } catch (error: unknown) {
       if (error instanceof Error) {
@@ -215,6 +341,10 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
       }
     } finally {
       this.dispatching = false;
+      if (this.dispatchRequested) {
+        this.dispatchRequested = false;
+        this.requestDispatch();
+      }
     }
   }
 
@@ -388,4 +518,47 @@ function normalizeOptionalString(value: unknown): string | null {
   }
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function buildWebUserMessageIdentifier(sessionId: string): string {
+  return `web:${sessionId}:${Date.now()}`;
+}
+
+function compactProjectUpdateInput(input: {
+  name?: string;
+  repoPath?: string | null;
+  backend?: string;
+  backendConfig?: Record<string, unknown>;
+}): {
+  name?: string;
+  repoPath?: string | null;
+  backend?: string;
+  backendConfig?: Record<string, unknown>;
+} {
+  const next: {
+    name?: string;
+    repoPath?: string | null;
+    backend?: string;
+    backendConfig?: Record<string, unknown>;
+  } = {};
+  if (Object.prototype.hasOwnProperty.call(input, 'name') && typeof input.name !== 'undefined') {
+    next.name = input.name;
+  }
+  if (Object.prototype.hasOwnProperty.call(input, 'repoPath') && typeof input.repoPath !== 'undefined') {
+    next.repoPath = input.repoPath;
+  }
+  if (Object.prototype.hasOwnProperty.call(input, 'backend') && typeof input.backend !== 'undefined') {
+    next.backend = input.backend;
+  }
+  if (Object.prototype.hasOwnProperty.call(input, 'backendConfig') && typeof input.backendConfig !== 'undefined') {
+    next.backendConfig = input.backendConfig;
+  }
+  return next;
 }

@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RUNNER_ADAPTER, RunnerAdapter, RunnerStreamEvent } from '../runner/runner.types';
 import { SettingsService } from '../settings/settings.service';
 import { CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from './turns.schemas';
+import { QueueSignalService } from '../queue-signal/queue-signal.service';
 
 const ACTIVE_TURN_STATUSES = ['queued', 'running', 'waiting_approval'];
 const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
@@ -61,6 +62,7 @@ export class TurnsService implements OnModuleInit {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(RUNNER_ADAPTER) private readonly runnerAdapter: RunnerAdapter,
     @Inject(SettingsService) private readonly settingsService: SettingsService,
+    @Inject(QueueSignalService) private readonly queueSignalService: QueueSignalService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -77,14 +79,8 @@ export class TurnsService implements OnModuleInit {
       },
       select: {
         id: true,
+        meta: true,
         backendThreadId: true,
-        project: {
-          select: {
-            repoPath: true,
-            backend: true,
-            backendConfig: true,
-          },
-        },
       },
     });
     if (!session) {
@@ -102,14 +98,8 @@ export class TurnsService implements OnModuleInit {
       where: { id: sessionId },
       select: {
         id: true,
+        meta: true,
         backendThreadId: true,
-        project: {
-          select: {
-            repoPath: true,
-            backend: true,
-            backendConfig: true,
-          },
-        },
       },
     });
     if (!session) {
@@ -122,23 +112,17 @@ export class TurnsService implements OnModuleInit {
   private async createTurnWithResolvedSession(
     session: {
       id: string;
+      meta: Prisma.JsonValue | null;
       backendThreadId: string | null;
-      project: {
-        repoPath: string | null;
-        backend: string;
-        backendConfig: Prisma.JsonValue | null;
-      };
     },
     input: InternalCreateTurnInput,
   ) {
     const sessionId = session.id;
 
-    const cwd = session.project.repoPath?.trim() || null;
-    const backend = session.project.backend?.trim() || null;
-    const backendConfig =
-      session.project.backendConfig && typeof session.project.backendConfig === 'object' && !Array.isArray(session.project.backendConfig)
-        ? (session.project.backendConfig as Record<string, unknown>)
-        : null;
+    const runtime = readSessionRuntimeFromMeta(session.meta);
+    const cwd = runtime.cwd;
+    const backend = runtime.backend;
+    const backendConfig = runtime.backendConfig;
 
     const activeTurn = await this.prisma.turn.findFirst({
       where: {
@@ -501,6 +485,27 @@ export class TurnsService implements OnModuleInit {
               payload: normalizedPayload,
             },
           });
+
+          if (turn.triggerIdentifier !== 'web') {
+            await tx.botMessage.create({
+              data: {
+                projectId: turn.session.projectId,
+                sessionId: turn.sessionId,
+                kind: 'approval_request',
+                payloadRaw: {
+                  turnId: turn.id,
+                  approvalId: requestId,
+                  kind,
+                  payload: normalizedPayload,
+                  triggerIdentifier: turn.triggerIdentifier,
+                  triggerProvider: turn.triggerProvider,
+                  triggerIntegrationId: turn.triggerIntegrationId,
+                  triggerMessageId: turn.triggerMessageId,
+                },
+                status: 'queued',
+              },
+            });
+          }
         });
 
         await this.appendEvent(turnId, 'turn.approval.requested', normalizedPayload);
@@ -606,24 +611,22 @@ export class TurnsService implements OnModuleInit {
             },
           });
 
-          if (turn.triggerIdentifier !== 'web') {
-            await tx.botMessage.create({
-              data: {
-                projectId: turn.session.projectId,
-                sessionId: turn.sessionId,
-                kind: 'turn_message',
-                payloadRaw: {
-                  turnId: turn.id,
-                  triggerIdentifier: turn.triggerIdentifier,
-                  triggerProvider: turn.triggerProvider,
-                  triggerIntegrationId: turn.triggerIntegrationId,
-                  triggerMessageId: turn.triggerMessageId,
-                  content: normalizedAssistantContent,
-                },
-                status: 'queued',
+          await tx.botMessage.create({
+            data: {
+              projectId: turn.session.projectId,
+              sessionId: turn.sessionId,
+              kind: 'turn_message',
+              payloadRaw: {
+                turnId: turn.id,
+                triggerIdentifier: turn.triggerIdentifier,
+                triggerProvider: turn.triggerProvider,
+                triggerIntegrationId: turn.triggerIntegrationId,
+                triggerMessageId: turn.triggerMessageId,
+                content: normalizedAssistantContent,
               },
-            });
-          }
+              status: 'queued',
+            },
+          });
         });
 
         await this.appendEvent(turnId, 'turn.completed', this.normalizePayload(payload));
@@ -655,6 +658,25 @@ export class TurnsService implements OnModuleInit {
               startedAt: turn.status === 'queued' ? new Date() : undefined,
             },
           });
+
+          if (assistantContent.length > 0) {
+            await tx.botMessage.create({
+              data: {
+                projectId: turn.session.projectId,
+                sessionId: turn.sessionId,
+                kind: 'turn_message',
+                payloadRaw: {
+                  turnId: turn.id,
+                  triggerIdentifier: turn.triggerIdentifier,
+                  triggerProvider: turn.triggerProvider,
+                  triggerIntegrationId: turn.triggerIntegrationId,
+                  triggerMessageId: turn.triggerMessageId,
+                  content: assistantContent,
+                },
+                status: 'queued',
+              },
+            });
+          }
         });
         await this.appendEvent(turnId, 'turn.cancelled', this.normalizePayload(payload));
         return;
@@ -731,6 +753,7 @@ export class TurnsService implements OnModuleInit {
         status: 'queued',
       },
     });
+    await this.queueSignalService.publishOutboundWake();
   }
 
   private normalizePayload(payload: Record<string, unknown>): Prisma.InputJsonValue {
@@ -965,6 +988,31 @@ function normalizeJsonRecord(value: Prisma.JsonValue | null): Record<string, unk
     return null;
   }
   return value as Record<string, unknown>;
+}
+
+function readSessionRuntimeFromMeta(meta: Prisma.JsonValue | null): {
+  backend: string | null;
+  cwd: string | null;
+  backendConfig: Record<string, unknown> | null;
+} {
+  const root = normalizeJsonRecord(meta);
+  const runtime = normalizeJsonRecord((root?.runtime as Prisma.JsonValue | undefined) ?? null);
+  if (!runtime) {
+    throw new ConflictException({ message: 'Session runtime metadata is missing' });
+  }
+  const backend = typeof runtime.backend === 'string' && runtime.backend.trim().length > 0
+    ? runtime.backend.trim()
+    : null;
+  if (!backend) {
+    throw new ConflictException({ message: 'Session runtime backend is missing' });
+  }
+  const cwd = typeof runtime.cwd === 'string' && runtime.cwd.trim().length > 0 ? runtime.cwd.trim() : null;
+  const backendConfig = normalizeJsonRecord((runtime.backendConfig as Prisma.JsonValue | undefined) ?? null) ?? null;
+  return {
+    backend,
+    cwd,
+    backendConfig,
+  };
 }
 
 function buildRequestedBackendConfig(

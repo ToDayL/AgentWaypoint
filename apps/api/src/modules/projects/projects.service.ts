@@ -150,8 +150,6 @@ export class ProjectsService {
       },
       select: {
         id: true,
-        backend: true,
-        repoPath: true,
       },
     });
 
@@ -184,24 +182,41 @@ export class ProjectsService {
         projectId,
       },
       select: {
+        id: true,
         backendThreadId: true,
+        meta: true,
       },
     });
 
-    const threadIds = [...new Set(sessions.map((item) => item.backendThreadId?.trim()).filter((item): item is string => !!item))];
+    const closable = sessions
+      .map((session) => {
+        const threadId = session.backendThreadId?.trim() || null;
+        if (!threadId) {
+          return null;
+        }
+        const runtime = readRuntimeFromSessionMeta(session.meta);
+        return {
+          sessionId: session.id,
+          threadId,
+          backend: runtime.backend,
+          cwd: runtime.cwd,
+        };
+      })
+      .filter((entry): entry is { sessionId: string; threadId: string; backend: string | null; cwd: string | null } => !!entry);
+
     await Promise.all(
-      threadIds.map(async (threadId) => {
+      closable.map(async (entry) => {
         try {
           await this.runnerAdapter.closeThread({
-            threadId,
-            backend: project.backend?.trim() || null,
-            cwd: project.repoPath?.trim() || null,
+            threadId: entry.threadId,
+            backend: entry.backend,
+            cwd: entry.cwd,
           });
         } catch (error: unknown) {
           if (error instanceof Error) {
-            this.logger.warn(`Failed to close thread ${threadId} during project delete ${projectId}: ${error.message}`);
+            this.logger.warn(`Failed to close thread ${entry.threadId} during project delete ${projectId}: ${error.message}`);
           } else {
-            this.logger.warn(`Failed to close thread ${threadId} during project delete ${projectId}`);
+            this.logger.warn(`Failed to close thread ${entry.threadId} during project delete ${projectId}`);
           }
         }
       }),
@@ -260,4 +275,20 @@ function toWorkspaceFolderName(projectName: string): string {
   }
 
   return 'project';
+}
+
+function readRuntimeFromSessionMeta(meta: Prisma.JsonValue | null): { backend: string | null; cwd: string | null } {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+    return { backend: null, cwd: null };
+  }
+  const root = meta as Record<string, unknown>;
+  const runtimeValue = root.runtime;
+  if (!runtimeValue || typeof runtimeValue !== 'object' || Array.isArray(runtimeValue)) {
+    return { backend: null, cwd: null };
+  }
+  const runtime = runtimeValue as Record<string, unknown>;
+  const backend =
+    typeof runtime.backend === 'string' && runtime.backend.trim().length > 0 ? runtime.backend.trim() : null;
+  const cwd = typeof runtime.cwd === 'string' && runtime.cwd.trim().length > 0 ? runtime.cwd.trim() : null;
+  return { backend, cwd };
 }
