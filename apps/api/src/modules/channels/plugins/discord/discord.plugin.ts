@@ -62,6 +62,7 @@ type DiscordRuntime = {
   config: DiscordPluginConfig;
   stopped: boolean;
   processedMessageIds: Map<string, number>;
+  processingMessageIds: Set<string>;
   approvalMenus: Map<string, DiscordApprovalMenuState>;
   triggerMessageActions: Map<string, 'watching' | 'active' | 'final'>;
   triggerMessageEffects: Map<string, 'watching' | 'active' | 'approval_pending' | 'final_success' | 'final_cancel' | 'final_error'>;
@@ -316,6 +317,7 @@ export class DiscordPlugin implements ChannelPlugin {
       config,
       stopped: false,
       processedMessageIds: new Map<string, number>(),
+      processingMessageIds: new Set<string>(),
       approvalMenus: new Map<string, DiscordApprovalMenuState>(),
       triggerMessageActions: new Map<string, 'watching' | 'active' | 'final'>(),
       triggerMessageEffects: new Map<
@@ -328,12 +330,17 @@ export class DiscordPlugin implements ChannelPlugin {
     };
 
     client.on('messageCreate', async (message) => {
-      this.markMessageProcessed(runtime, message.id);
+      if (!this.tryBeginMessageProcessing(runtime, message.id)) {
+        return;
+      }
       try {
         await this.handleMessage(runtime, message);
+        this.markMessageProcessed(runtime, message.id);
       } catch (error: unknown) {
         const messageText = error instanceof Error ? error.message : 'unknown messageCreate error';
         this.logger.warn(`Discord messageCreate handler failed for integration ${runtime.integrationId}: ${messageText}`);
+      } finally {
+        this.finishMessageProcessing(runtime, message.id);
       }
     });
     client.on('raw', (packet: GatewayDispatchPayload) => {
@@ -342,11 +349,25 @@ export class DiscordPlugin implements ChannelPlugin {
       }
       const data = packet.d as unknown as Record<string, unknown>;
       const messageId = typeof data.id === 'string' ? data.id : '';
-      if (messageId && this.wasMessageProcessed(runtime, messageId)) {
+      if (messageId && this.isMessageHandledOrInFlight(runtime, messageId)) {
         return;
       }
       setTimeout(() => {
-        void this.handleRawMessageCreate(runtime, data);
+        const rawMessageId = typeof data.id === 'string' ? data.id : '';
+        if (!this.tryBeginMessageProcessing(runtime, rawMessageId)) {
+          return;
+        }
+        void this.handleRawMessageCreate(runtime, data)
+          .then(() => {
+            this.markMessageProcessed(runtime, rawMessageId);
+          })
+          .catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : 'unknown raw send error';
+            this.logger.warn(`Discord raw fallback failed for integration ${runtime.integrationId}: ${message}`);
+          })
+          .finally(() => {
+            this.finishMessageProcessing(runtime, rawMessageId);
+          });
       }, RAW_FALLBACK_DELAY_MS);
     });
     client.on('clientReady', () => {
@@ -437,6 +458,7 @@ export class DiscordPlugin implements ChannelPlugin {
     runtime.approvalMenus.clear();
     runtime.triggerMessageActions.clear();
     runtime.triggerMessageEffects.clear();
+    runtime.processingMessageIds.clear();
     runtime.steerTriggerByTurnId.clear();
     runtime.typingByMessageKey.clear();
     for (const interval of runtime.typingIntervals.values()) {
@@ -1351,7 +1373,7 @@ export class DiscordPlugin implements ChannelPlugin {
       return;
     }
 
-    if (!isAllowedByList(message.channelId ?? '', runtime.config.trigger?.allowedChannels)) {
+    if (message.guildId && !isAllowedByList(message.channelId ?? '', runtime.config.trigger?.allowedChannels)) {
       return;
     }
 
@@ -1384,12 +1406,6 @@ export class DiscordPlugin implements ChannelPlugin {
     }
 
     const messageId = typeof payload.id === 'string' ? payload.id : '';
-    if (messageId && this.wasMessageProcessed(runtime, messageId)) {
-      return;
-    }
-    if (messageId) {
-      this.markMessageProcessed(runtime, messageId);
-    }
 
     const channelId = typeof payload.channel_id === 'string' ? payload.channel_id : '';
     if (!channelId) {
@@ -1418,7 +1434,7 @@ export class DiscordPlugin implements ChannelPlugin {
       return;
     }
 
-    if (!isAllowedByList(channelId, runtime.config.trigger?.allowedChannels)) {
+    if (guildId && !isAllowedByList(channelId, runtime.config.trigger?.allowedChannels)) {
       return;
     }
 
@@ -1458,8 +1474,7 @@ export class DiscordPlugin implements ChannelPlugin {
         guildId,
       });
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : 'unknown raw send error';
-      this.logger.warn(`Discord raw fallback failed for integration ${runtime.integrationId}: ${message}`);
+      throw error;
     }
   }
 
@@ -1842,6 +1857,34 @@ export class DiscordPlugin implements ChannelPlugin {
     } catch {
       return false;
     }
+  }
+
+  private isMessageHandledOrInFlight(runtime: DiscordRuntime, messageId: string): boolean {
+    if (!messageId) {
+      return false;
+    }
+    if (runtime.processingMessageIds.has(messageId)) {
+      return true;
+    }
+    return this.wasMessageProcessed(runtime, messageId);
+  }
+
+  private tryBeginMessageProcessing(runtime: DiscordRuntime, messageId: string): boolean {
+    if (!messageId) {
+      return true;
+    }
+    if (this.isMessageHandledOrInFlight(runtime, messageId)) {
+      return false;
+    }
+    runtime.processingMessageIds.add(messageId);
+    return true;
+  }
+
+  private finishMessageProcessing(runtime: DiscordRuntime, messageId: string): void {
+    if (!messageId) {
+      return;
+    }
+    runtime.processingMessageIds.delete(messageId);
   }
 
   private wasMessageProcessed(runtime: DiscordRuntime, messageId: string): boolean {
