@@ -561,17 +561,15 @@ function resolveIntegrationBindingsForSession(
 ): SessionProviderBinding[] {
   const config = integration.pluginConfig;
   const fallback = extractBindingTarget(config);
-  const fromSessionMap = extractBindingTargetForSession(config, sessionId);
-  if (fromSessionMap) {
-    return [
-      {
-        provider: integration.provider,
-        integrationId: integration.id,
-        guid: fromSessionMap.guid,
-        channel: fromSessionMap.channel,
-        thread: fromSessionMap.thread,
-      },
-    ];
+  const fromSessionMap = extractBindingTargetsForSession(config, sessionId);
+  if (fromSessionMap.length > 0) {
+    return fromSessionMap.map((entry) => ({
+      provider: integration.provider,
+      integrationId: integration.id,
+      guid: entry.guid,
+      channel: entry.channel,
+      thread: entry.thread,
+    }));
   }
 
   if (!isIntegrationBoundToSession(config, sessionId)) {
@@ -607,12 +605,12 @@ function extractBindingTarget(config: Prisma.JsonValue | null): { guid: string |
   };
 }
 
-function extractBindingTargetForSession(
+function extractBindingTargetsForSession(
   config: Prisma.JsonValue | null,
   sessionId: string,
-): { guid: string | null; channel: string | null; thread: string | null } | null {
+): Array<{ guid: string | null; channel: string | null; thread: string | null }> {
   if (!config || typeof config !== 'object' || Array.isArray(config)) {
-    return null;
+    return [];
   }
   const raw = config as Record<string, unknown>;
   const sessionBindings =
@@ -620,17 +618,23 @@ function extractBindingTargetForSession(
     asRecord(raw.bindingsBySession) ??
     asRecord(raw.sessionBindingMap);
   if (!sessionBindings) {
-    return null;
+    return [];
   }
-  const entry = asRecord(sessionBindings[sessionId]);
-  if (!entry) {
-    return null;
+  const rawEntry = sessionBindings[sessionId];
+  const entries = Array.isArray(rawEntry) ? rawEntry : [rawEntry];
+  const normalized: Array<{ guid: string | null; channel: string | null; thread: string | null }> = [];
+  for (const rawBinding of entries) {
+    const entry = asRecord(rawBinding);
+    if (!entry) {
+      continue;
+    }
+    normalized.push({
+      guid: asOptionalString(entry.guid ?? entry.groupId ?? entry.chatId),
+      channel: asOptionalString(entry.channel ?? entry.channelId),
+      thread: asOptionalString(entry.thread ?? entry.threadId),
+    });
   }
-  return {
-    guid: asOptionalString(entry.guid ?? entry.groupId ?? entry.chatId),
-    channel: asOptionalString(entry.channel ?? entry.channelId),
-    thread: asOptionalString(entry.thread ?? entry.threadId),
-  };
+  return normalized;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

@@ -10,6 +10,7 @@ import {
   Client,
   GatewayIntentBits,
   Message,
+  MessageType,
   Partials,
   StringSelectMenuBuilder,
   type StringSelectMenuInteraction,
@@ -38,7 +39,7 @@ type DiscordPluginConfig = {
     maxInboundLength?: number;
   };
   channelBindings?: Record<string, DiscordChannelBinding>;
-  sessionBindings?: Record<string, DiscordSessionBinding>;
+  sessionBindings?: Record<string, DiscordSessionBinding | DiscordSessionBinding[]>;
   sessionIds?: string[];
 };
 
@@ -1357,6 +1358,10 @@ export class DiscordPlugin implements ChannelPlugin {
       return;
     }
 
+    if (!isSupportedDiscordInboundMessageType(message.type)) {
+      return;
+    }
+
     if (message.author?.bot && (runtime.config.message?.ignoreBotMessages ?? true)) {
       return;
     }
@@ -1393,6 +1398,7 @@ export class DiscordPlugin implements ChannelPlugin {
     await this.enqueueInboundTurn(runtime, {
       content: normalizeInboundContent(inputText, runtime.config.message?.maxInboundLength),
       providerMessageId: message.id,
+      actionChannelId: message.channelId,
       bindingChannelId,
       bindingThreadId,
       channelName,
@@ -1413,10 +1419,15 @@ export class DiscordPlugin implements ChannelPlugin {
     }
 
     const guildId = typeof payload.guild_id === 'string' ? payload.guild_id : null;
+    const messageType = typeof payload.type === 'number' ? payload.type : MessageType.Default;
     const content = typeof payload.content === 'string' ? payload.content : '';
     const author = (payload.author ?? null) as Record<string, unknown> | null;
     const authorId = author && typeof author.id === 'string' ? author.id : '';
     const authorIsBot = author && typeof author.bot === 'boolean' ? author.bot : false;
+
+    if (!isSupportedDiscordInboundMessageType(messageType)) {
+      return;
+    }
 
     if (authorIsBot && (runtime.config.message?.ignoreBotMessages ?? true)) {
       return;
@@ -1468,6 +1479,7 @@ export class DiscordPlugin implements ChannelPlugin {
       await this.enqueueInboundTurn(runtime, {
         content: normalizeInboundContent(inputText, runtime.config.message?.maxInboundLength),
         providerMessageId: messageId || null,
+        actionChannelId: channelId,
         bindingChannelId,
         bindingThreadId,
         channelName,
@@ -1544,11 +1556,11 @@ export class DiscordPlugin implements ChannelPlugin {
         await reaction.users.remove(botUserId).catch(() => undefined);
       }
 
-      runtime.triggerMessageActions.set(key, resolveActionTrackingState(effect.action));
-      runtime.triggerMessageEffects.set(key, effect.action);
     } catch {
       // ignore reaction failures; chat flow should continue.
     }
+    runtime.triggerMessageActions.set(key, resolveActionTrackingState(effect.action));
+    runtime.triggerMessageEffects.set(key, effect.action);
     await this.syncTypingIndicatorForAction(runtime, key, channelId, effect.action);
   }
 
@@ -1663,6 +1675,7 @@ export class DiscordPlugin implements ChannelPlugin {
     input: {
       content: string;
       providerMessageId: string | null;
+      actionChannelId: string;
       bindingChannelId: string;
       bindingThreadId: string | null;
       channelName: string;
@@ -1680,7 +1693,7 @@ export class DiscordPlugin implements ChannelPlugin {
     const activeTurn = await this.readSteerableTurnForSession(runtime.ownerUserId, resolved.sessionId);
     if (activeTurn) {
       if (input.providerMessageId) {
-        await this.applyTriggerMessageAction(runtime, input.bindingChannelId, input.providerMessageId, {
+        await this.applyTriggerMessageAction(runtime, input.actionChannelId, input.providerMessageId, {
           action: 'watching',
           onlyIfTracked: false,
           skipOutboundText: true,
@@ -1692,14 +1705,14 @@ export class DiscordPlugin implements ChannelPlugin {
         });
         if (input.providerMessageId) {
           runtime.steerTriggerByTurnId.set(activeTurn.turnId, {
-            channelId: input.bindingChannelId,
+            channelId: input.actionChannelId,
             messageId: input.providerMessageId,
           });
         }
         return;
       } catch {
         if (input.providerMessageId) {
-          await this.applyTriggerMessageAction(runtime, input.bindingChannelId, input.providerMessageId, {
+          await this.applyTriggerMessageAction(runtime, input.actionChannelId, input.providerMessageId, {
             action: 'final_error',
             onlyIfTracked: true,
             skipOutboundText: true,
@@ -1710,7 +1723,7 @@ export class DiscordPlugin implements ChannelPlugin {
     }
 
     if (input.providerMessageId) {
-      void this.applyTriggerMessageAction(runtime, input.bindingChannelId, input.providerMessageId, {
+      void this.applyTriggerMessageAction(runtime, input.actionChannelId, input.providerMessageId, {
         action: 'watching',
         onlyIfTracked: false,
         skipOutboundText: false,
@@ -2463,13 +2476,16 @@ function findSessionIdByTarget(config: DiscordPluginConfig, channelId: string, t
   const bindings = asRecord(config.sessionBindings) ?? {};
   const expectedThread = normalizeOptionalString(threadId);
   for (const [sessionId, rawBinding] of Object.entries(bindings)) {
-    const binding = asRecord(rawBinding);
-    if (!binding) {
-      continue;
-    }
-    const bindingChannel = normalizeOptionalString(binding.channel);
-    const bindingThread = normalizeOptionalString(binding.thread);
-    if (bindingChannel === channelId && bindingThread === expectedThread) {
+    const entries = Array.isArray(rawBinding) ? rawBinding : [rawBinding];
+    const matched = entries
+      .map((entry) => asRecord(entry))
+      .filter((entry): entry is Record<string, unknown> => entry !== null)
+      .some((binding) => {
+        const bindingChannel = normalizeOptionalString(binding.channel);
+        const bindingThread = normalizeOptionalString(binding.thread);
+        return bindingChannel === channelId && bindingThread === expectedThread;
+      });
+    if (matched) {
       return sessionId;
     }
   }
@@ -2496,14 +2512,12 @@ function upsertDiscordBindings(
       guild: input.guildId,
     } satisfies DiscordChannelBinding,
   };
-  const nextSessionBindings = {
-    ...currentSessionBindings,
-    [input.sessionId]: {
-      channel: input.channelId,
-      thread: input.threadId,
-      guid: input.guildId,
-    } satisfies DiscordSessionBinding,
-  };
+  const nextSessionBindings = rebindTargetInSessionBindings(currentSessionBindings, {
+    sessionId: input.sessionId,
+    channelId: input.channelId,
+    threadId: input.threadId,
+    guildId: input.guildId,
+  });
   const sessionIds = new Set(normalizeStringList(config.sessionIds));
   sessionIds.add(input.sessionId);
   return {
@@ -2535,20 +2549,12 @@ function bindSessionToTarget(
   }
 
   const currentSessionBindings = readSessionBindings(config.sessionBindings);
-  const nextSessionBindings: Record<string, DiscordSessionBinding> = {};
-  const expectedThread = normalizeOptionalString(input.threadId);
-  for (const [existingSessionId, binding] of Object.entries(currentSessionBindings)) {
-    const sameTarget = binding.channel === input.channelId && normalizeOptionalString(binding.thread) === expectedThread;
-    if (sameTarget) {
-      continue;
-    }
-    nextSessionBindings[existingSessionId] = binding;
-  }
-  nextSessionBindings[input.sessionId] = {
-    channel: input.channelId,
-    thread: input.threadId,
-    guid: input.guildId,
-  };
+  const nextSessionBindings = rebindTargetInSessionBindings(currentSessionBindings, {
+    sessionId: input.sessionId,
+    channelId: input.channelId,
+    threadId: input.threadId,
+    guildId: input.guildId,
+  });
 
   return {
     ...config,
@@ -2574,13 +2580,13 @@ function applyChannelProjectBinding(
   };
 
   const currentSessionBindings = readSessionBindings(config.sessionBindings);
-  const nextSessionBindings: Record<string, DiscordSessionBinding> = {};
-  for (const [sessionId, binding] of Object.entries(currentSessionBindings)) {
-    const isChannelChatBinding = binding.channel === input.channelId && !binding.thread;
-    if (isChannelChatBinding) {
+  const nextSessionBindings: Record<string, DiscordSessionBinding[]> = {};
+  for (const [sessionId, bindings] of Object.entries(currentSessionBindings)) {
+    const filtered = bindings.filter((binding) => !(binding.channel === input.channelId && !binding.thread));
+    if (filtered.length === 0) {
       continue;
     }
-    nextSessionBindings[sessionId] = binding;
+    nextSessionBindings[sessionId] = filtered;
   }
 
   return {
@@ -2589,6 +2595,42 @@ function applyChannelProjectBinding(
     sessionBindings: nextSessionBindings,
     sessionIds: Object.keys(nextSessionBindings),
   };
+}
+
+function rebindTargetInSessionBindings(
+  currentSessionBindings: Record<string, DiscordSessionBinding[]>,
+  input: {
+    sessionId: string;
+    channelId: string;
+    threadId: string | null;
+    guildId: string | null;
+  },
+): Record<string, DiscordSessionBinding[]> {
+  const nextSessionBindings: Record<string, DiscordSessionBinding[]> = {};
+  const expectedThread = normalizeOptionalString(input.threadId);
+  for (const [existingSessionId, bindings] of Object.entries(currentSessionBindings)) {
+    const filtered = bindings.filter(
+      (binding) => !(binding.channel === input.channelId && normalizeOptionalString(binding.thread) === expectedThread),
+    );
+    if (filtered.length === 0) {
+      continue;
+    }
+    nextSessionBindings[existingSessionId] = filtered;
+  }
+
+  const targets = nextSessionBindings[input.sessionId] ?? [];
+  const alreadyBound = targets.some(
+    (binding) => binding.channel === input.channelId && normalizeOptionalString(binding.thread) === expectedThread,
+  );
+  if (!alreadyBound) {
+    targets.push({
+      channel: input.channelId,
+      thread: input.threadId,
+      guid: input.guildId,
+    });
+  }
+  nextSessionBindings[input.sessionId] = targets;
+  return nextSessionBindings;
 }
 
 function buildProjectUpdateInput(
@@ -2734,28 +2776,45 @@ function readChannelBindings(value: unknown): Record<string, DiscordChannelBindi
   return normalized;
 }
 
-function readSessionBindings(value: unknown): Record<string, DiscordSessionBinding> {
+function readSessionBindings(value: unknown): Record<string, DiscordSessionBinding[]> {
   const record = asRecord(value);
   if (!record) {
     return {};
   }
-  const normalized: Record<string, DiscordSessionBinding> = {};
+  const normalized: Record<string, DiscordSessionBinding[]> = {};
   for (const [key, raw] of Object.entries(record)) {
-    const entry = asRecord(raw);
-    if (!entry) {
+    if (Array.isArray(raw)) {
+      const parsed = raw
+        .map((item) => readSingleSessionBinding(item))
+        .filter((item): item is DiscordSessionBinding => item !== null);
+      if (parsed.length > 0) {
+        normalized[key] = parsed;
+      }
       continue;
     }
-    const channel = normalizeOptionalString(entry.channel);
-    if (!channel) {
+    const single = readSingleSessionBinding(raw);
+    if (!single) {
       continue;
     }
-    normalized[key] = {
-      channel,
-      thread: normalizeOptionalString(entry.thread),
-      guid: normalizeOptionalString(entry.guid),
-    };
+    normalized[key] = [single];
   }
   return normalized;
+}
+
+function readSingleSessionBinding(raw: unknown): DiscordSessionBinding | null {
+  const entry = asRecord(raw);
+  if (!entry) {
+    return null;
+  }
+  const channel = normalizeOptionalString(entry.channel);
+  if (!channel) {
+    return null;
+  }
+  return {
+    channel,
+    thread: normalizeOptionalString(entry.thread),
+    guid: normalizeOptionalString(entry.guid),
+  };
 }
 
 function buildDiscordProjectName(channelName: string, channelId: string): string {
@@ -3116,16 +3175,17 @@ function shouldSkipUserMessageForSourceBinding(message: BotMessage, context: Plu
     return false;
   }
 
-  const sourceGuid = normalizeOptionalString(sourceBinding.guid);
-  const bindingGuid = normalizeOptionalString(context.bindingGuid);
-  if (sourceGuid && bindingGuid && sourceGuid === bindingGuid) {
-    return true;
-  }
-
   const sourceChannel = normalizeOptionalString(sourceBinding.channel);
   const sourceThread = normalizeOptionalString(sourceBinding.thread);
   const bindingChannel = normalizeOptionalString(context.bindingChannel);
   const bindingThread = normalizeOptionalString(context.bindingThread);
+
+  const sourceGuid = normalizeOptionalString(sourceBinding.guid);
+  const bindingGuid = normalizeOptionalString(context.bindingGuid);
+  if (sourceGuid && bindingGuid && sourceGuid === bindingGuid && !sourceChannel && !bindingChannel) {
+    return true;
+  }
+
   if (sourceChannel && bindingChannel && sourceChannel === bindingChannel && sourceThread === bindingThread) {
     return true;
   }
@@ -3396,6 +3456,10 @@ function normalizeOptionalString(value: unknown): string | null {
   }
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : null;
+}
+
+function isSupportedDiscordInboundMessageType(type: MessageType | number): boolean {
+  return type === MessageType.Default || type === MessageType.Reply;
 }
 
 function redactProxyUrl(raw: string): string {
