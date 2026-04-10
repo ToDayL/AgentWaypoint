@@ -75,7 +75,19 @@ export class FilesystemBackend {
     limit = 200,
     includeHidden = false,
   ): Promise<Array<{ name: string; path: string; isDirectory: boolean }>> {
-    const absolutePath = await this.assertExistingWorkspaceDirectory(inputPath.trim());
+    const absolutePath = path.resolve(expandHomeToken(inputPath.trim()));
+    if (!this.isPathPotentiallyAllowed(absolutePath)) {
+      throw new Error(`Project workspace is outside allowed roots: ${absolutePath}`);
+    }
+    let rootInfo;
+    try {
+      rootInfo = await stat(absolutePath);
+    } catch {
+      throw new Error(`Project workspace does not exist: ${absolutePath}`);
+    }
+    if (!rootInfo.isDirectory()) {
+      throw new Error(`Project workspace is not a directory: ${absolutePath}`);
+    }
     const sanitizedLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 500) : 200;
 
     const entries = await readdir(absolutePath, { withFileTypes: true, encoding: 'utf8' });
@@ -101,6 +113,7 @@ export class FilesystemBackend {
     );
 
     return resolvedEntries
+      .filter((entry) => this.isPathPotentiallyAllowed(entry.path))
       .sort((a, b) => {
         if (a.isDirectory !== b.isDirectory) {
           return a.isDirectory ? -1 : 1;
@@ -232,6 +245,12 @@ export class FilesystemBackend {
       return true;
     }
 
+    // Allow scanning filesystem roots (e.g. "/" on POSIX) so prefixes like "/h"
+    // can discover allowed descendants such as "/home/...".
+    if (path.dirname(absolutePath) === absolutePath) {
+      return true;
+    }
+
     return allowedRoots.some(
       (root) =>
         absolutePath === root ||
@@ -256,7 +275,7 @@ export class FilesystemBackend {
     }
     return rootsConfig
       .split(',')
-      .map((entry) => path.resolve(entry.trim()))
+      .map((entry) => path.resolve(expandHomeToken(entry.trim())))
       .filter((entry) => entry.length > 0);
   }
 }

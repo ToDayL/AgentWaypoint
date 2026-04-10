@@ -683,16 +683,15 @@ export class DiscordPlugin implements ChannelPlugin {
       await interaction.editReply(`Unable to resolve session metadata for \`${sessionId}\`.`);
       return;
     }
-    const workspace = await this.resolveSessionWorkspaceForFs(runtime, sessionRecord);
-    if (!workspace) {
-      await interaction.editReply(`Session \`${sessionId}\` has no workspace configured.`);
-      return;
-    }
-
     const requestedPath = interaction.options.getString('path', true).trim();
-    const resolvedPath = resolveFsPathWithinWorkspace(workspace, requestedPath);
+    const workspace = await this.resolveSessionWorkspaceForFs(runtime, sessionRecord);
+    const resolvedPath = resolveFsPathForGet(workspace, requestedPath);
     if (!resolvedPath) {
-      await interaction.editReply('Path must be inside the session workspace.');
+      await interaction.editReply(
+        workspace
+          ? 'Invalid path. Use a workspace-relative path or an absolute path starting with `/`.'
+          : 'Invalid path. Use an absolute path starting with `/`.',
+      );
       return;
     }
 
@@ -1395,13 +1394,12 @@ export class DiscordPlugin implements ChannelPlugin {
       await interaction.respond([]);
       return;
     }
+    const prefix = String(focused.value ?? '');
     const workspace = await this.resolveSessionWorkspaceForFs(runtime, sessionRecord);
-    if (!workspace) {
+    if (!workspace && !isExplicitAbsolutePathInput(prefix)) {
       await interaction.respond([]);
       return;
     }
-
-    const prefix = String(focused.value ?? '');
     const suggestions = await this.suggestFsPathsForWorkspace(workspace, prefix);
     await interaction.respond(
       suggestions
@@ -1414,41 +1412,64 @@ export class DiscordPlugin implements ChannelPlugin {
     );
   }
 
-  private async suggestFsPathsForWorkspace(workspace: string, prefixRaw: string): Promise<string[]> {
-    const workspaceAbs = path.resolve(workspace.trim());
-    if (!workspaceAbs) {
-      return [];
-    }
+  private async suggestFsPathsForWorkspace(workspace: string | null, prefixRaw: string): Promise<string[]> {
+    const workspaceAbs = workspace ? path.resolve(workspace.trim()) : null;
     const prefix = prefixRaw.trim();
+    const isAbsolutePrefix = isExplicitAbsolutePathInput(prefix);
     const hasTrailingSeparator = /[\\/]$/.test(prefixRaw);
 
-    let scanRootCandidate = workspaceAbs;
+    let scanRootCandidate: string;
     let namePrefix = '';
-    if (prefix.length > 0) {
-      const absoluteInput = path.isAbsolute(prefix) ? path.resolve(prefix) : path.resolve(workspaceAbs, prefix);
-      if (hasTrailingSeparator) {
+    let absoluteInputCandidate: string | null = null;
+    let candidateDisplayPath: string | null = null;
+    if (isAbsolutePrefix || !workspaceAbs) {
+      const absoluteInput = path.resolve(expandHomeToken(prefix || '/'));
+      absoluteInputCandidate = absoluteInput;
+      candidateDisplayPath = absoluteInput.split(path.sep).join('/');
+      if (prefix.length === 0 || hasTrailingSeparator) {
         scanRootCandidate = absoluteInput;
       } else {
         scanRootCandidate = path.dirname(absoluteInput);
         namePrefix = path.basename(absoluteInput).toLowerCase();
       }
-    }
-
-    const safeScanRoot = resolveFsPathWithinWorkspace(workspaceAbs, scanRootCandidate);
-    if (!safeScanRoot) {
-      return [];
+    } else {
+      scanRootCandidate = workspaceAbs;
+      if (prefix.length > 0) {
+        const absoluteInput = path.resolve(workspaceAbs, prefix);
+        absoluteInputCandidate = absoluteInput;
+        const candidateRelative = path.relative(workspaceAbs, absoluteInput).split(path.sep).join('/');
+        candidateDisplayPath = candidateRelative && !candidateRelative.startsWith('..') ? candidateRelative : null;
+        if (hasTrailingSeparator) {
+          scanRootCandidate = absoluteInput;
+        } else {
+          scanRootCandidate = path.dirname(absoluteInput);
+          namePrefix = path.basename(absoluteInput).toLowerCase();
+        }
+      }
+      const safeScanRoot = resolveFsPathWithinWorkspace(workspaceAbs, scanRootCandidate);
+      if (!safeScanRoot) {
+        return [];
+      }
+      scanRootCandidate = safeScanRoot;
     }
     const entries = await this.requireContext()
       .listWorkspaceTree({
-        path: safeScanRoot,
+        path: scanRootCandidate,
         limit: 200,
-        includeHidden: false,
+        includeHidden: true,
       })
       .catch(() => [] as Array<{ name: string; path: string; isDirectory: boolean }>);
 
-    return entries
+    const suggestions = entries
       .filter((entry) => entry.name.toLowerCase().startsWith(namePrefix))
       .map((entry) => {
+        if (isAbsolutePrefix || !workspaceAbs) {
+          const absolute = path.resolve(entry.path).split(path.sep).join('/');
+          if (!absolute.startsWith('/')) {
+            return null;
+          }
+          return entry.isDirectory ? `${absolute}/` : absolute;
+        }
         const relative = path.relative(workspaceAbs, entry.path).split(path.sep).join('/');
         if (!relative || relative.startsWith('..')) {
           return null;
@@ -1457,6 +1478,45 @@ export class DiscordPlugin implements ChannelPlugin {
       })
       .filter((entry): entry is string => !!entry)
       .slice(0, 25);
+
+    if (hasTrailingSeparator || !absoluteInputCandidate || !candidateDisplayPath) {
+      return suggestions;
+    }
+
+    const candidateDirectory = candidateDisplayPath.endsWith('/') ? candidateDisplayPath : `${candidateDisplayPath}/`;
+    if (!suggestions.includes(candidateDirectory)) {
+      return suggestions;
+    }
+
+    const childEntries = await this.requireContext()
+      .listWorkspaceTree({
+        path: absoluteInputCandidate,
+        limit: 200,
+        includeHidden: true,
+      })
+      .catch(() => [] as Array<{ name: string; path: string; isDirectory: boolean }>);
+    const childSuggestions = childEntries
+      .map((entry) => {
+        if (isAbsolutePrefix || !workspaceAbs) {
+          const absolute = path.resolve(entry.path).split(path.sep).join('/');
+          if (!absolute.startsWith('/')) {
+            return null;
+          }
+          return entry.isDirectory ? `${absolute}/` : absolute;
+        }
+        const relative = path.relative(workspaceAbs, entry.path).split(path.sep).join('/');
+        if (!relative || relative.startsWith('..')) {
+          return null;
+        }
+        return entry.isDirectory ? `${relative}/` : relative;
+      })
+      .filter((entry): entry is string => !!entry);
+
+    const merged = new Set<string>(suggestions);
+    for (const item of childSuggestions) {
+      merged.add(item);
+    }
+    return [...merged].slice(0, 25);
   }
 
   private async resolveSessionByRef(
@@ -3806,6 +3866,54 @@ function resolveFsPathWithinWorkspace(workspace: string, inputPath: string): str
     return null;
   }
   return absolutePath;
+}
+
+function resolveFsPathForGet(workspace: string | null, inputPath: string): string | null {
+  const normalizedInput = inputPath.trim();
+  if (!normalizedInput) {
+    return null;
+  }
+  if (isExplicitAbsolutePathInput(normalizedInput)) {
+    return path.resolve(expandHomeToken(normalizedInput));
+  }
+  if (!workspace) {
+    return null;
+  }
+  return resolveFsPathWithinWorkspace(workspace, normalizedInput);
+}
+
+function isExplicitAbsolutePathInput(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+  return (
+    path.isAbsolute(trimmed) ||
+    trimmed === '~' ||
+    trimmed.startsWith('~/') ||
+    trimmed.startsWith('~\\') ||
+    trimmed === '$HOME' ||
+    trimmed.startsWith('$HOME/') ||
+    trimmed.startsWith('$HOME\\')
+  );
+}
+
+function expandHomeToken(inputPath: string): string {
+  const trimmed = inputPath.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+  const homePath = process.env.HOME?.trim();
+  if (!homePath) {
+    return trimmed;
+  }
+  if (trimmed === '~' || trimmed.startsWith('~/') || trimmed.startsWith('~\\')) {
+    return path.join(homePath, trimmed.slice(1));
+  }
+  if (trimmed === '$HOME' || trimmed.startsWith('$HOME/') || trimmed.startsWith('$HOME\\')) {
+    return path.join(homePath, trimmed.slice('$HOME'.length));
+  }
+  return trimmed;
 }
 
 function sanitizeDiscordFileName(input: string): string {
