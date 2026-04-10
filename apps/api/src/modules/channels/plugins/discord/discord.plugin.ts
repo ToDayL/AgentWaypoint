@@ -18,6 +18,7 @@ import {
 import type { GatewayDispatchPayload } from 'discord.js';
 import http from 'node:http';
 import https from 'node:https';
+import path from 'node:path';
 import { HttpProxyAgent } from 'http-proxy-agent';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { Dispatcher, ProxyAgent } from 'undici';
@@ -113,6 +114,7 @@ const DISCORD_MESSAGE_MAX_LENGTH = 2_000;
 const DISCORD_PROJECT_COMMAND = 'project';
 const DISCORD_SESSION_COMMAND = 'session';
 const DISCORD_CANCEL_COMMAND = 'cancel';
+const DISCORD_FS_COMMAND = 'fs';
 const EXECUTION_MODE_CHOICES = ['read-only', 'safe-write', 'yolo'] as const;
 const AUTOCOMPLETE_MODEL_TIMEOUT_MS = 1_200;
 const AUTOCOMPLETE_MODEL_CACHE_TTL_MS = 60_000;
@@ -410,6 +412,10 @@ export class DiscordPlugin implements ChannelPlugin {
           await this.handleCancelCommand(runtime, interaction);
           return;
         }
+        if (interaction.commandName === DISCORD_FS_COMMAND) {
+          await this.handleFsCommand(runtime, interaction);
+          return;
+        }
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'unknown interaction error';
         this.logger.warn(`Discord interaction failed for integration ${runtime.integrationId}: ${message}`);
@@ -645,6 +651,80 @@ export class DiscordPlugin implements ChannelPlugin {
     }
     await this.requireContext().cancelTurnForUser(runtime.ownerUserId, active.turnId);
     await interaction.editReply(`Cancel requested for turn \`${active.turnId}\`.`);
+  }
+
+  private async handleFsCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    const subcommand = interaction.options.getSubcommand(true);
+    if (subcommand === 'get') {
+      await this.handleFsGetCommand(runtime, interaction);
+      return;
+    }
+    await safeReply(interaction, `Unsupported subcommand: ${subcommand}`);
+  }
+
+  private async handleFsGetCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply();
+    const target = resolveBindingTargetFromInteraction(interaction);
+    if (!target.bindingChannelId) {
+      await interaction.editReply('Unable to resolve channel binding target.');
+      return;
+    }
+
+    const sessionId = findSessionIdByTarget(runtime.config, target.bindingChannelId, target.bindingThreadId);
+    if (!sessionId) {
+      await interaction.editReply('No bound session found for this target.');
+      return;
+    }
+
+    const sessionHistory = await this.requireContext().getSessionHistoryForUser(runtime.ownerUserId, sessionId);
+    const historyRecord = asRecord(sessionHistory) ?? {};
+    const sessionRecord = asRecord(historyRecord.session);
+    if (!sessionRecord) {
+      await interaction.editReply(`Unable to resolve session metadata for \`${sessionId}\`.`);
+      return;
+    }
+    const workspace = await this.resolveSessionWorkspaceForFs(runtime, sessionRecord);
+    if (!workspace) {
+      await interaction.editReply(`Session \`${sessionId}\` has no workspace configured.`);
+      return;
+    }
+
+    const requestedPath = interaction.options.getString('path', true).trim();
+    const resolvedPath = resolveFsPathWithinWorkspace(workspace, requestedPath);
+    if (!resolvedPath) {
+      await interaction.editReply('Path must be inside the session workspace.');
+      return;
+    }
+
+    const file = await this.requireContext().readWorkspaceFileContent({ path: resolvedPath });
+    const fileName = sanitizeDiscordFileName(path.basename(file.path));
+    await interaction.editReply({
+      content: `File: \`${file.path}\``,
+      files: [
+        {
+          attachment: file.content,
+          name: fileName,
+        },
+      ],
+    });
+  }
+
+  private async resolveSessionWorkspaceForFs(
+    runtime: DiscordRuntime,
+    sessionRecord: Record<string, unknown>,
+  ): Promise<string | null> {
+    const sessionRuntime = readSessionRuntimeMetaForDisplay(sessionRecord.meta);
+    const runtimeWorkspace = normalizeOptionalString(sessionRuntime.workspace);
+    if (runtimeWorkspace && runtimeWorkspace !== '(auto)') {
+      return runtimeWorkspace;
+    }
+
+    const projectId = normalizeOptionalString(sessionRecord.projectId);
+    if (!projectId) {
+      return null;
+    }
+    const project = asRecord(await this.requireContext().getProjectForUser(runtime.ownerUserId, projectId));
+    return normalizeOptionalString(project?.repoPath);
   }
 
   private async handleProjectListCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
@@ -1077,6 +1157,10 @@ export class DiscordPlugin implements ChannelPlugin {
       await this.handleSessionAutocomplete(runtime, interaction);
       return;
     }
+    if (interaction.commandName === DISCORD_FS_COMMAND) {
+      await this.handleFsAutocomplete(runtime, interaction);
+      return;
+    }
     await interaction.respond([]);
   }
 
@@ -1276,6 +1360,103 @@ export class DiscordPlugin implements ChannelPlugin {
     }
 
     await interaction.respond([]);
+  }
+
+  private async handleFsAutocomplete(runtime: DiscordRuntime, interaction: AutocompleteInteraction): Promise<void> {
+    if (interaction.commandName !== DISCORD_FS_COMMAND) {
+      await interaction.respond([]);
+      return;
+    }
+    const subcommand = interaction.options.getSubcommand(false);
+    if (subcommand !== 'get') {
+      await interaction.respond([]);
+      return;
+    }
+    const focused = interaction.options.getFocused(true);
+    if (focused.name !== 'path') {
+      await interaction.respond([]);
+      return;
+    }
+    const target = resolveBindingTargetFromAutocompleteInteraction(interaction);
+    if (!target.bindingChannelId) {
+      await interaction.respond([]);
+      return;
+    }
+    const sessionId = findSessionIdByTarget(runtime.config, target.bindingChannelId, target.bindingThreadId);
+    if (!sessionId) {
+      await interaction.respond([]);
+      return;
+    }
+
+    const sessionHistory = await this.requireContext().getSessionHistoryForUser(runtime.ownerUserId, sessionId);
+    const historyRecord = asRecord(sessionHistory) ?? {};
+    const sessionRecord = asRecord(historyRecord.session);
+    if (!sessionRecord) {
+      await interaction.respond([]);
+      return;
+    }
+    const workspace = await this.resolveSessionWorkspaceForFs(runtime, sessionRecord);
+    if (!workspace) {
+      await interaction.respond([]);
+      return;
+    }
+
+    const prefix = String(focused.value ?? '');
+    const suggestions = await this.suggestFsPathsForWorkspace(workspace, prefix);
+    await interaction.respond(
+      suggestions
+        .filter((item) => item.length > 0 && item.length <= 100)
+        .slice(0, 25)
+        .map((item) => ({
+          name: item,
+          value: item,
+        })),
+    );
+  }
+
+  private async suggestFsPathsForWorkspace(workspace: string, prefixRaw: string): Promise<string[]> {
+    const workspaceAbs = path.resolve(workspace.trim());
+    if (!workspaceAbs) {
+      return [];
+    }
+    const prefix = prefixRaw.trim();
+    const hasTrailingSeparator = /[\\/]$/.test(prefixRaw);
+
+    let scanRootCandidate = workspaceAbs;
+    let namePrefix = '';
+    if (prefix.length > 0) {
+      const absoluteInput = path.isAbsolute(prefix) ? path.resolve(prefix) : path.resolve(workspaceAbs, prefix);
+      if (hasTrailingSeparator) {
+        scanRootCandidate = absoluteInput;
+      } else {
+        scanRootCandidate = path.dirname(absoluteInput);
+        namePrefix = path.basename(absoluteInput).toLowerCase();
+      }
+    }
+
+    const safeScanRoot = resolveFsPathWithinWorkspace(workspaceAbs, scanRootCandidate);
+    if (!safeScanRoot) {
+      return [];
+    }
+    const entries = await this.requireContext()
+      .listWorkspaceTree({
+        path: safeScanRoot,
+        limit: 200,
+        includeHidden: false,
+      })
+      .catch(() => [] as Array<{ name: string; path: string; isDirectory: boolean }>);
+
+    return entries
+      .filter((entry) => entry.name.toLowerCase().startsWith(namePrefix))
+      .map((entry) => {
+        const relative = path.relative(workspaceAbs, entry.path).split(path.sep).join('/');
+        if (!relative || relative.startsWith('..')) {
+          return null;
+        }
+        return entry.isDirectory ? `${relative}/` : relative;
+      })
+      .filter((entry): entry is string => !!entry)
+      .slice(0, 25);
   }
 
   private async resolveSessionByRef(
@@ -2126,11 +2307,35 @@ function resolveBindingTargetFromInteraction(interaction: ChatInputCommandIntera
   };
 }
 
+function resolveBindingTargetFromAutocompleteInteraction(interaction: AutocompleteInteraction): {
+  bindingChannelId: string;
+  bindingThreadId: string | null;
+} {
+  const fallbackChannelId = normalizeOptionalString((interaction as unknown as Record<string, unknown>).channelId) ?? '';
+  const channel = interaction.channel;
+  if (!channel) {
+    return { bindingChannelId: fallbackChannelId, bindingThreadId: null };
+  }
+  const channelRecord = channel as unknown as Record<string, unknown>;
+  const channelId = normalizeOptionalString(channelRecord.id) ?? '';
+  const parentId = normalizeOptionalString(channelRecord.parentId);
+  const type = channelRecord.type;
+  const isThread =
+    type === ChannelType.PublicThread ||
+    type === ChannelType.PrivateThread ||
+    type === ChannelType.AnnouncementThread;
+  return {
+    bindingChannelId: isThread ? (parentId ?? channelId) : channelId,
+    bindingThreadId: isThread ? channelId : null,
+  };
+}
+
 function buildDiscordCommandDefinitions(): ApplicationCommandDataResolvable[] {
   return [
     ...buildDiscordProjectCommandDefinitions(),
     ...buildDiscordSessionCommandDefinitions(),
     ...buildDiscordCancelCommandDefinitions(),
+    ...buildDiscordFsCommandDefinitions(),
   ];
 }
 
@@ -2396,6 +2601,31 @@ function buildDiscordCancelCommandDefinitions(): ApplicationCommandDataResolvabl
     {
       name: DISCORD_CANCEL_COMMAND,
       description: 'Cancel the active turn for current bound session',
+    },
+  ];
+}
+
+function buildDiscordFsCommandDefinitions(): ApplicationCommandDataResolvable[] {
+  return [
+    {
+      name: DISCORD_FS_COMMAND,
+      description: 'Workspace file operations',
+      options: [
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'get',
+          description: 'Send a file from current session workspace',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'path',
+              description: 'File path relative to session workspace',
+              required: true,
+              autocomplete: true,
+            },
+          ],
+        },
+      ],
     },
   ];
 }
@@ -3559,6 +3789,32 @@ function normalizeOptionalString(value: unknown): string | null {
   }
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : null;
+}
+
+function resolveFsPathWithinWorkspace(workspace: string, inputPath: string): string | null {
+  const normalizedWorkspace = workspace.trim();
+  const normalizedInput = inputPath.trim();
+  if (!normalizedWorkspace || !normalizedInput) {
+    return null;
+  }
+  const absoluteWorkspace = path.resolve(normalizedWorkspace);
+  const absolutePath = path.isAbsolute(normalizedInput)
+    ? path.resolve(normalizedInput)
+    : path.resolve(absoluteWorkspace, normalizedInput);
+  const relative = path.relative(absoluteWorkspace, absolutePath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    return null;
+  }
+  return absolutePath;
+}
+
+function sanitizeDiscordFileName(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return 'file.bin';
+  }
+  // Keep attachment names portable for Discord.
+  return trimmed.replace(/[^\w.\-()+@]/g, '_').slice(0, 120) || 'file.bin';
 }
 
 function isSupportedDiscordInboundMessageType(type: MessageType | number): boolean {
