@@ -124,6 +124,7 @@ const DISCORD_ACTION_CHECK = '✅';
 const DISCORD_ACTION_CROSS = '❌';
 const DISCORD_ACTION_ALERT = '❗';
 const DISCORD_TYPING_HEARTBEAT_MS = 8_000;
+const THREAD_STARTER_CONTEXT_MAX_LENGTH = 1_200;
 let proxyConfigured = false;
 let sharedProxyDispatcher: Dispatcher | null = null;
 let httpsWebSocketProxyPatched = false;
@@ -195,7 +196,7 @@ export class DiscordPlugin implements ChannelPlugin {
     if (approval) {
       const reactionTargetChannelId =
         normalizeOptionalString(context.bindingThread) ?? normalizeOptionalString(context.bindingChannel);
-      if (triggerMessageId && reactionTargetChannelId) {
+      if (context.isTriggeredByYou && triggerMessageId && reactionTargetChannelId) {
         await this.applyTriggerMessageAction(runtime, reactionTargetChannelId, triggerMessageId, {
           action: 'approval_pending',
           onlyIfTracked: false,
@@ -228,7 +229,7 @@ export class DiscordPlugin implements ChannelPlugin {
       const turnId = readDiscordTurnId(message);
       const reactionTargetChannelId =
         normalizeOptionalString(context.bindingThread) ?? normalizeOptionalString(context.bindingChannel);
-      if (triggerMessageId && reactionTargetChannelId) {
+      if (context.isTriggeredByYou && triggerMessageId && reactionTargetChannelId) {
         await this.applyTriggerMessageAction(runtime, reactionTargetChannelId, triggerMessageId, reactionEffect);
       }
       if (turnId) {
@@ -1396,13 +1397,14 @@ export class DiscordPlugin implements ChannelPlugin {
 
     const { bindingChannelId, bindingThreadId, channelName } = resolveBindingTargetFromMessage(message);
     await this.enqueueInboundTurn(runtime, {
-      content: normalizeInboundContent(inputText, runtime.config.message?.maxInboundLength),
+      content: inputText,
       providerMessageId: message.id,
       actionChannelId: message.channelId,
       bindingChannelId,
       bindingThreadId,
       channelName,
       guildId: message.guildId ?? null,
+      sourceMessage: message,
     });
   }
 
@@ -1477,13 +1479,14 @@ export class DiscordPlugin implements ChannelPlugin {
 
       const { bindingChannelId, bindingThreadId, channelName } = resolveBindingTargetFromChannel(channel);
       await this.enqueueInboundTurn(runtime, {
-        content: normalizeInboundContent(inputText, runtime.config.message?.maxInboundLength),
+        content: inputText,
         providerMessageId: messageId || null,
         actionChannelId: channelId,
         bindingChannelId,
         bindingThreadId,
         channelName,
         guildId,
+        sourceMessage: null,
       });
     } catch (error: unknown) {
       throw error;
@@ -1513,6 +1516,9 @@ export class DiscordPlugin implements ChannelPlugin {
     }
     const currentEffect = runtime.triggerMessageEffects.get(key);
     if (currentEffect === effect.action) {
+      return;
+    }
+    if (currentEffect && isFinalDiscordAction(currentEffect) && !isFinalDiscordAction(effect.action)) {
       return;
     }
 
@@ -1680,6 +1686,7 @@ export class DiscordPlugin implements ChannelPlugin {
       bindingThreadId: string | null;
       channelName: string;
       guildId: string | null;
+      sourceMessage: Message | null;
     },
   ): Promise<void> {
     const resolved = await this.ensureBindingForInbound(runtime, {
@@ -1688,6 +1695,16 @@ export class DiscordPlugin implements ChannelPlugin {
       channelName: input.channelName,
       guildId: input.guildId,
     });
+    const inboundContent = normalizeInboundContent(
+      await this.injectThreadStarterContextIfNeeded({
+        runtime,
+        content: input.content,
+        sourceMessage: input.sourceMessage,
+        threadId: input.bindingThreadId,
+        isNewBinding: resolved.isNewBinding,
+      }),
+      runtime.config.message?.maxInboundLength,
+    );
     const unifiedIdentifier = buildDiscordUnifiedIdentifier(runtime.integrationId, input.providerMessageId);
 
     const activeTurn = await this.readSteerableTurnForSession(runtime.ownerUserId, resolved.sessionId);
@@ -1701,7 +1718,7 @@ export class DiscordPlugin implements ChannelPlugin {
       }
       try {
         await this.requireContext().steerTurnForUser(runtime.ownerUserId, activeTurn.turnId, {
-          content: input.content,
+          content: inboundContent,
         });
         if (input.providerMessageId) {
           runtime.steerTriggerByTurnId.set(activeTurn.turnId, {
@@ -1737,7 +1754,7 @@ export class DiscordPlugin implements ChannelPlugin {
       providerMessageId: input.providerMessageId ?? undefined,
       projectId: resolved.projectId,
       sessionId: resolved.sessionId,
-      content: input.content,
+      content: inboundContent,
       metadata: {
         sourceBinding: {
           provider: this.provider,
@@ -1785,7 +1802,7 @@ export class DiscordPlugin implements ChannelPlugin {
       channelName: string;
       guildId: string | null;
     },
-  ): Promise<{ projectId: string; sessionId: string }> {
+  ): Promise<{ projectId: string; sessionId: string; isNewBinding: boolean }> {
     const existingSessionId = findSessionIdByTarget(runtime.config, input.channelId, input.threadId);
     if (existingSessionId) {
       const existingSession = await this.readSessionForOwner(runtime.ownerUserId, existingSessionId);
@@ -1793,6 +1810,7 @@ export class DiscordPlugin implements ChannelPlugin {
         return {
           projectId: existingSession.projectId,
           sessionId: existingSession.sessionId,
+          isNewBinding: false,
         };
       }
     }
@@ -1829,7 +1847,73 @@ export class DiscordPlugin implements ChannelPlugin {
     return {
       projectId,
       sessionId,
+      isNewBinding: true,
     };
+  }
+
+  private async injectThreadStarterContextIfNeeded(input: {
+    runtime: DiscordRuntime;
+    content: string;
+    sourceMessage: Message | null;
+    threadId: string | null;
+    isNewBinding: boolean;
+  }): Promise<string> {
+    if (!input.isNewBinding || !input.threadId || !input.sourceMessage) {
+      return input.content;
+    }
+    const starterContent = await this.readThreadStarterContent(input.runtime, input.sourceMessage);
+    if (!starterContent) {
+      return input.content;
+    }
+    return buildThreadStarterInjectedInboundContent(starterContent, input.content);
+  }
+
+  private async readThreadStarterContent(runtime: DiscordRuntime, message: Message): Promise<string | null> {
+    const channel = message.channel as unknown as Record<string, unknown>;
+    const isThread = typeof channel.isThread === 'function' ? (channel.isThread as () => boolean)() : false;
+    if (!isThread) {
+      return null;
+    }
+    const threadChannelId = normalizeOptionalString((channel as Record<string, unknown>).id) ?? message.channelId;
+    const parentChannelId = normalizeOptionalString((channel as Record<string, unknown>).parentId);
+    const fetchStarterMessage =
+      typeof channel.fetchStarterMessage === 'function'
+        ? (channel.fetchStarterMessage as () => Promise<unknown>)
+        : null;
+    const starter = fetchStarterMessage ? await fetchStarterMessage().catch(() => null) : null;
+    const starterRecord = asRecord(starter);
+    const directStarterContent = normalizeOptionalString(starterRecord?.content);
+    if (directStarterContent) {
+      return trimToLength(directStarterContent, THREAD_STARTER_CONTEXT_MAX_LENGTH);
+    }
+
+    const parentMessageCandidateIds: string[] = [];
+    if (threadChannelId) {
+      parentMessageCandidateIds.push(threadChannelId);
+    }
+    const reference = asRecord(starterRecord?.reference);
+    const referenceMessageId =
+      normalizeOptionalString(reference?.messageId) ?? normalizeOptionalString(reference?.message_id);
+    if (referenceMessageId) {
+      parentMessageCandidateIds.push(referenceMessageId);
+    }
+    if (!parentChannelId || parentMessageCandidateIds.length === 0) {
+      return null;
+    }
+
+    const parentChannel = await runtime.client.channels.fetch(parentChannelId).catch(() => null);
+    if (!parentChannel || !('messages' in parentChannel)) {
+      return null;
+    }
+    for (const candidateId of [...new Set(parentMessageCandidateIds)]) {
+      const referenced = await parentChannel.messages.fetch(candidateId).catch(() => null);
+      const referencedRecord = asRecord(referenced);
+      const referencedContent = normalizeOptionalString(referencedRecord?.content);
+      if (referencedContent) {
+        return trimToLength(referencedContent, THREAD_STARTER_CONTEXT_MAX_LENGTH);
+      }
+    }
+    return null;
   }
 
   private async persistRuntimeConfig(runtime: DiscordRuntime, nextConfig: DiscordPluginConfig): Promise<void> {
@@ -1984,6 +2068,25 @@ function normalizeMaxInboundLength(input: unknown): number {
 function normalizeInboundContent(input: string, maxInboundLengthRaw: unknown): string {
   const maxInboundLength = normalizeMaxInboundLength(maxInboundLengthRaw);
   return input.length > maxInboundLength ? input.slice(0, maxInboundLength) : input;
+}
+
+function buildThreadStarterInjectedInboundContent(starterContent: string, userContent: string): string {
+  return [
+    'Thread starter context:',
+    '```',
+    starterContent,
+    '```',
+    '',
+    'User message:',
+    userContent.trim(),
+  ].join('\n');
+}
+
+function trimToLength(input: string, maxLength: number): string {
+  if (input.length <= maxLength) {
+    return input;
+  }
+  return `${input.slice(0, maxLength - 1)}…`;
 }
 
 function normalizeJsonRecordForDisplay(value: unknown): Record<string, unknown> {
@@ -3073,11 +3176,7 @@ function describeDiscordReactionEffect(message: BotMessage): {
   }
 
   if (message.kind === 'turn_message') {
-    return {
-      action: 'final_success',
-      onlyIfTracked: true,
-      skipOutboundText: false,
-    };
+    return null;
   }
 
   if (message.kind !== 'event') {
@@ -3400,6 +3499,10 @@ function resolveActionTrackingState(
     return 'active';
   }
   return 'final';
+}
+
+function isFinalDiscordAction(action: 'watching' | 'active' | 'approval_pending' | 'final_success' | 'final_cancel' | 'final_error'): boolean {
+  return action === 'final_success' || action === 'final_cancel' || action === 'final_error';
 }
 
 function normalizeEmojiName(value: string): string {
