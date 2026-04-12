@@ -21,6 +21,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { HttpProxyAgent } from 'http-proxy-agent';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { Dispatcher, ProxyAgent } from 'undici';
@@ -105,6 +106,13 @@ type DiscordApprovalMenuState = {
   options: DiscordApprovalActionOption[];
   optionByKey: Map<string, DiscordApprovalActionOption>;
   expiresAt: number;
+};
+
+type DiscordInboundAttachment = {
+  url: string;
+  fileName: string;
+  contentType: string | null;
+  contentLength: number | null;
 };
 
 const DEFAULT_RECONCILE_INTERVAL_MS = 10_000;
@@ -1834,7 +1842,8 @@ export class DiscordPlugin implements ChannelPlugin {
     }
 
     const inputText = (message.content ?? '').trim();
-    if (!inputText) {
+    const attachments = extractInboundAttachmentsFromMessage(message);
+    if (!inputText && attachments.length === 0) {
       return;
     }
 
@@ -1848,6 +1857,7 @@ export class DiscordPlugin implements ChannelPlugin {
       channelName,
       guildId: message.guildId ?? null,
       sourceMessage: message,
+      attachments,
     });
   }
 
@@ -1910,7 +1920,8 @@ export class DiscordPlugin implements ChannelPlugin {
     }
 
     const inputText = content.trim();
-    if (!inputText) {
+    const attachments = extractInboundAttachmentsFromRawPayload(payload);
+    if (!inputText && attachments.length === 0) {
       return;
     }
 
@@ -1930,6 +1941,7 @@ export class DiscordPlugin implements ChannelPlugin {
         channelName,
         guildId,
         sourceMessage: null,
+        attachments,
       });
     } catch (error: unknown) {
       throw error;
@@ -2130,6 +2142,7 @@ export class DiscordPlugin implements ChannelPlugin {
       channelName: string;
       guildId: string | null;
       sourceMessage: Message | null;
+      attachments: DiscordInboundAttachment[];
     },
   ): Promise<void> {
     const resolved = await this.ensureBindingForInbound(runtime, {
@@ -2138,10 +2151,23 @@ export class DiscordPlugin implements ChannelPlugin {
       channelName: input.channelName,
       guildId: input.guildId,
     });
+    const attachmentMentions = await this.uploadInboundAttachmentsToSessionWorkspace(
+      runtime,
+      resolved.sessionId,
+      input.attachments,
+    );
+    if ((input.content ?? '').trim().length === 0) {
+      if (attachmentMentions.length > 0) {
+        await this.sendAttachmentSavedHint(runtime, input.actionChannelId, attachmentMentions);
+      }
+      return;
+    }
+    const messageContent =
+      attachmentMentions.length > 0 ? `${attachmentMentions.join(' ')} ${input.content}` : input.content;
     const inboundContent = normalizeInboundContent(
       await this.injectThreadStarterContextIfNeeded({
         runtime,
-        content: input.content,
+        content: messageContent,
         sourceMessage: input.sourceMessage,
         threadId: input.bindingThreadId,
         isNewBinding: resolved.isNewBinding,
@@ -2210,6 +2236,102 @@ export class DiscordPlugin implements ChannelPlugin {
     });
     if (!created.turnId) {
       throw new Error('Failed to enqueue inbound turn');
+    }
+  }
+
+  private async uploadInboundAttachmentsToSessionWorkspace(
+    runtime: DiscordRuntime,
+    sessionId: string,
+    attachments: DiscordInboundAttachment[],
+  ): Promise<string[]> {
+    if (attachments.length === 0) {
+      return [];
+    }
+    const workspace = await this.resolveSessionWorkspaceForAttachmentUpload(runtime, sessionId);
+    if (!workspace) {
+      return [];
+    }
+
+    const mentions: string[] = [];
+    for (const attachment of attachments) {
+      try {
+        const download = await this.downloadAttachment(attachment);
+        const multipart = createWorkspaceUploadMultipartBody({
+          workspacePath: workspace,
+          fileName: attachment.fileName,
+          contentType: attachment.contentType ?? 'application/octet-stream',
+          content: download.content,
+        });
+        const uploaded = await this.requireContext().uploadWorkspaceFile({
+          body: multipart.body,
+          contentType: multipart.contentType,
+          contentLength: multipart.contentLength,
+        });
+        const mentionTarget = normalizeOptionalString(uploaded.relativePath) ?? path.basename(uploaded.path);
+        if (mentionTarget) {
+          mentions.push(`@${mentionTarget}`);
+        }
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'unknown upload error';
+        this.logger.warn(
+          `Discord attachment upload failed for integration ${runtime.integrationId}, session ${sessionId}: ${message}`,
+        );
+      }
+    }
+    return mentions;
+  }
+
+  private async resolveSessionWorkspaceForAttachmentUpload(
+    runtime: DiscordRuntime,
+    sessionId: string,
+  ): Promise<string | null> {
+    const sessionHistory = await this.requireContext().getSessionHistoryForUser(runtime.ownerUserId, sessionId);
+    const historyRecord = asRecord(sessionHistory) ?? {};
+    const sessionRecord = asRecord(historyRecord.session);
+    if (!sessionRecord) {
+      return null;
+    }
+    return this.resolveSessionWorkspaceForFs(runtime, sessionRecord);
+  }
+
+  private async downloadAttachment(
+    attachment: DiscordInboundAttachment,
+  ): Promise<{ content: Buffer; mimeType: string }> {
+    const response = await fetch(attachment.url, {
+      method: 'GET',
+      dispatcher: this.proxyDispatcher ?? undefined,
+    } as RequestInit & { dispatcher?: Dispatcher });
+    if (!response.ok) {
+      throw new Error(`download failed: ${response.status}`);
+    }
+    const content = Buffer.from(await response.arrayBuffer());
+    const mimeType = response.headers.get('content-type')?.trim() || attachment.contentType || 'application/octet-stream';
+    return {
+      content,
+      mimeType,
+    };
+  }
+
+  private async sendAttachmentSavedHint(
+    runtime: DiscordRuntime,
+    channelId: string,
+    attachmentMentions: string[],
+  ): Promise<void> {
+    try {
+      const channel = await runtime.client.channels.fetch(channelId);
+      if (!channel || !('send' in channel) || typeof channel.send !== 'function') {
+        return;
+      }
+      const lines = attachmentMentions.map((mention) => {
+        const savedPath = mention.slice(1);
+        return `Saved to \`${savedPath}\`, use \`${mention}\` to reference the file in message.`;
+      });
+      await channel.send({
+        content: limitDiscordMessageLength(lines.join('\n')),
+        allowedMentions: { parse: [] },
+      });
+    } catch {
+      // ignore hint-send failures; upload has already completed.
     }
   }
 
@@ -3049,6 +3171,84 @@ function resolveBindingTargetFromMessage(message: Message): {
     bindingThreadId,
     channelName,
   };
+}
+
+function extractInboundAttachmentsFromMessage(message: Message): DiscordInboundAttachment[] {
+  const attachments: DiscordInboundAttachment[] = [];
+  for (const attachment of message.attachments.values()) {
+    const url = normalizeOptionalString(attachment.url);
+    if (!url) {
+      continue;
+    }
+    const fileName = normalizeOptionalString(attachment.name) ?? `attachment-${attachment.id}`;
+    attachments.push({
+      url,
+      fileName,
+      contentType: normalizeOptionalString(attachment.contentType),
+      contentLength: typeof attachment.size === 'number' ? attachment.size : null,
+    });
+  }
+  return attachments;
+}
+
+function extractInboundAttachmentsFromRawPayload(payload: Record<string, unknown>): DiscordInboundAttachment[] {
+  const rawAttachments = Array.isArray(payload.attachments) ? payload.attachments : [];
+  return rawAttachments
+    .map((entry) => asRecord(entry))
+    .filter((entry): entry is Record<string, unknown> => !!entry)
+    .map((entry, index) => {
+      const url = normalizeOptionalString(entry.url);
+      const fileName = normalizeOptionalString(entry.filename) ?? `attachment-${index + 1}`;
+      const contentType = normalizeOptionalString(entry.content_type);
+      const contentLength = typeof entry.size === 'number' && Number.isFinite(entry.size) ? entry.size : null;
+      return url
+        ? {
+            url,
+            fileName,
+            contentType,
+            contentLength,
+          }
+        : null;
+    })
+    .filter((entry): entry is DiscordInboundAttachment => !!entry);
+}
+
+function createWorkspaceUploadMultipartBody(input: {
+  workspacePath: string;
+  fileName: string;
+  contentType: string;
+  content: Buffer;
+}): {
+  body: NodeJS.ReadableStream;
+  contentType: string;
+  contentLength: string;
+} {
+  const boundary = `----aw-discord-upload-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const safeFileName = sanitizeMultipartFileName(input.fileName);
+  const partA = Buffer.from(
+    `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="workspacePath"\r\n\r\n` +
+      `${input.workspacePath}\r\n`,
+    'utf8',
+  );
+  const partB = Buffer.from(
+    `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="file"; filename="${safeFileName}"\r\n` +
+      `Content-Type: ${input.contentType || 'application/octet-stream'}\r\n\r\n`,
+    'utf8',
+  );
+  const closing = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+  const contentLength = String(partA.length + partB.length + input.content.length + closing.length);
+  return {
+    body: Readable.from([partA, partB, input.content, closing]),
+    contentType: `multipart/form-data; boundary=${boundary}`,
+    contentLength,
+  };
+}
+
+function sanitizeMultipartFileName(fileName: string): string {
+  const base = path.basename(fileName.trim() || 'attachment.bin');
+  return base.replace(/[\r\n"]/g, '_');
 }
 
 function resolveBindingTargetFromChannel(channel: unknown): {
