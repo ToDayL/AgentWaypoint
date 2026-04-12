@@ -269,6 +269,13 @@ export class WebPluginAppController {
     return this.webPlugin.resolveTurnApprovalForUser(user.id, id, input);
   }
 
+  @Get('turns/:id/events')
+  async getTurnEvents(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown, @Query() query: unknown) {
+    const { id } = parseWithZod(TurnIdParamsSchema, params);
+    const queryInput = parseWithZod(StreamTurnQuerySchema, query);
+    return this.webPlugin.getEventsForTurn(user.id, id, queryInput.since ?? 0);
+  }
+
   @Get('turns/:id/stream')
   async streamTurn(
     @CurrentUserDecorator() user: CurrentUser,
