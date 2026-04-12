@@ -1547,7 +1547,10 @@ export class DiscordPlugin implements ChannelPlugin {
       await interaction.respond([]);
       return;
     }
-    const suggestions = await this.suggestFsPathsForWorkspace(workspace, prefix);
+    const directoriesOnly = subcommand === 'ls' || subcommand === 'tree';
+    const suggestions = await this.suggestFsPathsForWorkspace(workspace, prefix, {
+      directoriesOnly,
+    });
     await interaction.respond(
       suggestions
         .filter((item) => item.length > 0 && item.length <= 100)
@@ -1559,7 +1562,11 @@ export class DiscordPlugin implements ChannelPlugin {
     );
   }
 
-  private async suggestFsPathsForWorkspace(workspace: string | null, prefixRaw: string): Promise<string[]> {
+  private async suggestFsPathsForWorkspace(
+    workspace: string | null,
+    prefixRaw: string,
+    options?: { directoriesOnly?: boolean },
+  ): Promise<string[]> {
     const workspaceAbs = workspace ? path.resolve(workspace.trim()) : null;
     const prefix = prefixRaw.trim();
     const isAbsolutePrefix = isExplicitAbsolutePathInput(prefix);
@@ -1609,6 +1616,7 @@ export class DiscordPlugin implements ChannelPlugin {
 
     const suggestions = entries
       .filter((entry) => entry.name.toLowerCase().startsWith(namePrefix))
+      .filter((entry) => !options?.directoriesOnly || entry.isDirectory)
       .map((entry) => {
         if (isAbsolutePrefix || !workspaceAbs) {
           const absolute = path.resolve(entry.path).split(path.sep).join('/');
@@ -1643,6 +1651,7 @@ export class DiscordPlugin implements ChannelPlugin {
       })
       .catch(() => [] as Array<{ name: string; path: string; isDirectory: boolean }>);
     const childSuggestions = childEntries
+      .filter((entry) => !options?.directoriesOnly || entry.isDirectory)
       .map((entry) => {
         if (isAbsolutePrefix || !workspaceAbs) {
           const absolute = path.resolve(entry.path).split(path.sep).join('/');
