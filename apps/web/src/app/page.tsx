@@ -3152,13 +3152,22 @@ export default function HomePage() {
           method: 'GET',
         },
       );
+      if (inspectedTurnIdRef.current !== normalizedTurnId) {
+        return;
+      }
       const normalizedEvents = events
         .map((event) => normalizeHistoryEventItem(event, normalizedTurnId))
         .filter((event): event is StreamEnvelope => event !== null);
       const timeline = buildTimelineFromEvents(normalizedEvents);
+      if (inspectedTurnIdRef.current !== normalizedTurnId) {
+        return;
+      }
       setTimelineEvents(timeline.timelineEvents);
       setLatestDiffSummary(timeline.latestDiffSummary);
     } catch (requestError) {
+      if (inspectedTurnIdRef.current !== normalizedTurnId) {
+        return;
+      }
       setError(extractMessage(requestError));
       setTimelineEvents([]);
       setLatestDiffSummary('');
