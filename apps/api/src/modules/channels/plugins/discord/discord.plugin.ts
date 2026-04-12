@@ -127,6 +127,8 @@ const DISCORD_ACTION_CROSS = '❌';
 const DISCORD_ACTION_ALERT = '❗';
 const DISCORD_TYPING_HEARTBEAT_MS = 8_000;
 const THREAD_STARTER_CONTEXT_MAX_LENGTH = 1_200;
+const FS_TREE_SECOND_LEVEL_CONCURRENCY = 8;
+const FS_TREE_SECOND_LEVEL_MAX_DIRS = 48;
 let proxyConfigured = false;
 let sharedProxyDispatcher: Dispatcher | null = null;
 let httpsWebSocketProxyPatched = false;
@@ -801,22 +803,44 @@ export class DiscordPlugin implements ChannelPlugin {
       return;
     }
 
+    const firstLevelDirectories = firstLevel.filter((entry) => entry.isDirectory);
+    const directoriesToExpand = firstLevelDirectories.slice(0, FS_TREE_SECOND_LEVEL_MAX_DIRS);
+    const secondLevelByPath = new Map<string, Array<{ name: string; path: string; isDirectory: boolean }>>();
+
+    for (let start = 0; start < directoriesToExpand.length; start += FS_TREE_SECOND_LEVEL_CONCURRENCY) {
+      const batch = directoriesToExpand.slice(start, start + FS_TREE_SECOND_LEVEL_CONCURRENCY);
+      const batchResults = await Promise.all(
+        batch.map(async (entry) => {
+          const secondLevel = await this.requireContext()
+            .listWorkspaceTree({
+              path: entry.path,
+              limit: 120,
+              includeHidden: true,
+            })
+            .catch(() => [] as Array<{ name: string; path: string; isDirectory: boolean }>);
+          return { path: entry.path, secondLevel };
+        }),
+      );
+      for (const result of batchResults) {
+        secondLevelByPath.set(result.path, result.secondLevel);
+      }
+    }
+
     const lines: string[] = [];
     for (const firstEntry of firstLevel) {
       lines.push(firstEntry.isDirectory ? `- ${firstEntry.name}/` : `- ${firstEntry.name}`);
       if (!firstEntry.isDirectory) {
         continue;
       }
-      const secondLevel = await this.requireContext()
-        .listWorkspaceTree({
-          path: firstEntry.path,
-          limit: 120,
-          includeHidden: true,
-        })
-        .catch(() => [] as Array<{ name: string; path: string; isDirectory: boolean }>);
+      const secondLevel = secondLevelByPath.get(firstEntry.path) ?? [];
       for (const secondEntry of secondLevel) {
         lines.push(secondEntry.isDirectory ? `  - ${secondEntry.name}/` : `  - ${secondEntry.name}`);
       }
+    }
+    if (firstLevelDirectories.length > directoriesToExpand.length) {
+      lines.push(
+        `... skipped depth-2 expansion for ${firstLevelDirectories.length - directoriesToExpand.length} directories`,
+      );
     }
 
     const content = renderFsTextReply(`Tree (depth=2): ${resolvedPath}`, lines);
