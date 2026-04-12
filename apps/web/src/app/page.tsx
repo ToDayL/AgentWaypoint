@@ -122,6 +122,14 @@ type StreamEnvelope = {
   payload: Record<string, unknown>;
   createdAt: string;
 };
+
+type TurnEventHistoryItem = {
+  turnId: string;
+  seq: number;
+  type: string;
+  payload: unknown;
+  createdAt: string;
+};
 type PanelLayoutPersistence = {
   left: {
     mode: SidebarMode;
@@ -557,6 +565,8 @@ export default function HomePage() {
   const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
   const [skillSuggestionSuppressedKey, setSkillSuggestionSuppressedKey] = useState('');
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
+  const [inspectedTurnId, setInspectedTurnId] = useState('');
+  const [turnEventsLoading, setTurnEventsLoading] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [turns, setTurns] = useState<TurnSummary[]>([]);
   const [assistantText, setAssistantText] = useState('');
@@ -628,6 +638,7 @@ export default function HomePage() {
   const fileNodeLongPressTriggeredRef = useRef(false);
   const mentionBlinkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const panelLayoutHydratedRef = useRef(false);
+  const inspectedTurnIdRef = useRef('');
 
   const canStartTurn = !!selectedSessionId && prompt.trim().length > 0 && activeTurnId === '';
   const canSteerTurn =
@@ -756,6 +767,18 @@ export default function HomePage() {
     return displayedMessages.slice(hiddenMessageCount);
   }, [displayedMessages, hiddenMessageCount]);
   const isAdmin = currentUserRole === 'admin';
+  const turnIdByMessageId = useMemo(() => {
+    const map = new Map<string, string>();
+    turns.forEach((turn) => {
+      if (typeof turn.userMessageId === 'string' && turn.userMessageId.trim().length > 0) {
+        map.set(turn.userMessageId, turn.id);
+      }
+      if (typeof turn.assistantMessageId === 'string' && turn.assistantMessageId.trim().length > 0) {
+        map.set(turn.assistantMessageId, turn.id);
+      }
+    });
+    return map;
+  }, [turns]);
   const configFullscreenActive =
     leftSidebarTab === 'config' && (leftSidebarMode !== 'closed' || mobileLeftSidebarOpen);
   const shellGridClassName = [
@@ -2649,6 +2672,9 @@ export default function HomePage() {
       setPendingApproval(null);
       setStreamBubbleTurnId('');
       setStreamActive(false);
+      setInspectedTurnId('');
+      inspectedTurnIdRef.current = '';
+      setTurnEventsLoading(false);
       if (options.resetEventLog) {
         setTimelineEvents([]);
       }
@@ -2683,6 +2709,9 @@ export default function HomePage() {
         setLatestPlan('');
         setToolOutput('');
         setLatestDiffSummary('');
+        const nextInspectedTurnId = history.activeTurnId ?? latestTurn?.id ?? '';
+        setInspectedTurnId(nextInspectedTurnId);
+        inspectedTurnIdRef.current = nextInspectedTurnId;
       }
       if (options.resetEventLog) {
         setTimelineEvents([]);
@@ -2715,6 +2744,8 @@ export default function HomePage() {
 
   function openStream(turnId: string, sessionId: string): void {
     eventSourceRef.current?.close();
+    inspectedTurnIdRef.current = turnId;
+    setInspectedTurnId(turnId);
     const streamUrl = `/api/channels/plugins/web/app/turns/${turnId}/stream`;
     const source = new EventSource(streamUrl);
     eventSourceRef.current = source;
@@ -2742,7 +2773,15 @@ export default function HomePage() {
       source.addEventListener(eventType, (evt) => {
         const message = evt as MessageEvent<string>;
         const envelope = JSON.parse(message.data) as StreamEnvelope;
-        appendTimelineEvent(envelope);
+        const selectedTurnId = inspectedTurnIdRef.current.trim();
+        const shouldUpdateInspectPanel = !selectedTurnId || selectedTurnId === envelope.turnId;
+        if (shouldUpdateInspectPanel) {
+          if (!selectedTurnId) {
+            inspectedTurnIdRef.current = envelope.turnId;
+            setInspectedTurnId(envelope.turnId);
+          }
+          appendTimelineEvent(envelope);
+        }
 
         if (envelope.type === 'assistant.delta') {
           const delta = envelope.payload.text;
@@ -2757,12 +2796,12 @@ export default function HomePage() {
 
         if (envelope.type === 'reasoning.delta') {
           const delta = envelope.payload.delta;
-          if (typeof delta === 'string') {
+          if (typeof delta === 'string' && shouldUpdateInspectPanel) {
             setReasoningText((current) => current + delta);
           }
         }
 
-        if (envelope.type === 'plan.updated') {
+        if (envelope.type === 'plan.updated' && shouldUpdateInspectPanel) {
           setLatestPlan(formatPlanPayload(envelope.payload));
         }
 
@@ -2773,14 +2812,14 @@ export default function HomePage() {
           }
         }
 
-        if (envelope.type === 'tool.output') {
+        if (envelope.type === 'tool.output' && shouldUpdateInspectPanel) {
           const delta = envelope.payload.text;
           if (typeof delta === 'string') {
             setToolOutput((current) => current + delta);
           }
         }
 
-        if (envelope.type === 'diff.updated') {
+        if (envelope.type === 'diff.updated' && shouldUpdateInspectPanel) {
           const summary = formatDiffPayload(envelope.payload);
           if (summary) {
             setLatestDiffSummary(summary);
@@ -3083,6 +3122,75 @@ export default function HomePage() {
       return;
     }
     setRightSidebarMode('closed');
+  }
+
+  function openInsightsPanel(tab: InsightsTab): void {
+    setInsightsTab(tab);
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 860px)').matches) {
+      setMobileInsightsOpen(true);
+      return;
+    }
+    setRightSidebarMode((current) => (current === 'closed' ? 'pop' : current));
+  }
+
+  async function inspectTurnEvents(turnId: string): Promise<void> {
+    const normalizedTurnId = turnId.trim();
+    if (!normalizedTurnId) {
+      return;
+    }
+    inspectedTurnIdRef.current = normalizedTurnId;
+    setInspectedTurnId(normalizedTurnId);
+    setTurnEventsLoading(true);
+    setTimelineEvents([]);
+    setLatestDiffSummary('');
+    openInsightsPanel('events');
+
+    try {
+      const events = await apiRequest<TurnEventHistoryItem[]>(
+        `/api/channels/plugins/web/app/turns/${normalizedTurnId}/events?${new URLSearchParams({ since: '0' }).toString()}`,
+        {
+          method: 'GET',
+        },
+      );
+      if (inspectedTurnIdRef.current !== normalizedTurnId) {
+        return;
+      }
+      const normalizedEvents = events
+        .map((event) => normalizeHistoryEventItem(event, normalizedTurnId))
+        .filter((event): event is StreamEnvelope => event !== null);
+      const timeline = buildTimelineFromEvents(normalizedEvents);
+      if (inspectedTurnIdRef.current !== normalizedTurnId) {
+        return;
+      }
+      setTimelineEvents(timeline.timelineEvents);
+      setLatestDiffSummary(timeline.latestDiffSummary);
+    } catch (requestError) {
+      if (inspectedTurnIdRef.current !== normalizedTurnId) {
+        return;
+      }
+      setError(extractMessage(requestError));
+      setTimelineEvents([]);
+      setLatestDiffSummary('');
+    } finally {
+      if (inspectedTurnIdRef.current === normalizedTurnId) {
+        setTurnEventsLoading(false);
+      }
+    }
+  }
+
+  async function reconnectStreamingTimeline(): Promise<void> {
+    const liveTurnId = (streamBubbleTurnId || activeTurnId).trim();
+    if (!liveTurnId) {
+      return;
+    }
+    await inspectTurnEvents(liveTurnId);
+    const sessionId = selectedSessionId.trim();
+    if (!sessionId || eventSourceRef.current || TERMINAL_TURN_STATUSES.has(turnStatus)) {
+      return;
+    }
+    setResumedTurnHint(`Resumed in-flight turn: ${liveTurnId}`);
+    setStreamActive(true);
+    openStream(liveTurnId, sessionId);
   }
 
   async function toggleProjectExpansion(projectId: string): Promise<void> {
@@ -4574,30 +4682,75 @@ export default function HomePage() {
                   </button>
                 ) : null}
                 {visibleMessages.map((message) => (
-                  <article
+                  <div
                     key={message.id}
-                    className={`chat-message ${message.role === 'user' ? 'chat-message-user' : 'chat-message-assistant'}`}
+                    className={`chat-message-row chat-message-row-${message.role === 'user' ? 'user' : 'assistant'}`}
                   >
-                    <header className="chat-message-meta">
-                      <span>{message.role === 'user' ? 'You' : 'Assistant'}</span>
-                      {'streaming' in message && message.streaming ? (
-                        <div className="chat-streaming-actions">
-                          <span className="status-pill">streaming</span>
-                          <button
-                            type="button"
-                            className="button-secondary"
-                            onClick={() => void handleCancelTurn()}
-                            disabled={!activeTurnId || busy}
-                          >
-                            Cancel
-                          </button>
+                    {message.role === 'user' && !('streaming' in message && message.streaming) ? (
+                      <p className={`chat-message-time chat-message-time-${message.role}`}>
+                        {new Date(message.createdAt).toLocaleString()}
+                      </p>
+                    ) : null}
+                    <article
+                      className={`chat-message ${message.role === 'user' ? 'chat-message-user' : 'chat-message-assistant'}`}
+                    >
+                      <header className="chat-message-meta">
+                        <span>{message.role === 'user' ? 'You' : 'Assistant'}</span>
+                        <div className="chat-message-meta-right">
+                          {'streaming' in message && message.streaming ? (
+                            <div className="chat-streaming-actions">
+                              <span className="status-pill">streaming</span>
+                              <button
+                                type="button"
+                                className="button-secondary"
+                                onClick={() => void handleCancelTurn()}
+                                disabled={!activeTurnId || busy}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : null}
+                          {'streaming' in message &&
+                          message.streaming &&
+                          message.role === 'assistant' &&
+                          (streamBubbleTurnId || activeTurnId) ? (
+                            <button
+                              type="button"
+                              className="chat-inspect-button"
+                              onClick={() => void reconnectStreamingTimeline()}
+                              disabled={turnEventsLoading}
+                              aria-label={turnEventsLoading ? 'Loading timeline' : 'Reconnect timeline'}
+                              title={turnEventsLoading ? 'Loading timeline' : 'Reconnect timeline'}
+                            >
+                              <Info />
+                            </button>
+                          ) : null}
+                          {!('streaming' in message && message.streaming) &&
+                          message.role === 'assistant' &&
+                          turnIdByMessageId.get(message.id) ? (
+                            <button
+                              type="button"
+                              className="chat-inspect-button"
+                              onClick={() => void inspectTurnEvents(turnIdByMessageId.get(message.id) ?? '')}
+                              disabled={turnEventsLoading}
+                              aria-label={turnEventsLoading ? 'Loading timeline' : 'Inspect timeline'}
+                              title={turnEventsLoading ? 'Loading timeline' : 'Inspect timeline'}
+                            >
+                              <Info />
+                            </button>
+                          ) : null}
                         </div>
-                      ) : null}
-                    </header>
-                    <div className="chat-markdown">
-                      <ChatMessageMarkdown content={message.content} />
-                    </div>
-                  </article>
+                      </header>
+                      <div className="chat-markdown">
+                        <ChatMessageMarkdown content={message.content} />
+                      </div>
+                    </article>
+                    {message.role === 'assistant' && !('streaming' in message && message.streaming) ? (
+                      <p className={`chat-message-time chat-message-time-${message.role}`}>
+                        {new Date(message.createdAt).toLocaleString()}
+                      </p>
+                    ) : null}
+                  </div>
                 ))}
               </div>
 
@@ -4754,7 +4907,11 @@ export default function HomePage() {
                   {insightsTab === 'diff' ? diffPanelView : null}
                   {insightsTab === 'events' ? (
                     <div className="timeline-list">
-                      {timelineEvents.length === 0 ? <p className="timeline-empty">No events yet.</p> : null}
+                      {SESSION_DEBUG_INFO_ENABLED && inspectedTurnId ? (
+                        <p className="timeline-empty">Inspecting turn: {inspectedTurnId}</p>
+                      ) : null}
+                      {turnEventsLoading ? <p className="timeline-empty">Loading timeline...</p> : null}
+                      {!turnEventsLoading && timelineEvents.length === 0 ? <p className="timeline-empty">No events yet.</p> : null}
                       {timelineEvents.map((event) => (
                         <article key={event.id} className="timeline-event">
                           <header className="timeline-event-head">
@@ -5336,6 +5493,46 @@ function formatApprovalKind(kind: string): string {
     return 'Additional permissions';
   }
   return kind;
+}
+
+function normalizeHistoryEventItem(item: TurnEventHistoryItem, fallbackTurnId: string): StreamEnvelope | null {
+  const seq = typeof item.seq === 'number' && Number.isFinite(item.seq) ? item.seq : null;
+  if (seq === null) {
+    return null;
+  }
+  const type = typeof item.type === 'string' && item.type.trim().length > 0 ? item.type.trim() : 'event';
+  const payload = item.payload && typeof item.payload === 'object' && !Array.isArray(item.payload)
+    ? (item.payload as Record<string, unknown>)
+    : {};
+  const turnId =
+    typeof item.turnId === 'string' && item.turnId.trim().length > 0 ? item.turnId : fallbackTurnId;
+  const createdAt = typeof item.createdAt === 'string' && item.createdAt.length > 0 ? item.createdAt : new Date().toISOString();
+  return {
+    turnId,
+    seq,
+    type,
+    payload,
+    createdAt,
+  };
+}
+
+function buildTimelineFromEvents(events: StreamEnvelope[]): { timelineEvents: TimelineEvent[]; latestDiffSummary: string } {
+  let timelineEvents: TimelineEvent[] = [];
+  let latestDiffSummary = '';
+  const sortedEvents = [...events].sort((a, b) => a.seq - b.seq);
+  sortedEvents.forEach((event) => {
+    timelineEvents = mergeTimelineEvent(timelineEvents, event);
+    if (event.type === 'diff.updated') {
+      const formatted = formatDiffPayload(event.payload);
+      if (formatted) {
+        latestDiffSummary = formatted;
+      }
+    }
+  });
+  return {
+    timelineEvents,
+    latestDiffSummary,
+  };
 }
 
 function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope): TimelineEvent[] {
