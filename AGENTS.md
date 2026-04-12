@@ -8,6 +8,31 @@ Operational runbook for local development and test execution in this repository.
 - `corepack` available (for `pnpm`).
 - Recommended Node version: `22.x` (repo engines: `>=22 <23`).
 
+## Agent Commit Policy
+
+When an agent creates or updates commits in this repository, follow these rules:
+
+- Always use DCO sign-off on every commit (`Signed-off-by` trailer), e.g. via:
+  ```bash
+  git commit -s -m "..."
+  ```
+- If amending a commit, preserve/add DCO sign-off:
+  ```bash
+  git commit --amend -s --no-edit
+  ```
+- Do not add agent co-author metadata to commits:
+  - No `Co-authored-by:` trailers.
+  - Keep only the primary author/committer plus required `Signed-off-by` trailer(s).
+- Use Conventional Commit style for commit messages:
+  - Format: `<type>(<scope>): <subject>`
+  - Allowed `type`: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `ci`, `build`, `perf`, `revert`
+  - Keep subject imperative and concise (prefer <= 72 chars), no trailing period.
+  - Examples:
+    - `feat(web): add inspect action for streaming timeline`
+    - `fix(api): ignore stale turn history responses`
+
+If a user explicitly requests a different commit message format, follow the user request.
+
 ## Development Workflow
 
 ### 1. Start full dev stack
