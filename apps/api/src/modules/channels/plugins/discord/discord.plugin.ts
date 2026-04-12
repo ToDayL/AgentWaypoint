@@ -137,6 +137,7 @@ const DISCORD_ACTION_CROSS = '❌';
 const DISCORD_ACTION_ALERT = '❗';
 const DISCORD_TYPING_HEARTBEAT_MS = 8_000;
 const THREAD_STARTER_CONTEXT_MAX_LENGTH = 1_200;
+const WORKSPACE_UPLOAD_MAX_SIZE_BYTES = 20 * 1024 * 1024;
 const FS_TREE_SECOND_LEVEL_CONCURRENCY = 8;
 const FS_TREE_SECOND_LEVEL_MAX_DIRS = 48;
 let proxyConfigured = false;
@@ -2151,19 +2152,27 @@ export class DiscordPlugin implements ChannelPlugin {
       channelName: input.channelName,
       guildId: input.guildId,
     });
-    const attachmentMentions = await this.uploadInboundAttachmentsToSessionWorkspace(
+    const attachmentUpload = await this.uploadInboundAttachmentsToSessionWorkspace(
       runtime,
       resolved.sessionId,
       input.attachments,
     );
+    if (attachmentUpload.failedCount > 0) {
+      await this.sendAttachmentUploadResultHint(runtime, input.actionChannelId, attachmentUpload);
+      return;
+    }
     if ((input.content ?? '').trim().length === 0) {
-      if (attachmentMentions.length > 0) {
-        await this.sendAttachmentSavedHint(runtime, input.actionChannelId, attachmentMentions);
+      if (attachmentUpload.mentions.length > 0) {
+        await this.sendAttachmentSavedHint(runtime, input.actionChannelId, attachmentUpload.mentions);
+      } else if (input.attachments.length > 0) {
+        await this.sendAttachmentUploadFailedHint(runtime, input.actionChannelId);
       }
       return;
     }
     const messageContent =
-      attachmentMentions.length > 0 ? `${attachmentMentions.join(' ')} ${input.content}` : input.content;
+      attachmentUpload.mentions.length > 0
+        ? `${attachmentUpload.mentions.join(' ')} ${input.content}`
+        : input.content;
     const inboundContent = normalizeInboundContent(
       await this.injectThreadStarterContextIfNeeded({
         runtime,
@@ -2243,17 +2252,37 @@ export class DiscordPlugin implements ChannelPlugin {
     runtime: DiscordRuntime,
     sessionId: string,
     attachments: DiscordInboundAttachment[],
-  ): Promise<string[]> {
+  ): Promise<{ mentions: string[]; failedCount: number; successMentions: string[]; failedFiles: string[] }> {
     if (attachments.length === 0) {
-      return [];
+      return { mentions: [], failedCount: 0, successMentions: [], failedFiles: [] };
     }
     const workspace = await this.resolveSessionWorkspaceForAttachmentUpload(runtime, sessionId);
     if (!workspace) {
-      return [];
+      return {
+        mentions: [],
+        failedCount: attachments.length,
+        successMentions: [],
+        failedFiles: attachments.map((item) => item.fileName),
+      };
     }
 
     const mentions: string[] = [];
+    const successMentions: string[] = [];
+    const failedFiles: string[] = [];
+    let failedCount = 0;
     for (const attachment of attachments) {
+      if (
+        typeof attachment.contentLength === 'number' &&
+        Number.isFinite(attachment.contentLength) &&
+        attachment.contentLength > WORKSPACE_UPLOAD_MAX_SIZE_BYTES
+      ) {
+        this.logger.warn(
+          `Discord attachment skipped for integration ${runtime.integrationId}, session ${sessionId}: file too large (${attachment.contentLength} bytes)`,
+        );
+        failedCount += 1;
+        failedFiles.push(attachment.fileName);
+        continue;
+      }
       try {
         const download = await this.downloadAttachment(attachment);
         const multipart = createWorkspaceUploadMultipartBody({
@@ -2269,16 +2298,20 @@ export class DiscordPlugin implements ChannelPlugin {
         });
         const mentionTarget = normalizeOptionalString(uploaded.relativePath) ?? path.basename(uploaded.path);
         if (mentionTarget) {
-          mentions.push(`@${mentionTarget}`);
+          const mention = `@${mentionTarget}`;
+          mentions.push(mention);
+          successMentions.push(mention);
         }
       } catch (error: unknown) {
+        failedCount += 1;
+        failedFiles.push(attachment.fileName);
         const message = error instanceof Error ? error.message : 'unknown upload error';
         this.logger.warn(
           `Discord attachment upload failed for integration ${runtime.integrationId}, session ${sessionId}: ${message}`,
         );
       }
     }
-    return mentions;
+    return { mentions, failedCount, successMentions, failedFiles };
   }
 
   private async resolveSessionWorkspaceForAttachmentUpload(
@@ -2304,7 +2337,11 @@ export class DiscordPlugin implements ChannelPlugin {
     if (!response.ok) {
       throw new Error(`download failed: ${response.status}`);
     }
-    const content = Buffer.from(await response.arrayBuffer());
+    const headerLength = normalizeContentLengthHeader(response.headers.get('content-length'));
+    if (headerLength !== null && headerLength > WORKSPACE_UPLOAD_MAX_SIZE_BYTES) {
+      throw new Error(`download exceeds upload limit: ${headerLength} bytes`);
+    }
+    const content = await readResponseBodyWithLimit(response, WORKSPACE_UPLOAD_MAX_SIZE_BYTES);
     const mimeType = response.headers.get('content-type')?.trim() || attachment.contentType || 'application/octet-stream';
     return {
       content,
@@ -2332,6 +2369,56 @@ export class DiscordPlugin implements ChannelPlugin {
       });
     } catch {
       // ignore hint-send failures; upload has already completed.
+    }
+  }
+
+  private async sendAttachmentUploadFailedHint(runtime: DiscordRuntime, channelId: string): Promise<void> {
+    try {
+      const channel = await runtime.client.channels.fetch(channelId);
+      if (!channel || !('send' in channel) || typeof channel.send !== 'function') {
+        return;
+      }
+      await channel.send({
+        content:
+          'Failed to save attachment. Check network and file size (max 20MB), then retry.',
+        allowedMentions: { parse: [] },
+      });
+    } catch {
+      // ignore hint-send failures; upload has already failed.
+    }
+  }
+
+  private async sendAttachmentUploadResultHint(
+    runtime: DiscordRuntime,
+    channelId: string,
+    result: { successMentions: string[]; failedFiles: string[]; failedCount: number },
+  ): Promise<void> {
+    try {
+      const channel = await runtime.client.channels.fetch(channelId);
+      if (!channel || !('send' in channel) || typeof channel.send !== 'function') {
+        return;
+      }
+      const lines: string[] = [];
+      if (result.successMentions.length > 0) {
+        lines.push('Saved:');
+        for (const mention of result.successMentions) {
+          const savedPath = mention.slice(1);
+          lines.push(`- \`${savedPath}\` (reference: \`${mention}\`)`);
+        }
+      }
+      if (result.failedFiles.length > 0) {
+        lines.push('Failed:');
+        for (const fileName of result.failedFiles) {
+          lines.push(`- \`${fileName}\``);
+        }
+        lines.push('Turn not started because one or more attachments failed to upload.');
+      }
+      await channel.send({
+        content: limitDiscordMessageLength(lines.join('\n') || 'Attachment upload failed.'),
+        allowedMentions: { parse: [] },
+      });
+    } catch {
+      // ignore hint-send failures; upload has already failed.
     }
   }
 
@@ -3250,6 +3337,46 @@ function sanitizeMultipartFileName(fileName: string): string {
   const base = path.basename(fileName.trim() || 'attachment.bin');
   return base.replace(/[\r\n"]/g, '_');
 }
+
+function normalizeContentLengthHeader(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = Number.parseInt(value.trim(), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+  return parsed;
+}
+
+async function readResponseBodyWithLimit(response: Response, maxBytes: number): Promise<Buffer> {
+  const body = response.body;
+  if (!body) {
+    return Buffer.alloc(0);
+  }
+
+  const reader = body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    if (!value) {
+      continue;
+    }
+    total += value.byteLength;
+    if (total > maxBytes) {
+      throw new Error(`download exceeds upload limit: ${total} bytes`);
+    }
+    chunks.push(Buffer.from(value));
+  }
+
+  return Buffer.concat(chunks, total);
+}
+
 
 function resolveBindingTargetFromChannel(channel: unknown): {
   bindingChannelId: string;
