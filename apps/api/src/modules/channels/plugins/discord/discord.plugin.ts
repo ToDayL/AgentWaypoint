@@ -659,6 +659,14 @@ export class DiscordPlugin implements ChannelPlugin {
       await this.handleFsGetCommand(runtime, interaction);
       return;
     }
+    if (subcommand === 'ls') {
+      await this.handleFsListCommand(runtime, interaction);
+      return;
+    }
+    if (subcommand === 'tree') {
+      await this.handleFsTreeCommand(runtime, interaction);
+      return;
+    }
     await safeReply(interaction, `Unsupported subcommand: ${subcommand}`);
   }
 
@@ -724,6 +732,121 @@ export class DiscordPlugin implements ChannelPlugin {
     }
     const project = asRecord(await this.requireContext().getProjectForUser(runtime.ownerUserId, projectId));
     return normalizeOptionalString(project?.repoPath);
+  }
+
+  private async handleFsListCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply();
+    const sessionRecord = await this.resolveSessionRecordForFs(runtime, interaction);
+    if (!sessionRecord) {
+      return;
+    }
+
+    const workspace = await this.resolveSessionWorkspaceForFs(runtime, sessionRecord);
+    const requestedPath = normalizeOptionalString(interaction.options.getString('path'));
+    const resolvedPath = resolveFsPathForListing(workspace, requestedPath);
+    if (!resolvedPath) {
+      await interaction.editReply(
+        workspace
+          ? 'Invalid path. Use a workspace-relative path or an absolute path starting with `/`.'
+          : 'Invalid path. Use an absolute path starting with `/`.',
+      );
+      return;
+    }
+
+    const entries = await this.requireContext()
+      .listWorkspaceTree({
+        path: resolvedPath,
+        limit: 500,
+        includeHidden: true,
+      })
+      .catch(() => null as Array<{ name: string; path: string; isDirectory: boolean }> | null);
+    if (!entries) {
+      await interaction.editReply(`Unable to list directory: \`${resolvedPath}\`.`);
+      return;
+    }
+
+    const lines = entries.map((entry) => (entry.isDirectory ? `${entry.name}/` : entry.name));
+    const content = renderFsTextReply(`Listing: ${resolvedPath}`, lines);
+    await interaction.editReply(content);
+  }
+
+  private async handleFsTreeCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply();
+    const sessionRecord = await this.resolveSessionRecordForFs(runtime, interaction);
+    if (!sessionRecord) {
+      return;
+    }
+
+    const workspace = await this.resolveSessionWorkspaceForFs(runtime, sessionRecord);
+    const requestedPath = normalizeOptionalString(interaction.options.getString('path'));
+    const resolvedPath = resolveFsPathForListing(workspace, requestedPath);
+    if (!resolvedPath) {
+      await interaction.editReply(
+        workspace
+          ? 'Invalid path. Use a workspace-relative path or an absolute path starting with `/`.'
+          : 'Invalid path. Use an absolute path starting with `/`.',
+      );
+      return;
+    }
+
+    const firstLevel = await this.requireContext()
+      .listWorkspaceTree({
+        path: resolvedPath,
+        limit: 200,
+        includeHidden: true,
+      })
+      .catch(() => null as Array<{ name: string; path: string; isDirectory: boolean }> | null);
+    if (!firstLevel) {
+      await interaction.editReply(`Unable to list directory: \`${resolvedPath}\`.`);
+      return;
+    }
+
+    const lines: string[] = [];
+    for (const firstEntry of firstLevel) {
+      lines.push(firstEntry.isDirectory ? `- ${firstEntry.name}/` : `- ${firstEntry.name}`);
+      if (!firstEntry.isDirectory) {
+        continue;
+      }
+      const secondLevel = await this.requireContext()
+        .listWorkspaceTree({
+          path: firstEntry.path,
+          limit: 120,
+          includeHidden: true,
+        })
+        .catch(() => [] as Array<{ name: string; path: string; isDirectory: boolean }>);
+      for (const secondEntry of secondLevel) {
+        lines.push(secondEntry.isDirectory ? `  - ${secondEntry.name}/` : `  - ${secondEntry.name}`);
+      }
+    }
+
+    const content = renderFsTextReply(`Tree (depth=2): ${resolvedPath}`, lines);
+    await interaction.editReply(content);
+  }
+
+  private async resolveSessionRecordForFs(
+    runtime: DiscordRuntime,
+    interaction: ChatInputCommandInteraction,
+  ): Promise<Record<string, unknown> | null> {
+    const target = resolveBindingTargetFromInteraction(interaction);
+    if (!target.bindingChannelId) {
+      await interaction.editReply('Unable to resolve channel binding target.');
+      return null;
+    }
+
+    const sessionId = findSessionIdByTarget(runtime.config, target.bindingChannelId, target.bindingThreadId);
+    if (!sessionId) {
+      await interaction.editReply('No bound session found for this target.');
+      return null;
+    }
+
+    const sessionHistory = await this.requireContext().getSessionHistoryForUser(runtime.ownerUserId, sessionId);
+    const historyRecord = asRecord(sessionHistory) ?? {};
+    const sessionRecord = asRecord(historyRecord.session);
+    if (!sessionRecord) {
+      await interaction.editReply(`Unable to resolve session metadata for \`${sessionId}\`.`);
+      return null;
+    }
+    return sessionRecord;
   }
 
   private async handleProjectListCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
@@ -1367,7 +1490,7 @@ export class DiscordPlugin implements ChannelPlugin {
       return;
     }
     const subcommand = interaction.options.getSubcommand(false);
-    if (subcommand !== 'get') {
+    if (subcommand !== 'get' && subcommand !== 'ls' && subcommand !== 'tree') {
       await interaction.respond([]);
       return;
     }
@@ -2685,6 +2808,34 @@ function buildDiscordFsCommandDefinitions(): ApplicationCommandDataResolvable[] 
             },
           ],
         },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'ls',
+          description: 'List directory entries',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'path',
+              description: 'Directory path (default: current workspace root)',
+              required: false,
+              autocomplete: true,
+            },
+          ],
+        },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'tree',
+          description: 'Show directory tree (depth 2)',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'path',
+              description: 'Directory path (default: current workspace root)',
+              required: false,
+              autocomplete: true,
+            },
+          ],
+        },
       ],
     },
   ];
@@ -3880,6 +4031,27 @@ function resolveFsPathForGet(workspace: string | null, inputPath: string): strin
     return null;
   }
   return resolveFsPathWithinWorkspace(workspace, normalizedInput);
+}
+
+function resolveFsPathForListing(workspace: string | null, inputPath: string | null): string | null {
+  const normalizedInput = inputPath?.trim() ?? '';
+  if (!normalizedInput) {
+    if (workspace) {
+      return path.resolve(workspace);
+    }
+    return path.resolve('/');
+  }
+  return resolveFsPathForGet(workspace, normalizedInput);
+}
+
+function renderFsTextReply(header: string, lines: string[]): string {
+  if (lines.length === 0) {
+    return limitDiscordMessageLength(`${header}\n\`\`\`\n(empty)\n\`\`\``);
+  }
+  const capped = lines.slice(0, 400);
+  const hasMore = lines.length > capped.length;
+  const body = hasMore ? [...capped, `... (${lines.length - capped.length} more)`] : capped;
+  return limitDiscordMessageLength(`${header}\n\`\`\`\n${body.join('\n')}\n\`\`\``);
 }
 
 function isExplicitAbsolutePathInput(value: string): boolean {
