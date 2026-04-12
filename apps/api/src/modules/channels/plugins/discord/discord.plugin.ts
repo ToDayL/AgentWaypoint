@@ -16,8 +16,10 @@ import {
   type StringSelectMenuInteraction,
 } from 'discord.js';
 import type { GatewayDispatchPayload } from 'discord.js';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { HttpProxyAgent } from 'http-proxy-agent';
 import { HttpsProxyAgent } from 'https-proxy-agent';
@@ -769,7 +771,11 @@ export class DiscordPlugin implements ChannelPlugin {
 
     const lines = entries.map((entry) => (entry.isDirectory ? `${entry.name}/` : entry.name));
     const content = renderFsTextReply(`Listing: ${resolvedPath}`, lines);
-    await interaction.editReply(content);
+    await this.editFsReplyWithOverflowAsFile(
+      interaction,
+      content,
+      `fs-ls-${path.basename(resolvedPath) || 'root'}.md`,
+    );
   }
 
   private async handleFsTreeCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
@@ -844,7 +850,11 @@ export class DiscordPlugin implements ChannelPlugin {
     }
 
     const content = renderFsTextReply(`Tree (depth=2): ${resolvedPath}`, lines);
-    await interaction.editReply(content);
+    await this.editFsReplyWithOverflowAsFile(
+      interaction,
+      content,
+      `fs-tree-${path.basename(resolvedPath) || 'root'}.md`,
+    );
   }
 
   private async resolveSessionRecordForFs(
@@ -871,6 +881,42 @@ export class DiscordPlugin implements ChannelPlugin {
       return null;
     }
     return sessionRecord;
+  }
+
+  private async editFsReplyWithOverflowAsFile(
+    interaction: ChatInputCommandInteraction,
+    content: string,
+    fileNameHint: string,
+  ): Promise<void> {
+    if (content.length <= DISCORD_MESSAGE_MAX_LENGTH) {
+      await interaction.editReply(content);
+      return;
+    }
+
+    const baseName = path.basename(fileNameHint || 'fs-output.md');
+    const safeName = sanitizeDiscordFileName(baseName).replace(/\.md$/i, '') || 'fs-output';
+    const fileName = `${safeName}.md`;
+    let tempDirectory: string | null = null;
+    try {
+      tempDirectory = await mkdtemp(path.join(tmpdir(), 'agentwaypoint-discord-fs-'));
+      const filePath = path.join(tempDirectory, fileName);
+      await writeFile(filePath, content, 'utf8');
+      await interaction.editReply({
+        content: limitDiscordMessageLength(`Output exceeds Discord message limit. Attached: \`${fileName}\`.`),
+        files: [
+          {
+            attachment: filePath,
+            name: fileName,
+          },
+        ],
+      });
+    } catch {
+      await interaction.editReply(limitDiscordMessageLength(content));
+    } finally {
+      if (tempDirectory) {
+        await rm(tempDirectory, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
   }
 
   private async handleProjectListCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
@@ -4079,12 +4125,12 @@ function resolveFsPathForListing(workspace: string | null, inputPath: string | n
 
 function renderFsTextReply(header: string, lines: string[]): string {
   if (lines.length === 0) {
-    return limitDiscordMessageLength(`${header}\n\`\`\`\n(empty)\n\`\`\``);
+    return `${header}\n\`\`\`\n(empty)\n\`\`\``;
   }
   const capped = lines.slice(0, 400);
   const hasMore = lines.length > capped.length;
   const body = hasMore ? [...capped, `... (${lines.length - capped.length} more)`] : capped;
-  return limitDiscordMessageLength(`${header}\n\`\`\`\n${body.join('\n')}\n\`\`\``);
+  return `${header}\n\`\`\`\n${body.join('\n')}\n\`\`\``;
 }
 
 function isExplicitAbsolutePathInput(value: string): boolean {
