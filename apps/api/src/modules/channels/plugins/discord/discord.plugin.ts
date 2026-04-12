@@ -4039,7 +4039,7 @@ function resolveFsPathForListing(workspace: string | null, inputPath: string | n
     if (workspace) {
       return path.resolve(workspace);
     }
-    return path.resolve('/');
+    return null;
   }
   return resolveFsPathForGet(workspace, normalizedInput);
 }
