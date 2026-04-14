@@ -44,6 +44,7 @@ export const UpdateSessionBodySchema = z
     title: z.string().trim().min(1).max(200).optional(),
     backendConfig: BackendConfigSchema.optional(),
   })
+  .strict()
   .superRefine((input, ctx) => {
     if (typeof input.backendConfig !== 'undefined') {
       const model = input.backendConfig.model;

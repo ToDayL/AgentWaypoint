@@ -336,6 +336,17 @@ describe('API e2e', () => {
       },
     });
     expect(patchResponse.statusCode).toBe(400);
+
+    const patchWithKnownAndUnknownResponse = await app.inject({
+      method: 'PATCH',
+      url: `/api/sessions/${session.id}`,
+      headers: { 'x-user-email': email },
+      payload: {
+        title: 'Renamed',
+        backend: 'claude',
+      },
+    });
+    expect(patchWithKnownAndUnknownResponse.statusCode).toBe(400);
   });
 
   it('updates project config and applies it to existing sessions for new turns', async () => {
