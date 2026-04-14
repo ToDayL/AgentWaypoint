@@ -65,8 +65,10 @@ type Project = {
 
 type Session = {
   id: string;
+  projectId?: string;
   title: string;
   status: string;
+  meta?: Record<string, unknown> | null;
   updatedAt: string;
 };
 
@@ -346,6 +348,30 @@ function readTurnRuntimeConfig(config: Record<string, unknown> | null | undefine
   return { cwd, model, sandbox, approvalPolicy };
 }
 
+function readSessionRuntimeConfig(meta: Record<string, unknown> | null | undefined): {
+  backend: string | null;
+  cwd: string | null;
+  backendConfig: Record<string, unknown> | null;
+} {
+  if (!meta || typeof meta !== 'object') {
+    return { backend: null, cwd: null, backendConfig: null };
+  }
+  const runtime =
+    meta.runtime && typeof meta.runtime === 'object' && !Array.isArray(meta.runtime)
+      ? (meta.runtime as Record<string, unknown>)
+      : null;
+  if (!runtime) {
+    return { backend: null, cwd: null, backendConfig: null };
+  }
+  const backend = typeof runtime.backend === 'string' && runtime.backend.trim() ? runtime.backend.trim() : null;
+  const cwd = typeof runtime.cwd === 'string' && runtime.cwd.trim() ? runtime.cwd.trim() : null;
+  const backendConfig =
+    runtime.backendConfig && typeof runtime.backendConfig === 'object' && !Array.isArray(runtime.backendConfig)
+      ? (runtime.backendConfig as Record<string, unknown>)
+      : null;
+  return { backend, cwd, backendConfig };
+}
+
 type RateLimitWindow = {
   usedPercent: number | null;
   resetsAt: number | null;
@@ -476,6 +502,7 @@ type ActionPanelMode =
   | 'createProject'
   | 'createSession'
   | 'projectConfig'
+  | 'sessionConfig'
   | 'createDiscordIntegration'
   | 'discordIntegrationConfig'
   | 'createUser'
@@ -554,6 +581,11 @@ export default function HomePage() {
   const [projectConfigBackend, setProjectConfigBackend] = useState('codex');
   const [projectConfigDefaultModel, setProjectConfigDefaultModel] = useState(DEFAULT_CODEX_MODEL);
   const [projectConfigExecutionMode, setProjectConfigExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
+  const [sessionConfigName, setSessionConfigName] = useState('');
+  const [sessionConfigBackend, setSessionConfigBackend] = useState('codex');
+  const [sessionConfigWorkspacePath, setSessionConfigWorkspacePath] = useState('');
+  const [sessionConfigDefaultModel, setSessionConfigDefaultModel] = useState(DEFAULT_CODEX_MODEL);
+  const [sessionConfigExecutionMode, setSessionConfigExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
   const [newSessionTitle, setNewSessionTitle] = useState('First Simulation Session');
   const [newSessionRepoPath, setNewSessionRepoPath] = useState('');
   const [newSessionBackend, setNewSessionBackend] = useState('codex');
@@ -668,11 +700,13 @@ export default function HomePage() {
     const turnRuntime = readTurnRuntimeConfig(sessionInfoTurn?.effectiveBackendConfig);
     const effectiveBackendConfig = sessionInfoTurn?.effectiveBackendConfig ?? null;
     const effectiveRuntimeConfig = sessionInfoTurn?.effectiveRuntimeConfig ?? null;
+    const sessionRuntime = readSessionRuntimeConfig(selectedSession?.meta ?? null);
     const workspace =
       turnRuntime.cwd ||
+      sessionRuntime.cwd ||
       selectedProject?.repoPath?.trim() ||
       'not set';
-    const codexBackendConfig = readCodexBackendConfig(selectedProject?.backendConfig);
+    const codexBackendConfig = readCodexBackendConfig(sessionRuntime.backendConfig ?? selectedProject?.backendConfig);
     const effectiveExecutionMode =
       typeof effectiveBackendConfig?.executionMode === 'string' && effectiveBackendConfig.executionMode.trim()
         ? effectiveBackendConfig.executionMode.trim()
@@ -1900,7 +1934,7 @@ export default function HomePage() {
 
   async function loadAvailableModels(
     backend = 'codex',
-    options?: { target?: 'new' | 'config' | 'session' | 'both'; preferredModel?: string | null },
+    options?: { target?: 'new' | 'config' | 'session' | 'sessionConfig' | 'both'; preferredModel?: string | null },
   ): Promise<void> {
     try {
       const query = new URLSearchParams();
@@ -1938,6 +1972,9 @@ export default function HomePage() {
       }
       if (target === 'both' || target === 'session') {
         setNewSessionDefaultModel((current) => resolvePreferredModel(current));
+      }
+      if (target === 'sessionConfig') {
+        setSessionConfigDefaultModel((current) => resolvePreferredModel(current));
       }
     } catch (requestError) {
       setError(extractMessage(requestError));
@@ -2971,6 +3008,41 @@ export default function HomePage() {
     }
   }
 
+  async function handleUpdateSessionConfigFromPanel(): Promise<void> {
+    if (!selectedSessionId || !sessionConfigName.trim()) {
+      return;
+    }
+
+    setBusy(true);
+    setError('');
+    try {
+      const backendConfig = buildCodexBackendConfig({
+        model: sessionConfigDefaultModel,
+        executionMode: sessionConfigExecutionMode,
+      });
+      await apiRequest<Session>(`/api/channels/plugins/web/app/sessions/${selectedSessionId}`, {
+        method: 'PATCH',
+        body: {
+          title: sessionConfigName.trim(),
+          ...(backendConfig ? { backendConfig } : {}),
+        },
+      });
+      if (selectedProjectId) {
+        await loadSessions(selectedProjectId);
+      }
+      await loadSessionHistory(selectedSessionId, {
+        resumeStream: false,
+        resetEventLog: false,
+        resetInspectPanel: false,
+      });
+      closeActionPanel();
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function openActionPanel(mode: ActionPanelMode): void {
     if (mode === 'createProject') {
       setNewProjectBackend(fallbackProjectBackend);
@@ -3036,6 +3108,22 @@ export default function HomePage() {
     setProjectConfigExecutionMode(backendConfig.executionMode);
     void loadAvailableModels(resolvedBackend, { target: 'config', preferredModel: backendConfig.model });
     openActionPanel('projectConfig');
+  }
+
+  function openSessionConfigPanel(session: Session, project: Project): void {
+    const sessionRuntime = readSessionRuntimeConfig(session.meta ?? null);
+    const backend = sessionRuntime.backend ?? project.backend?.trim() ?? fallbackProjectBackend;
+    const resolvedBackend = supportedBackends.includes(backend) ? backend : fallbackProjectBackend;
+    const sessionBackendConfig = readCodexBackendConfig(sessionRuntime.backendConfig ?? project.backendConfig);
+    setSelectedProjectId(project.id);
+    setSelectedSessionId(session.id);
+    setSessionConfigName(session.title);
+    setSessionConfigBackend(resolvedBackend);
+    setSessionConfigWorkspacePath(sessionRuntime.cwd ?? project.repoPath ?? '');
+    setSessionConfigDefaultModel(sessionBackendConfig.model);
+    setSessionConfigExecutionMode(sessionBackendConfig.executionMode);
+    void loadAvailableModels(resolvedBackend, { target: 'sessionConfig', preferredModel: sessionBackendConfig.model });
+    openActionPanel('sessionConfig');
   }
 
   function handleLeftSidebarButtonClick(): void {
@@ -3839,6 +3927,66 @@ export default function HomePage() {
                   </div>
                 </div>
               ) : null}
+              {actionPanelMode === 'sessionConfig' ? (
+                <div className="action-panel-body">
+                  <h3>Session Config</h3>
+                  <label>
+                    Title
+                    <input value={sessionConfigName} onChange={(event) => setSessionConfigName(event.target.value)} />
+                  </label>
+                  <label>
+                    Backend
+                    <select value={sessionConfigBackend} disabled>
+                      {projectBackendOptions.map((option) => (
+                        <option key={`session-config-backend-${option.value}`} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="sim-input-hint">Backend is fixed after session creation.</span>
+                  </label>
+                  <label>
+                    Workspace Path
+                    <input value={sessionConfigWorkspacePath} disabled />
+                    <span className="sim-input-hint">Workspace path is fixed after session creation.</span>
+                  </label>
+                  <label>
+                    Default Model
+                    <select
+                      value={sessionConfigDefaultModel}
+                      onChange={(event) => setSessionConfigDefaultModel(event.target.value)}
+                    >
+                      {availableModels.map((model) => (
+                        <option key={model.id} value={model.model}>
+                          {model.displayName}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Execution Mode
+                    <select value={sessionConfigExecutionMode} onChange={(event) => setSessionConfigExecutionMode(event.target.value)}>
+                      {EXECUTION_MODE_OPTIONS.map((option) => (
+                        <option key={`session-config-execution-mode-${option.value}`} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="sim-actions">
+                    <button
+                      type="button"
+                      onClick={() => void handleUpdateSessionConfigFromPanel()}
+                      disabled={busy || !sessionConfigName.trim()}
+                    >
+                      Save
+                    </button>
+                    <button type="button" className="button-secondary" onClick={() => closeActionPanel()}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               {actionPanelMode === 'createDiscordIntegration' || actionPanelMode === 'discordIntegrationConfig' ? (
                 <div className="action-panel-body">
                   <h3>{actionPanelMode === 'createDiscordIntegration' ? 'Add Discord Integration' : 'Discord Config'}</h3>
@@ -4325,6 +4473,19 @@ export default function HomePage() {
                                       >
                                         <span className="tree-label">{session.title}</span>
                                         <div className="row-actions">
+                                          <button
+                                            type="button"
+                                            className="icon-button"
+                                            title="Session Config"
+                                            aria-label="Session Config"
+                                            onClick={(event) => {
+                                              event.stopPropagation();
+                                              openSessionConfigPanel(session, project);
+                                            }}
+                                            disabled={busy}
+                                          >
+                                            <Settings />
+                                          </button>
                                           <button
                                             type="button"
                                             className="icon-button"

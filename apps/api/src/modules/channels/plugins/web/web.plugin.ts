@@ -8,7 +8,7 @@ import {
   WorkspaceTreeEntry,
   WorkspaceUploadResult,
 } from '../../../runner/runner.types';
-import { CreateSessionBody, ForkSessionBody } from '../../../sessions/sessions.schemas';
+import { CreateSessionBody, ForkSessionBody, UpdateSessionBody } from '../../../sessions/sessions.schemas';
 import { CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from '../../../turns/turns.schemas';
 import { GatewayApprovalBody, GatewayInboundBody } from '../../gateway.schemas';
 import { ChannelPlugin, ChannelPluginContext, PluginBindingPolicy, PluginDispatchContext } from '../plugin.types';
@@ -115,6 +115,10 @@ export class WebPlugin implements ChannelPlugin {
 
   async createSessionForProject(userId: string, projectId: string, input: CreateSessionBody): Promise<unknown> {
     return this.requireContext().createSessionForProject(userId, projectId, input);
+  }
+
+  async updateSessionForUser(userId: string, sessionId: string, input: UpdateSessionBody): Promise<unknown> {
+    return this.requireContext().updateSessionForUser(userId, sessionId, input);
   }
 
   async getSessionHistoryForUser(userId: string, sessionId: string): Promise<unknown> {

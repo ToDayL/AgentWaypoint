@@ -218,6 +218,126 @@ describe('API e2e', () => {
     });
   });
 
+  it('updates session config for model and execution mode while keeping backend and cwd fixed', async () => {
+    const email = randomEmail('session-config-update');
+
+    const projectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Session Config Project',
+        repoPath: TEST_REPO_PATH,
+        backend: 'codex',
+        backendConfig: {
+          model: 'gpt-5-codex',
+          executionMode: 'safe-write',
+        },
+      },
+    });
+    expect(projectResponse.statusCode).toBe(201);
+    const project = projectResponse.json() as { id: string };
+
+    const sessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Config Session' },
+    });
+    expect(sessionResponse.statusCode).toBe(201);
+    const session = sessionResponse.json() as { id: string };
+
+    const patchResponse = await app.inject({
+      method: 'PATCH',
+      url: `/api/sessions/${session.id}`,
+      headers: { 'x-user-email': email },
+      payload: {
+        title: 'Config Session Updated',
+        backendConfig: {
+          model: 'gpt-5-mini',
+          executionMode: 'yolo',
+        },
+      },
+    });
+    expect(patchResponse.statusCode).toBe(200);
+    const patched = patchResponse.json() as { title: string; meta?: Record<string, unknown> };
+    expect(patched.title).toBe('Config Session Updated');
+    expect(patched.meta).toMatchObject({
+      runtime: {
+        backend: 'codex',
+        cwd: TEST_REPO_PATH,
+        backendConfig: {
+          model: 'gpt-5-mini',
+          executionMode: 'yolo',
+        },
+      },
+    });
+
+    const createTurnResponse = await app.inject({
+      method: 'POST',
+      url: `/api/sessions/${session.id}/turns`,
+      headers: { 'x-user-email': email },
+      payload: { content: 'check updated model and policy' },
+    });
+    expect(createTurnResponse.statusCode).toBe(201);
+    const { turnId } = createTurnResponse.json() as { turnId: string };
+
+    await sleep(1200);
+
+    const turnStatusResponse = await app.inject({
+      method: 'GET',
+      url: `/api/turns/${turnId}`,
+      headers: { 'x-user-email': email },
+    });
+    expect(turnStatusResponse.statusCode).toBe(200);
+    expect(turnStatusResponse.json()).toMatchObject({
+      effectiveBackendConfig: {
+        model: 'gpt-5-mini',
+        executionMode: 'yolo',
+      },
+    });
+  });
+
+  it('rejects session update payload fields outside title and backendConfig', async () => {
+    const email = randomEmail('session-config-invalid-fields');
+
+    const projectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Session Config Validation Project',
+        repoPath: TEST_REPO_PATH,
+        backend: 'codex',
+        backendConfig: {
+          model: 'gpt-5-codex',
+          executionMode: 'safe-write',
+        },
+      },
+    });
+    expect(projectResponse.statusCode).toBe(201);
+    const project = projectResponse.json() as { id: string };
+
+    const sessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Config Validation Session' },
+    });
+    expect(sessionResponse.statusCode).toBe(201);
+    const session = sessionResponse.json() as { id: string };
+
+    const patchResponse = await app.inject({
+      method: 'PATCH',
+      url: `/api/sessions/${session.id}`,
+      headers: { 'x-user-email': email },
+      payload: {
+        backend: 'claude',
+      },
+    });
+    expect(patchResponse.statusCode).toBe(400);
+  });
+
   it('updates project config and applies it to existing sessions for new turns', async () => {
     const email = randomEmail('project-config-update');
 

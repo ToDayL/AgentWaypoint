@@ -642,6 +642,10 @@ export class DiscordPlugin implements ChannelPlugin {
       await this.handleSessionHistoryCommand(runtime, interaction);
       return;
     }
+    if (subcommand === 'change') {
+      await this.handleSessionChangeCommand(runtime, interaction);
+      return;
+    }
     await safeReply(interaction, `Unsupported subcommand: ${subcommand}`);
   }
 
@@ -1346,6 +1350,59 @@ export class DiscordPlugin implements ChannelPlugin {
     await interaction.editReply(limitDiscordMessageLength(`Session history (\`${sessionId}\`, last ${rendered.length}):\n${rendered.join('\n')}`));
   }
 
+  private async handleSessionChangeCommand(runtime: DiscordRuntime, interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply({ ephemeral: true });
+    const target = resolveBindingTargetFromInteraction(interaction);
+    if (!target.bindingChannelId) {
+      await interaction.editReply('Unable to resolve channel binding target.');
+      return;
+    }
+
+    const projectRef = normalizeOptionalString(interaction.options.getString('project'));
+    const sessionRef = normalizeOptionalString(interaction.options.getString('session'));
+    const title = normalizeOptionalString(interaction.options.getString('title'));
+    const model = normalizeOptionalString(interaction.options.getString('model'));
+    const executionMode = normalizeOptionalString(interaction.options.getString('execution_mode'));
+    if (!title && !model && !executionMode) {
+      await interaction.editReply('No changes provided.');
+      return;
+    }
+
+    const project = projectRef
+      ? await this.resolveProjectByRef(runtime.ownerUserId, projectRef)
+      : await this.resolveBoundProjectForInteraction(runtime, interaction);
+    if (!project) {
+      await interaction.editReply(projectRef ? `Project not found: ${projectRef}` : 'No bound project found.');
+      return;
+    }
+    const projectId = readRequiredId(project, 'project');
+
+    const boundSessionId = findSessionIdByTarget(runtime.config, target.bindingChannelId, target.bindingThreadId);
+    const session = sessionRef
+      ? await this.resolveSessionByRef(runtime.ownerUserId, projectId, sessionRef)
+      : boundSessionId
+        ? await this.resolveSessionByRef(runtime.ownerUserId, projectId, boundSessionId)
+        : null;
+    if (!session) {
+      await interaction.editReply(
+        sessionRef ? `Session not found: ${sessionRef}` : 'No bound session found for this target.',
+      );
+      return;
+    }
+
+    const sessionId = readRequiredId(session, 'session');
+    const history = await this.requireContext().getSessionHistoryForUser(runtime.ownerUserId, sessionId);
+    const historyRecord = asRecord(history) ?? {};
+    const sessionRecord = asRecord(historyRecord.session) ?? session;
+    const updateInput = buildSessionUpdateInput(sessionRecord, {
+      title,
+      model,
+      executionMode,
+    });
+    await this.requireContext().updateSessionForUser(runtime.ownerUserId, sessionId, updateInput);
+    await interaction.editReply(`Updated session \`${sessionId}\`.`);
+  }
+
   private async handleCommandAutocomplete(
     runtime: DiscordRuntime,
     interaction: AutocompleteInteraction,
@@ -1527,7 +1584,7 @@ export class DiscordPlugin implements ChannelPlugin {
       return;
     }
 
-    if (focused.name === 'session' && (subcommand === 'bind' || subcommand === 'info' || subcommand === 'history')) {
+    if (focused.name === 'session' && (subcommand === 'bind' || subcommand === 'info' || subcommand === 'history' || subcommand === 'change')) {
       const projectRef = normalizeOptionalString(interaction.options.getString('project'));
       const project = projectRef
         ? await this.resolveProjectByRef(runtime.ownerUserId, projectRef)
@@ -3062,6 +3119,47 @@ function buildDiscordSessionCommandDefinitions(): ApplicationCommandDataResolvab
             },
           ],
         },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'change',
+          description: 'Update session title/model/execution mode',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'project',
+              description: 'Project id (or exact project name). Omit to use current binding',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'session',
+              description: 'Session id (or exact session title). Omit to use current binding',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'title',
+              description: 'Updated session title',
+              required: false,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'model',
+              description: 'Updated default model',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'execution_mode',
+              description: 'Updated execution mode',
+              required: false,
+              autocomplete: true,
+            },
+          ],
+        },
       ],
     },
   ];
@@ -3609,6 +3707,47 @@ function buildProjectUpdateInput(
     const executionMode = input.executionMode ?? normalizeOptionalString(existingBackendConfig.executionMode);
     if (!model || !executionMode) {
       throw new Error('Both model and execution mode must be provided (or already set on project).');
+    }
+    if (!EXECUTION_MODE_CHOICES.includes(executionMode as (typeof EXECUTION_MODE_CHOICES)[number])) {
+      throw new Error(`Unsupported execution mode: ${executionMode}`);
+    }
+    update.backendConfig = {
+      ...existingBackendConfig,
+      model,
+      executionMode,
+    };
+  }
+
+  return update;
+}
+
+function buildSessionUpdateInput(
+  session: Record<string, unknown>,
+  input: {
+    title: string | null;
+    model: string | null;
+    executionMode: string | null;
+  },
+): {
+  title?: string;
+  backendConfig?: Record<string, unknown>;
+} {
+  const update: {
+    title?: string;
+    backendConfig?: Record<string, unknown>;
+  } = {};
+
+  if (input.title) {
+    update.title = input.title;
+  }
+
+  if (input.model || input.executionMode) {
+    const runtime = readSessionRuntimeMetaForDisplay(session.meta);
+    const existingBackendConfig = normalizeJsonRecordForDisplay(runtime.backendConfig);
+    const model = input.model ?? normalizeOptionalString(existingBackendConfig.model);
+    const executionMode = input.executionMode ?? normalizeOptionalString(existingBackendConfig.executionMode);
+    if (!model || !executionMode) {
+      throw new Error('Both model and execution mode must be provided (or already set on session).');
     }
     if (!EXECUTION_MODE_CHOICES.includes(executionMode as (typeof EXECUTION_MODE_CHOICES)[number])) {
       throw new Error(`Unsupported execution mode: ${executionMode}`);
