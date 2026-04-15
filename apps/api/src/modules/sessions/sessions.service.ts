@@ -3,7 +3,7 @@ import { ConflictException, Inject, Injectable, Logger, NotFoundException } from
 import { PrismaService } from '../prisma/prisma.service';
 import { ProjectsService } from '../projects/projects.service';
 import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
-import { CreateSessionBody, ForkSessionBody } from './sessions.schemas';
+import { CreateSessionBody, ForkSessionBody, UpdateSessionBody } from './sessions.schemas';
 
 const ACTIVE_TURN_STATUSES = new Set(['queued', 'running', 'waiting_approval']);
 const EXECUTION_MODES = new Set(['read-only', 'safe-write', 'yolo']);
@@ -156,6 +156,56 @@ export class SessionsService {
       activeTurnId: activeTurn?.id ?? null,
       activeTurnStatus: activeTurn?.status ?? null,
     };
+  }
+
+  async updateByIdForUser(userId: string, sessionId: string, input: UpdateSessionBody) {
+    const session = await this.prisma.session.findFirst({
+      where: {
+        id: sessionId,
+        project: {
+          ownerUserId: userId,
+        },
+      },
+      select: {
+        id: true,
+        meta: true,
+      },
+    });
+
+    if (!session) {
+      throw new NotFoundException({ message: 'Session not found' });
+    }
+
+    const runtime = readSessionRuntimeForExecution(session.meta);
+    const rootMeta = normalizeJsonRecord(session.meta) ?? {};
+    const currentOverride = normalizeJsonRecord(rootMeta.override) ?? {};
+
+    const runtimeBackendConfig = resolveRuntimeBackendConfig({
+      backend: runtime.backend,
+      inherited: runtime.backendConfig,
+      override: input.backendConfig,
+    });
+
+    const nextMeta = {
+      ...rootMeta,
+      runtime: {
+        backend: runtime.backend,
+        cwd: runtime.cwd,
+        backendConfig: runtimeBackendConfig,
+      },
+      override: {
+        ...currentOverride,
+        ...(input.backendConfig ? { backendConfig: runtimeBackendConfig } : {}),
+      },
+    };
+
+    return this.prisma.session.update({
+      where: { id: sessionId },
+      data: {
+        title: input.title,
+        meta: toPrismaJson(nextMeta),
+      },
+    });
   }
 
   async forkSessionForUser(userId: string, sessionId: string, input: ForkSessionBody) {

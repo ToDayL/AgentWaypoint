@@ -2,7 +2,7 @@ import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nest
 import { BotMessage } from '@prisma/client';
 import { ProjectsService } from '../projects/projects.service';
 import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
-import { CreateSessionBody, ForkSessionBody } from '../sessions/sessions.schemas';
+import { CreateSessionBody, ForkSessionBody, UpdateSessionBody } from '../sessions/sessions.schemas';
 import { SessionsService } from '../sessions/sessions.service';
 import { CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from '../turns/turns.schemas';
 import { TurnsService } from '../turns/turns.service';
@@ -70,6 +70,7 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
     },
     listSessionsForProject: async (userId, projectId) => this.sessionsService.listForProject(userId, projectId),
     createSessionForProject: async (userId, projectId, input) => this.sessionsService.createForProject(userId, projectId, input),
+    updateSessionForUser: async (userId, sessionId, input) => this.sessionsService.updateByIdForUser(userId, sessionId, input),
     getSessionHistoryForUser: async (userId, sessionId) => this.sessionsService.getHistoryForSession(userId, sessionId),
     deleteSessionForUser: async (userId, sessionId) => {
       await this.sessionsService.deleteByIdForUser(userId, sessionId);
@@ -256,6 +257,10 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
 
   async createSessionForProject(userId: string, projectId: string, input: CreateSessionBody) {
     return this.sessionsService.createForProject(userId, projectId, input);
+  }
+
+  async updateSessionForUser(userId: string, sessionId: string, input: UpdateSessionBody) {
+    return this.sessionsService.updateByIdForUser(userId, sessionId, input);
   }
 
   async getSessionHistoryForUser(userId: string, sessionId: string) {

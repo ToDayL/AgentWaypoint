@@ -38,6 +38,7 @@ import {
   WorkspaceTreeQuerySchema,
   WebPluginModelsQuerySchema,
   WebPluginUpdateProjectBodySchema,
+  UpdateSessionBodySchema,
 } from './web-app.schemas';
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
@@ -214,6 +215,13 @@ export class WebPluginAppController {
   async getSessionHistory(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown) {
     const { id } = parseWithZod(SessionIdParamsSchema, params);
     return this.webPlugin.getSessionHistoryForUser(user.id, id);
+  }
+
+  @Patch('sessions/:id')
+  async updateSession(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown, @Body() body: unknown) {
+    const { id } = parseWithZod(SessionIdParamsSchema, params);
+    const input = parseWithZod(UpdateSessionBodySchema, body);
+    return this.webPlugin.updateSessionForUser(user.id, id, input);
   }
 
   @Delete('sessions/:id')

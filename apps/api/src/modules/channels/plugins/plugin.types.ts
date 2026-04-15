@@ -1,5 +1,5 @@
 import { BotMessage } from '@prisma/client';
-import { CreateSessionBody, ForkSessionBody } from '../../sessions/sessions.schemas';
+import { CreateSessionBody, ForkSessionBody, UpdateSessionBody } from '../../sessions/sessions.schemas';
 import { CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from '../../turns/turns.schemas';
 import {
   AvailableModel,
@@ -78,6 +78,7 @@ export interface ChannelPluginContext {
   deleteProjectForUser(userId: string, projectId: string): Promise<void>;
   listSessionsForProject(userId: string, projectId: string): Promise<unknown>;
   createSessionForProject(userId: string, projectId: string, input: CreateSessionBody): Promise<unknown>;
+  updateSessionForUser(userId: string, sessionId: string, input: UpdateSessionBody): Promise<unknown>;
   getSessionHistoryForUser(userId: string, sessionId: string): Promise<unknown>;
   deleteSessionForUser(userId: string, sessionId: string): Promise<void>;
   forkSessionForUser(userId: string, sessionId: string, input: ForkSessionBody): Promise<unknown>;

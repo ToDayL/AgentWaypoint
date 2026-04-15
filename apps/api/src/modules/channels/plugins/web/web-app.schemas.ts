@@ -11,6 +11,7 @@ import {
   ForkSessionBodySchema,
   ProjectIdOnlyParamsSchema,
   SessionIdParamsSchema,
+  UpdateSessionBodySchema,
 } from '../../../sessions/sessions.schemas';
 import {
   CreateTurnBodySchema,
@@ -49,6 +50,7 @@ export {
   ProjectIdParamsSchema,
   SessionIdParamsSchema,
   CreateSessionBodySchema,
+  UpdateSessionBodySchema,
   ForkSessionBodySchema,
   TurnIdParamsSchema,
   CreateTurnBodySchema,
