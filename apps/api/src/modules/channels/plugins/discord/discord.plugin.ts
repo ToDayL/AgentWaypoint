@@ -488,6 +488,7 @@ export class DiscordPlugin implements ChannelPlugin {
       );
       runtime.reconnectAttempt = 0;
       this.clearRuntimeReconnectTimer(runtime);
+      void this.markRuntimeHealthy(runtime);
       this.logger.log(
         `Discord runtime started for integration ${runtime.integrationId} as ${runtime.client.user?.tag ?? 'unknown'} (${runtime.client.user?.id ?? 'unknown'})`,
       );
@@ -521,12 +522,13 @@ export class DiscordPlugin implements ChannelPlugin {
   }
 
   private scheduleRuntimeRecovery(runtime: DiscordRuntime, reason: string): void {
-    if (runtime.stopped || runtime.recoveryInFlight || runtime.reconnectTimer) {
+    if (runtime.stopped || runtime.reconnectTimer) {
       return;
     }
 
     runtime.reconnectAttempt += 1;
     if (runtime.reconnectAttempt <= DISCORD_RECONNECT_MAX_ATTEMPTS) {
+      void this.markRuntimeError(runtime, reason);
       const delay = Math.min(
         DISCORD_RECONNECT_MAX_DELAY_MS,
         DISCORD_RECONNECT_BASE_DELAY_MS * 2 ** Math.max(0, runtime.reconnectAttempt - 1),
@@ -542,12 +544,13 @@ export class DiscordPlugin implements ChannelPlugin {
     }
 
     this.logger.warn(
-      `Reconnect retries exhausted for integration ${runtime.integrationId}; restarting runtime due to ${reason}`,
+      `Reconnect retries exhausted for integration ${runtime.integrationId}; disabling runtime until integration is reconfigured or service restarts (last reason: ${reason})`,
     );
-    runtime.reconnectTimer = setTimeout(() => {
-      runtime.reconnectTimer = null;
-      void this.restartIntegrationRuntime(runtime.integrationId, reason);
-    }, DISCORD_RECONNECT_BASE_DELAY_MS);
+    void this.markRuntimeError(
+      runtime,
+      `Reconnect retries exhausted after ${DISCORD_RECONNECT_MAX_ATTEMPTS} attempts. Last reason: ${reason}`,
+    );
+    void this.stopRuntime(runtime);
   }
 
   private async reconnectRuntime(runtime: DiscordRuntime, reason: string): Promise<void> {
@@ -568,40 +571,30 @@ export class DiscordPlugin implements ChannelPlugin {
     }
   }
 
-  private async restartIntegrationRuntime(integrationId: string, reason: string): Promise<void> {
-    const existing = this.runtimes.get(integrationId);
-    if (existing) {
-      this.runtimes.delete(integrationId);
-      await this.stopRuntime(existing);
-    }
-
-    try {
-      const activeIntegrations = await this.channelsService.listActiveIntegrationsForGateway({});
-      const integration = activeIntegrations.find((item) => item.provider === this.provider && item.id === integrationId);
-      if (!integration) {
-        this.logger.warn(`Skipping Discord runtime restart for integration ${integrationId}: integration not active`);
-        return;
-      }
-      const runtime = this.createRuntime(integration);
-      if (!runtime) {
-        this.logger.warn(`Skipping Discord runtime restart for integration ${integrationId}: runtime config invalid`);
-        return;
-      }
-      this.runtimes.set(integrationId, runtime);
-      this.logger.warn(`Restarting Discord runtime for integration ${integrationId} after ${reason}`);
-      await this.startRuntime(runtime);
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : 'unknown restart error';
-      this.logger.warn(`Failed to restart Discord runtime ${integrationId}: ${message}`);
-    }
-  }
-
   private clearRuntimeReconnectTimer(runtime: DiscordRuntime): void {
     if (!runtime.reconnectTimer) {
       return;
     }
     clearTimeout(runtime.reconnectTimer);
     runtime.reconnectTimer = null;
+  }
+
+  private async markRuntimeHealthy(runtime: DiscordRuntime): Promise<void> {
+    try {
+      await this.channelsService.markIntegrationRuntimeHealthyForGateway(runtime.integrationId);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'unknown health update error';
+      this.logger.warn(`Failed to mark Discord integration healthy ${runtime.integrationId}: ${message}`);
+    }
+  }
+
+  private async markRuntimeError(runtime: DiscordRuntime, reason: string): Promise<void> {
+    try {
+      await this.channelsService.markIntegrationRuntimeErrorForGateway(runtime.integrationId, reason);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'unknown health update error';
+      this.logger.warn(`Failed to mark Discord integration error ${runtime.integrationId}: ${message}`);
+    }
   }
 
   private installProcessSafetyGuards(): void {

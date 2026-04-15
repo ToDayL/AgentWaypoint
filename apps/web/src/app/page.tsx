@@ -221,9 +221,14 @@ type BotIntegration = {
   status: BotIntegrationStatus;
   credentialsEncrypted: Record<string, unknown> | null;
   pluginConfig: Record<string, unknown> | null;
+  lastSyncAt?: string | null;
+  lastErrorAt?: string | null;
+  lastErrorMessage?: string | null;
   createdAt: string;
   updatedAt: string;
 };
+
+type IntegrationRuntimeLight = 'green' | 'yellow' | 'red' | 'gray';
 
 type WorkspaceTreeEntry = {
   name: string;
@@ -4705,42 +4710,52 @@ export default function HomePage() {
                                 <td colSpan={5}>No bot integrations.</td>
                               </tr>
                             ) : null}
-                            {botIntegrations.map((integration) => (
-                              <tr key={integration.id}>
-                                <td>{integration.provider}</td>
-                                <td>{integration.name}</td>
-                                <td>{integration.status}</td>
-                                <td>{new Date(integration.updatedAt).toLocaleString()}</td>
-                                <td>
-                                  <div className="row-actions">
-                                    <button
-                                      type="button"
-                                      className="icon-button"
-                                      aria-label={`Configure ${integration.name}`}
-                                      title={`Configure ${integration.name}`}
-                                      onClick={() => {
-                                        if (integration.provider === 'discord') {
-                                          openDiscordConfigPanel(integration);
-                                        }
-                                      }}
-                                      disabled={busy || integration.provider !== 'discord'}
-                                    >
-                                      <Settings />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="icon-button"
-                                      aria-label={`Remove ${integration.name}`}
-                                      title={`Remove ${integration.name}`}
-                                      onClick={() => void handleRemoveBotIntegration(integration.id)}
-                                      disabled={busy}
-                                    >
-                                      <Trash2 />
-                                    </button>
-                                  </div>
-                                </td>
-                              </tr>
-                            ))}
+                            {botIntegrations.map((integration) => {
+                              const runtimeLight = computeIntegrationRuntimeLight(integration);
+                              const runtimeLabel = integrationRuntimeLabel(runtimeLight, integration);
+                              const runtimeTitle = integrationRuntimeTitle(integration, runtimeLight);
+                              return (
+                                <tr key={integration.id}>
+                                  <td>{integration.provider}</td>
+                                  <td>{integration.name}</td>
+                                  <td title={runtimeTitle}>
+                                    <span className={`integration-runtime-light integration-runtime-light-${runtimeLight}`} aria-hidden>
+                                      <span />
+                                    </span>
+                                    <span className="integration-runtime-label">{runtimeLabel}</span>
+                                  </td>
+                                  <td>{new Date(integration.updatedAt).toLocaleString()}</td>
+                                  <td>
+                                    <div className="row-actions">
+                                      <button
+                                        type="button"
+                                        className="icon-button"
+                                        aria-label={`Configure ${integration.name}`}
+                                        title={`Configure ${integration.name}`}
+                                        onClick={() => {
+                                          if (integration.provider === 'discord') {
+                                            openDiscordConfigPanel(integration);
+                                          }
+                                        }}
+                                        disabled={busy || integration.provider !== 'discord'}
+                                      >
+                                        <Settings />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="icon-button"
+                                        aria-label={`Remove ${integration.name}`}
+                                        title={`Remove ${integration.name}`}
+                                        onClick={() => void handleRemoveBotIntegration(integration.id)}
+                                        disabled={busy}
+                                      >
+                                        <Trash2 />
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
                           </tbody>
                         </table>
                         <label className="inline-checkbox">
@@ -6256,6 +6271,70 @@ function formatRateLimitReset(window: RateLimitWindow | null): string {
   }
   const resetTimestamp = window.resetsAt > 1e12 ? window.resetsAt : window.resetsAt * 1000;
   return `${formatRateLimitRemainingPercent(window)}% left (Reset at ${new Date(resetTimestamp).toLocaleString()})`;
+}
+
+function computeIntegrationRuntimeLight(integration: BotIntegration): IntegrationRuntimeLight {
+  if (integration.status === 'paused') {
+    return 'gray';
+  }
+  if (integration.status === 'error') {
+    return 'red';
+  }
+  if (integration.status !== 'active') {
+    return 'gray';
+  }
+
+  const errorAt = parseOptionalTimestamp(integration.lastErrorAt);
+  if (errorAt === null) {
+    return 'green';
+  }
+
+  const syncAt = parseOptionalTimestamp(integration.lastSyncAt);
+  if (syncAt !== null && syncAt >= errorAt) {
+    return 'green';
+  }
+
+  const message = (integration.lastErrorMessage ?? '').toLowerCase();
+  if (message.includes('retries exhausted')) {
+    return 'red';
+  }
+  return 'yellow';
+}
+
+function integrationRuntimeLabel(light: IntegrationRuntimeLight, integration: BotIntegration): string {
+  const message = integration.lastErrorMessage?.trim();
+  if (light === 'green') {
+    return 'healthy';
+  }
+  if (light === 'yellow' || light === 'red') {
+    if (message && message.length > 0) {
+      return message;
+    }
+    return light === 'yellow' ? 'retrying' : 'down';
+  }
+  return 'paused';
+}
+
+function integrationRuntimeTitle(integration: BotIntegration, light: IntegrationRuntimeLight): string {
+  if (light === 'green') {
+    return 'Runtime healthy';
+  }
+  if (light === 'gray') {
+    return 'Integration paused';
+  }
+  const message = integration.lastErrorMessage?.trim();
+  if (message && message.length > 0) {
+    return message;
+  }
+  return light === 'yellow' ? 'Runtime recovering' : 'Runtime unavailable';
+}
+
+function parseOptionalTimestamp(value: string | null | undefined): number | null {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
 }
 
 function rateLimitFillClass(window: RateLimitWindow | null): string {
