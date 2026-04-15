@@ -3047,13 +3047,6 @@ export default function HomePage() {
           setSessions(items);
         }
       }
-      if (selectedSessionId === sessionConfigTargetSessionId) {
-        await loadSessionHistory(sessionConfigTargetSessionId, {
-          resumeStream: false,
-          resetEventLog: false,
-          resetInspectPanel: false,
-        });
-      }
       closeActionPanel();
     } catch (requestError) {
       setError(extractMessage(requestError));
