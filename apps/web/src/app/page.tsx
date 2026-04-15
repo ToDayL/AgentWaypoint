@@ -586,6 +586,8 @@ export default function HomePage() {
   const [sessionConfigWorkspacePath, setSessionConfigWorkspacePath] = useState('');
   const [sessionConfigDefaultModel, setSessionConfigDefaultModel] = useState(DEFAULT_CODEX_MODEL);
   const [sessionConfigExecutionMode, setSessionConfigExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
+  const [sessionConfigTargetProjectId, setSessionConfigTargetProjectId] = useState('');
+  const [sessionConfigTargetSessionId, setSessionConfigTargetSessionId] = useState('');
   const [newSessionTitle, setNewSessionTitle] = useState('First Simulation Session');
   const [newSessionRepoPath, setNewSessionRepoPath] = useState('');
   const [newSessionBackend, setNewSessionBackend] = useState('codex');
@@ -3009,7 +3011,7 @@ export default function HomePage() {
   }
 
   async function handleUpdateSessionConfigFromPanel(): Promise<void> {
-    if (!selectedSessionId || !sessionConfigName.trim()) {
+    if (!sessionConfigTargetSessionId || !sessionConfigName.trim()) {
       return;
     }
 
@@ -3020,26 +3022,63 @@ export default function HomePage() {
         model: sessionConfigDefaultModel,
         executionMode: sessionConfigExecutionMode,
       });
-      await apiRequest<Session>(`/api/channels/plugins/web/app/sessions/${selectedSessionId}`, {
+      await apiRequest<Session>(`/api/channels/plugins/web/app/sessions/${sessionConfigTargetSessionId}`, {
         method: 'PATCH',
         body: {
           title: sessionConfigName.trim(),
           ...(backendConfig ? { backendConfig } : {}),
         },
       });
-      if (selectedProjectId) {
-        await loadSessions(selectedProjectId);
+      if (sessionConfigTargetProjectId) {
+        const items = (await apiRequest<Session[]>(
+          `/api/channels/plugins/web/app/projects/${sessionConfigTargetProjectId}/sessions`,
+          {
+            method: 'GET',
+          },
+        )) as Session[];
+        setSessionsByProject((current) => ({ ...current, [sessionConfigTargetProjectId]: items }));
+        if (selectedProjectId === sessionConfigTargetProjectId) {
+          setSessions(items);
+        }
       }
-      await loadSessionHistory(selectedSessionId, {
-        resumeStream: false,
-        resetEventLog: false,
-        resetInspectPanel: false,
-      });
+      if (selectedSessionId === sessionConfigTargetSessionId) {
+        await loadSessionHistory(sessionConfigTargetSessionId, {
+          resumeStream: false,
+          resetEventLog: false,
+          resetInspectPanel: false,
+        });
+      }
       closeActionPanel();
     } catch (requestError) {
       setError(extractMessage(requestError));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function selectSessionFromTree(
+    input: {
+      sessionId: string;
+      projectId: string;
+      sessionsForProject: Session[];
+      closeMobileSidebar: boolean;
+    },
+  ): Promise<void> {
+    const sessionId = input.sessionId.trim();
+    const projectId = input.projectId.trim();
+    if (!sessionId || !projectId) {
+      return;
+    }
+    setSelectedProjectId(projectId);
+    setSessions(input.sessionsForProject);
+    setSelectedSessionId(sessionId);
+    await loadSessionHistory(sessionId, {
+      resumeStream: true,
+      resetEventLog: true,
+      resetInspectPanel: true,
+    });
+    if (input.closeMobileSidebar) {
+      setMobileLeftSidebarOpen(false);
     }
   }
 
@@ -3115,8 +3154,8 @@ export default function HomePage() {
     const backend = sessionRuntime.backend ?? project.backend?.trim() ?? fallbackProjectBackend;
     const resolvedBackend = supportedBackends.includes(backend) ? backend : fallbackProjectBackend;
     const sessionBackendConfig = readCodexBackendConfig(sessionRuntime.backendConfig ?? project.backendConfig);
-    setSelectedProjectId(project.id);
-    setSelectedSessionId(session.id);
+    setSessionConfigTargetProjectId(project.id);
+    setSessionConfigTargetSessionId(session.id);
     setSessionConfigName(session.title);
     setSessionConfigBackend(resolvedBackend);
     setSessionConfigWorkspacePath(sessionRuntime.cwd ?? project.repoPath ?? '');
@@ -3327,6 +3366,8 @@ export default function HomePage() {
     setManagedUserTarget(null);
     setManagedUserPasswordDraft('');
     setManagedUserDefaultWorkspaceRootDraft('');
+    setSessionConfigTargetProjectId('');
+    setSessionConfigTargetSessionId('');
     setProjectConfigName('');
     setProjectConfigRepoPath('');
     setProjectConfigDefaultModel(DEFAULT_CODEX_MODEL);
@@ -4457,15 +4498,12 @@ export default function HomePage() {
                                       <div
                                         className={`tree-row session-row ${selectedSessionId === session.id ? 'active' : ''}`}
                                         onClick={() => {
-                                          setSelectedProjectId(project.id);
-                                          setSessions(sessionsForProject);
-                                          setSelectedSessionId(session.id);
-                                          void loadSessionHistory(session.id, {
-                                            resumeStream: true,
-                                            resetEventLog: true,
-                                            resetInspectPanel: true,
+                                          void selectSessionFromTree({
+                                            sessionId: session.id,
+                                            projectId: project.id,
+                                            sessionsForProject,
+                                            closeMobileSidebar: true,
                                           });
-                                          setMobileLeftSidebarOpen(false);
                                         }}
                                         onDoubleClick={() => {
                                           void toggleProjectExpansion(project.id);
