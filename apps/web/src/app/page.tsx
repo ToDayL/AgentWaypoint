@@ -581,6 +581,7 @@ export default function HomePage() {
   const [projectConfigBackend, setProjectConfigBackend] = useState('codex');
   const [projectConfigDefaultModel, setProjectConfigDefaultModel] = useState(DEFAULT_CODEX_MODEL);
   const [projectConfigExecutionMode, setProjectConfigExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
+  const [projectConfigTargetProjectId, setProjectConfigTargetProjectId] = useState('');
   const [sessionConfigName, setSessionConfigName] = useState('');
   const [sessionConfigBackend, setSessionConfigBackend] = useState('codex');
   const [sessionConfigWorkspacePath, setSessionConfigWorkspacePath] = useState('');
@@ -2982,7 +2983,7 @@ export default function HomePage() {
   }
 
   async function handleUpdateProjectConfigFromPanel(): Promise<void> {
-    if (!selectedProjectId || !projectConfigName.trim()) {
+    if (!projectConfigTargetProjectId || !projectConfigName.trim()) {
       return;
     }
 
@@ -2993,7 +2994,7 @@ export default function HomePage() {
         model: projectConfigDefaultModel,
         executionMode: projectConfigExecutionMode,
       });
-      await apiRequest<Project>(`/api/channels/plugins/web/app/projects/${selectedProjectId}`, {
+      const updated = await apiRequest<Project>(`/api/channels/plugins/web/app/projects/${projectConfigTargetProjectId}`, {
         method: 'PATCH',
         body: {
           name: projectConfigName.trim(),
@@ -3001,7 +3002,7 @@ export default function HomePage() {
           backendConfig,
         },
       });
-      await loadProjects();
+      setProjects((current) => current.map((project) => (project.id === updated.id ? updated : project)));
       closeActionPanel();
     } catch (requestError) {
       setError(extractMessage(requestError));
@@ -3139,7 +3140,7 @@ export default function HomePage() {
     const backendConfig = readCodexBackendConfig(project.backendConfig);
     const backend = project.backend?.trim() || 'codex';
     const resolvedBackend = supportedBackends.includes(backend) ? backend : fallbackProjectBackend;
-    setSelectedProjectId(project.id);
+    setProjectConfigTargetProjectId(project.id);
     setProjectConfigName(project.name);
     setProjectConfigRepoPath(project.repoPath ?? '');
     setProjectConfigBackend(resolvedBackend);
@@ -3366,6 +3367,7 @@ export default function HomePage() {
     setManagedUserTarget(null);
     setManagedUserPasswordDraft('');
     setManagedUserDefaultWorkspaceRootDraft('');
+    setProjectConfigTargetProjectId('');
     setSessionConfigTargetProjectId('');
     setSessionConfigTargetSessionId('');
     setProjectConfigName('');
