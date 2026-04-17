@@ -612,6 +612,7 @@ export class DiscordPlugin implements ChannelPlugin {
         if (this.tryHandleDiscordProcessError(reason, 'unhandledRejection')) {
           return;
         }
+        throw toError(reason);
       };
       process.on('unhandledRejection', this.unhandledRejectionHandler);
     }
@@ -4434,18 +4435,64 @@ function toError(value: unknown): Error {
   return new Error('Unknown error');
 }
 
+const DISCORD_ERROR_NAME_MARKERS = ['discordapierror', 'discordjserror', 'websocketerror', 'gatewayerror'];
+const DISCORD_STACK_MARKERS = [
+  'discord.js',
+  '@discordjs',
+  '/ws/lib/websocket',
+  'discord.plugin.ts',
+];
+
 function isDiscordRuntimeError(error: Error): boolean {
-  const message = error.message.toLowerCase();
-  const stack = (error.stack ?? '').toLowerCase();
-  return (
-    message.includes('discord') ||
-    message.includes('websocket') ||
-    message.includes('gateway') ||
-    message.includes('handshake') ||
-    stack.includes('discord.js') ||
-    stack.includes('/ws/lib/websocket') ||
-    stack.includes('discord.plugin.ts')
-  );
+  const names = collectErrorNames(error);
+  if (names.some((name) => DISCORD_ERROR_NAME_MARKERS.some((marker) => name.includes(marker)))) {
+    return true;
+  }
+
+  const stacks = collectErrorStacks(error);
+  return stacks.some((stack) => DISCORD_STACK_MARKERS.some((marker) => stack.includes(marker)));
+}
+
+function collectErrorNames(root: Error): string[] {
+  const names: string[] = [];
+  const queue: unknown[] = [root];
+  const visited = new Set<unknown>();
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || visited.has(current)) {
+      continue;
+    }
+    visited.add(current);
+    if (current instanceof Error) {
+      names.push(current.name.toLowerCase());
+      queue.push((current as { cause?: unknown }).cause);
+      if (current instanceof AggregateError && Array.isArray(current.errors)) {
+        queue.push(...current.errors);
+      }
+    }
+  }
+  return names;
+}
+
+function collectErrorStacks(root: Error): string[] {
+  const stacks: string[] = [];
+  const queue: unknown[] = [root];
+  const visited = new Set<unknown>();
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || visited.has(current)) {
+      continue;
+    }
+    visited.add(current);
+    if (current instanceof Error) {
+      stacks.push((current.stack ?? '').toLowerCase());
+      queue.push((current as { cause?: unknown }).cause);
+      if (current instanceof AggregateError && Array.isArray(current.errors)) {
+        queue.push(...current.errors);
+      }
+    }
+  }
+  return stacks;
 }
 
 function formatApprovalPromptContent(kind: string, payload: Record<string, unknown>): string {
