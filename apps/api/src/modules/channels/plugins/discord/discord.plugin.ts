@@ -119,6 +119,16 @@ type DiscordInboundAttachment = {
   contentLength: number | null;
 };
 
+class DiscordRecoverableError extends Error {
+  readonly integrationId: string | null;
+
+  constructor(message: string, options?: { cause?: unknown; integrationId?: string | null }) {
+    super(message, options);
+    this.name = 'DiscordRecoverableError';
+    this.integrationId = options?.integrationId ?? null;
+  }
+}
+
 const DEFAULT_RECONCILE_INTERVAL_MS = 10_000;
 const DISCORD_LOGIN_TIMEOUT_MS = 20_000;
 const DISCORD_RECONNECT_BASE_DELAY_MS = 3_000;
@@ -164,6 +174,7 @@ export class DiscordPlugin implements ChannelPlugin {
   private reconciling = false;
   private proxyDispatcher: Dispatcher | null = null;
   private modelAutocompleteCache = new Map<string, { expiresAt: number; models: string[] }>();
+  private healthWriteByIntegration = new Map<string, Promise<void>>();
   private uncaughtExceptionHandler: ((error: Error) => void) | null = null;
   private unhandledRejectionHandler: ((reason: unknown) => void) | null = null;
 
@@ -189,6 +200,10 @@ export class DiscordPlugin implements ChannelPlugin {
     const runtimes = [...this.runtimes.values()];
     this.runtimes.clear();
     await Promise.all(runtimes.map((runtime) => this.stopRuntime(runtime)));
+    if (this.healthWriteByIntegration.size > 0) {
+      await Promise.allSettled(this.healthWriteByIntegration.values());
+      this.healthWriteByIntegration.clear();
+    }
     this.removeProcessSafetyGuards();
     this.context = null;
   }
@@ -403,7 +418,10 @@ export class DiscordPlugin implements ChannelPlugin {
       }, RAW_FALLBACK_DELAY_MS);
     });
     client.on('clientReady', () => {
-      void this.registerProjectCommand(runtime);
+      void this.registerProjectCommand(runtime).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : 'unknown command registration error';
+        this.logger.warn(`Discord command registration failed for integration ${runtime.integrationId}: ${message}`);
+      });
     });
     client.on('interactionCreate', async (interaction) => {
       if (interaction.isAutocomplete()) {
@@ -452,24 +470,26 @@ export class DiscordPlugin implements ChannelPlugin {
     });
 
     client.on('error', (error) => {
-      this.logger.warn(`Discord client error for integration ${runtime.integrationId}: ${error.message}`);
-      this.scheduleRuntimeRecovery(runtime, `client error: ${error.message}`);
+      throw new DiscordRecoverableError(`client error: ${error.message}`, {
+        cause: error,
+        integrationId: runtime.integrationId,
+      });
     });
     client.on('shardError', (error, shardId) => {
-      this.logger.warn(
-        `Discord shard error for integration ${runtime.integrationId}, shard=${shardId}: ${error.message}`,
-      );
-      this.scheduleRuntimeRecovery(runtime, `shard error (shard=${shardId}): ${error.message}`);
+      throw new DiscordRecoverableError(`shard error (shard=${shardId}): ${error.message}`, {
+        cause: error,
+        integrationId: runtime.integrationId,
+      });
     });
     client.on('shardDisconnect', (event, shardId) => {
-      this.logger.warn(
-        `Discord shard disconnected for integration ${runtime.integrationId}, shard=${shardId}, code=${event.code}`,
-      );
-      this.scheduleRuntimeRecovery(runtime, `shard disconnect (shard=${shardId}, code=${event.code})`);
+      throw new DiscordRecoverableError(`shard disconnect (shard=${shardId}, code=${event.code})`, {
+        integrationId: runtime.integrationId,
+      });
     });
     client.on('invalidated', () => {
-      this.logger.warn(`Discord session invalidated for integration ${runtime.integrationId}`);
-      this.scheduleRuntimeRecovery(runtime, 'session invalidated');
+      throw new DiscordRecoverableError('session invalidated', {
+        integrationId: runtime.integrationId,
+      });
     });
 
     return runtime;
@@ -580,20 +600,38 @@ export class DiscordPlugin implements ChannelPlugin {
   }
 
   private async markRuntimeHealthy(runtime: DiscordRuntime): Promise<void> {
-    try {
-      await this.channelsService.markIntegrationRuntimeHealthyForGateway(runtime.integrationId);
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : 'unknown health update error';
-      this.logger.warn(`Failed to mark Discord integration healthy ${runtime.integrationId}: ${message}`);
-    }
+    await this.enqueueHealthWrite(runtime.integrationId, async () => {
+      try {
+        await this.channelsService.markIntegrationRuntimeHealthyForGateway(runtime.integrationId);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'unknown health update error';
+        this.logger.warn(`Failed to mark Discord integration healthy ${runtime.integrationId}: ${message}`);
+      }
+    });
   }
 
   private async markRuntimeError(runtime: DiscordRuntime, reason: string): Promise<void> {
-    try {
-      await this.channelsService.markIntegrationRuntimeErrorForGateway(runtime.integrationId, reason);
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : 'unknown health update error';
-      this.logger.warn(`Failed to mark Discord integration error ${runtime.integrationId}: ${message}`);
+    await this.enqueueHealthWrite(runtime.integrationId, async () => {
+      try {
+        await this.channelsService.markIntegrationRuntimeErrorForGateway(runtime.integrationId, reason);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'unknown health update error';
+        this.logger.warn(`Failed to mark Discord integration error ${runtime.integrationId}: ${message}`);
+      }
+    });
+  }
+
+  private async enqueueHealthWrite(integrationId: string, write: () => Promise<void>): Promise<void> {
+    const previous = this.healthWriteByIntegration.get(integrationId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => {
+        // Previous write failures are logged at source; keep queue progressing.
+      })
+      .then(write);
+    this.healthWriteByIntegration.set(integrationId, next);
+    await next;
+    if (this.healthWriteByIntegration.get(integrationId) === next) {
+      this.healthWriteByIntegration.delete(integrationId);
     }
   }
 
@@ -630,11 +668,18 @@ export class DiscordPlugin implements ChannelPlugin {
   }
 
   private tryHandleDiscordProcessError(errorLike: unknown, source: 'uncaughtException' | 'unhandledRejection'): boolean {
-    const error = toError(errorLike);
-    if (!isDiscordRuntimeError(error)) {
+    if (!(errorLike instanceof DiscordRecoverableError)) {
       return false;
     }
+    const error = errorLike;
     this.logger.warn(`Captured Discord runtime ${source}: ${error.message}`);
+    if (error.integrationId) {
+      const runtime = this.runtimes.get(error.integrationId);
+      if (runtime) {
+        this.scheduleRuntimeRecovery(runtime, `${source}: ${error.message}`);
+      }
+      return true;
+    }
     for (const runtime of this.runtimes.values()) {
       this.scheduleRuntimeRecovery(runtime, `${source}: ${error.message}`);
     }
@@ -4433,66 +4478,6 @@ function toError(value: unknown): Error {
     return new Error(value);
   }
   return new Error('Unknown error');
-}
-
-const DISCORD_ERROR_NAME_MARKERS = ['discordapierror', 'discordjserror', 'websocketerror', 'gatewayerror'];
-const DISCORD_STACK_MARKERS = [
-  'discord.js',
-  '@discordjs',
-  '/ws/lib/websocket',
-  'discord.plugin.ts',
-];
-
-function isDiscordRuntimeError(error: Error): boolean {
-  const names = collectErrorNames(error);
-  if (names.some((name) => DISCORD_ERROR_NAME_MARKERS.some((marker) => name.includes(marker)))) {
-    return true;
-  }
-
-  const stacks = collectErrorStacks(error);
-  return stacks.some((stack) => DISCORD_STACK_MARKERS.some((marker) => stack.includes(marker)));
-}
-
-function collectErrorNames(root: Error): string[] {
-  const names: string[] = [];
-  const queue: unknown[] = [root];
-  const visited = new Set<unknown>();
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (!current || visited.has(current)) {
-      continue;
-    }
-    visited.add(current);
-    if (current instanceof Error) {
-      names.push(current.name.toLowerCase());
-      queue.push((current as { cause?: unknown }).cause);
-      if (current instanceof AggregateError && Array.isArray(current.errors)) {
-        queue.push(...current.errors);
-      }
-    }
-  }
-  return names;
-}
-
-function collectErrorStacks(root: Error): string[] {
-  const stacks: string[] = [];
-  const queue: unknown[] = [root];
-  const visited = new Set<unknown>();
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (!current || visited.has(current)) {
-      continue;
-    }
-    visited.add(current);
-    if (current instanceof Error) {
-      stacks.push((current.stack ?? '').toLowerCase());
-      queue.push((current as { cause?: unknown }).cause);
-      if (current instanceof AggregateError && Array.isArray(current.errors)) {
-        queue.push(...current.errors);
-      }
-    }
-  }
-  return stacks;
 }
 
 function formatApprovalPromptContent(kind: string, payload: Record<string, unknown>): string {
