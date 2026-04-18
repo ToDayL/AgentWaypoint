@@ -74,6 +74,10 @@ type DiscordRuntime = {
   steerTriggerByTurnId: Map<string, { channelId: string; messageId: string }>;
   typingByMessageKey: Map<string, string>;
   typingIntervals: Map<string, ReturnType<typeof setInterval>>;
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
+  reconnectAttempt: number;
+  loginInFlight: boolean;
+  recoveryInFlight: boolean;
 };
 
 type ApprovalDecision =
@@ -115,8 +119,21 @@ type DiscordInboundAttachment = {
   contentLength: number | null;
 };
 
+class DiscordRecoverableError extends Error {
+  readonly integrationId: string | null;
+
+  constructor(message: string, options?: { cause?: unknown; integrationId?: string | null }) {
+    super(message, options);
+    this.name = 'DiscordRecoverableError';
+    this.integrationId = options?.integrationId ?? null;
+  }
+}
+
 const DEFAULT_RECONCILE_INTERVAL_MS = 10_000;
 const DISCORD_LOGIN_TIMEOUT_MS = 20_000;
+const DISCORD_RECONNECT_BASE_DELAY_MS = 3_000;
+const DISCORD_RECONNECT_MAX_DELAY_MS = 60_000;
+const DISCORD_RECONNECT_MAX_ATTEMPTS = 5;
 const RAW_FALLBACK_DELAY_MS = 500;
 const PROCESSED_MESSAGE_TTL_MS = 5 * 60_000;
 const PROCESSED_MESSAGE_MAX = 4_000;
@@ -157,6 +174,9 @@ export class DiscordPlugin implements ChannelPlugin {
   private reconciling = false;
   private proxyDispatcher: Dispatcher | null = null;
   private modelAutocompleteCache = new Map<string, { expiresAt: number; models: string[] }>();
+  private healthWriteByIntegration = new Map<string, Promise<void>>();
+  private uncaughtExceptionHandler: ((error: Error) => void) | null = null;
+  private unhandledRejectionHandler: ((reason: unknown) => void) | null = null;
 
   constructor(
     @Inject(ChannelsService) private readonly channelsService: ChannelsService,
@@ -165,6 +185,7 @@ export class DiscordPlugin implements ChannelPlugin {
   async boot(context: ChannelPluginContext): Promise<void> {
     this.context = context;
     this.proxyDispatcher = configureProxyFromEnvironment(this.logger);
+    this.installProcessSafetyGuards();
     void this.reconcileRuntimes();
     this.reconcileTimer = setInterval(() => {
       void this.reconcileRuntimes();
@@ -179,6 +200,11 @@ export class DiscordPlugin implements ChannelPlugin {
     const runtimes = [...this.runtimes.values()];
     this.runtimes.clear();
     await Promise.all(runtimes.map((runtime) => this.stopRuntime(runtime)));
+    if (this.healthWriteByIntegration.size > 0) {
+      await Promise.allSettled(this.healthWriteByIntegration.values());
+      this.healthWriteByIntegration.clear();
+    }
+    this.removeProcessSafetyGuards();
     this.context = null;
   }
 
@@ -344,6 +370,10 @@ export class DiscordPlugin implements ChannelPlugin {
       steerTriggerByTurnId: new Map<string, { channelId: string; messageId: string }>(),
       typingByMessageKey: new Map<string, string>(),
       typingIntervals: new Map<string, ReturnType<typeof setInterval>>(),
+      reconnectTimer: null,
+      reconnectAttempt: 0,
+      loginInFlight: false,
+      recoveryInFlight: false,
     };
 
     client.on('messageCreate', async (message) => {
@@ -388,7 +418,10 @@ export class DiscordPlugin implements ChannelPlugin {
       }, RAW_FALLBACK_DELAY_MS);
     });
     client.on('clientReady', () => {
-      void this.registerProjectCommand(runtime);
+      void this.registerProjectCommand(runtime).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : 'unknown command registration error';
+        this.logger.warn(`Discord command registration failed for integration ${runtime.integrationId}: ${message}`);
+      });
     });
     client.on('interactionCreate', async (interaction) => {
       if (interaction.isAutocomplete()) {
@@ -437,45 +470,60 @@ export class DiscordPlugin implements ChannelPlugin {
     });
 
     client.on('error', (error) => {
-      this.logger.warn(`Discord client error for integration ${runtime.integrationId}: ${error.message}`);
+      throw new DiscordRecoverableError(`client error: ${error.message}`, {
+        cause: error,
+        integrationId: runtime.integrationId,
+      });
     });
     client.on('shardError', (error, shardId) => {
-      this.logger.warn(
-        `Discord shard error for integration ${runtime.integrationId}, shard=${shardId}: ${error.message}`,
-      );
+      throw new DiscordRecoverableError(`shard error (shard=${shardId}): ${error.message}`, {
+        cause: error,
+        integrationId: runtime.integrationId,
+      });
     });
     client.on('shardDisconnect', (event, shardId) => {
-      this.logger.warn(
-        `Discord shard disconnected for integration ${runtime.integrationId}, shard=${shardId}, code=${event.code}`,
-      );
+      throw new DiscordRecoverableError(`shard disconnect (shard=${shardId}, code=${event.code})`, {
+        integrationId: runtime.integrationId,
+      });
     });
     client.on('invalidated', () => {
-      this.logger.warn(`Discord session invalidated for integration ${runtime.integrationId}`);
+      throw new DiscordRecoverableError('session invalidated', {
+        integrationId: runtime.integrationId,
+      });
     });
 
     return runtime;
   }
 
   private async startRuntime(runtime: DiscordRuntime): Promise<void> {
+    if (runtime.stopped || runtime.loginInFlight) {
+      return;
+    }
+    runtime.loginInFlight = true;
     try {
       await withTimeout(
         runtime.client.login(runtime.botToken),
         DISCORD_LOGIN_TIMEOUT_MS,
         `Discord login timed out after ${DISCORD_LOGIN_TIMEOUT_MS}ms`,
       );
+      runtime.reconnectAttempt = 0;
+      this.clearRuntimeReconnectTimer(runtime);
+      void this.markRuntimeHealthy(runtime);
       this.logger.log(
         `Discord runtime started for integration ${runtime.integrationId} as ${runtime.client.user?.tag ?? 'unknown'} (${runtime.client.user?.id ?? 'unknown'})`,
       );
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'unknown login error';
       this.logger.warn(`Discord runtime failed to login for integration ${runtime.integrationId}: ${message}`);
-      await this.stopRuntime(runtime);
-      this.runtimes.delete(runtime.integrationId);
+      this.scheduleRuntimeRecovery(runtime, `login failed: ${message}`);
+    } finally {
+      runtime.loginInFlight = false;
     }
   }
 
   private async stopRuntime(runtime: DiscordRuntime): Promise<void> {
     runtime.stopped = true;
+    this.clearRuntimeReconnectTimer(runtime);
     runtime.approvalMenus.clear();
     runtime.triggerMessageActions.clear();
     runtime.triggerMessageEffects.clear();
@@ -491,6 +539,151 @@ export class DiscordPlugin implements ChannelPlugin {
     } catch {
       // ignore
     }
+  }
+
+  private scheduleRuntimeRecovery(runtime: DiscordRuntime, reason: string): void {
+    if (runtime.stopped || runtime.reconnectTimer) {
+      return;
+    }
+
+    runtime.reconnectAttempt += 1;
+    if (runtime.reconnectAttempt <= DISCORD_RECONNECT_MAX_ATTEMPTS) {
+      void this.markRuntimeError(runtime, reason);
+      const delay = Math.min(
+        DISCORD_RECONNECT_MAX_DELAY_MS,
+        DISCORD_RECONNECT_BASE_DELAY_MS * 2 ** Math.max(0, runtime.reconnectAttempt - 1),
+      );
+      this.logger.warn(
+        `Scheduling Discord reconnect for integration ${runtime.integrationId} in ${delay}ms (attempt ${runtime.reconnectAttempt}/${DISCORD_RECONNECT_MAX_ATTEMPTS}) due to ${reason}`,
+      );
+      runtime.reconnectTimer = setTimeout(() => {
+        runtime.reconnectTimer = null;
+        void this.reconnectRuntime(runtime, reason);
+      }, delay);
+      return;
+    }
+
+    this.logger.warn(
+      `Reconnect retries exhausted for integration ${runtime.integrationId}; disabling runtime until integration is reconfigured or service restarts (last reason: ${reason})`,
+    );
+    void this.markRuntimeError(
+      runtime,
+      `Reconnect retries exhausted after ${DISCORD_RECONNECT_MAX_ATTEMPTS} attempts. Last reason: ${reason}`,
+    );
+    void this.stopRuntime(runtime);
+  }
+
+  private async reconnectRuntime(runtime: DiscordRuntime, reason: string): Promise<void> {
+    if (runtime.stopped || runtime.recoveryInFlight) {
+      return;
+    }
+    runtime.recoveryInFlight = true;
+    try {
+      try {
+        await runtime.client.destroy();
+      } catch {
+        // ignore destroy failures during reconnect cycle
+      }
+      this.logger.warn(`Attempting Discord reconnect for integration ${runtime.integrationId} after ${reason}`);
+      await this.startRuntime(runtime);
+    } finally {
+      runtime.recoveryInFlight = false;
+    }
+  }
+
+  private clearRuntimeReconnectTimer(runtime: DiscordRuntime): void {
+    if (!runtime.reconnectTimer) {
+      return;
+    }
+    clearTimeout(runtime.reconnectTimer);
+    runtime.reconnectTimer = null;
+  }
+
+  private async markRuntimeHealthy(runtime: DiscordRuntime): Promise<void> {
+    await this.enqueueHealthWrite(runtime.integrationId, async () => {
+      try {
+        await this.channelsService.markIntegrationRuntimeHealthyForGateway(runtime.integrationId);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'unknown health update error';
+        this.logger.warn(`Failed to mark Discord integration healthy ${runtime.integrationId}: ${message}`);
+      }
+    });
+  }
+
+  private async markRuntimeError(runtime: DiscordRuntime, reason: string): Promise<void> {
+    await this.enqueueHealthWrite(runtime.integrationId, async () => {
+      try {
+        await this.channelsService.markIntegrationRuntimeErrorForGateway(runtime.integrationId, reason);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'unknown health update error';
+        this.logger.warn(`Failed to mark Discord integration error ${runtime.integrationId}: ${message}`);
+      }
+    });
+  }
+
+  private async enqueueHealthWrite(integrationId: string, write: () => Promise<void>): Promise<void> {
+    const previous = this.healthWriteByIntegration.get(integrationId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => {
+        // Previous write failures are logged at source; keep queue progressing.
+      })
+      .then(write);
+    this.healthWriteByIntegration.set(integrationId, next);
+    await next;
+    if (this.healthWriteByIntegration.get(integrationId) === next) {
+      this.healthWriteByIntegration.delete(integrationId);
+    }
+  }
+
+  private installProcessSafetyGuards(): void {
+    if (!this.uncaughtExceptionHandler) {
+      this.uncaughtExceptionHandler = (error: Error) => {
+        if (this.tryHandleDiscordProcessError(error, 'uncaughtException')) {
+          return;
+        }
+        throw error;
+      };
+      process.on('uncaughtException', this.uncaughtExceptionHandler);
+    }
+    if (!this.unhandledRejectionHandler) {
+      this.unhandledRejectionHandler = (reason: unknown) => {
+        if (this.tryHandleDiscordProcessError(reason, 'unhandledRejection')) {
+          return;
+        }
+        throw toError(reason);
+      };
+      process.on('unhandledRejection', this.unhandledRejectionHandler);
+    }
+  }
+
+  private removeProcessSafetyGuards(): void {
+    if (this.uncaughtExceptionHandler) {
+      process.off('uncaughtException', this.uncaughtExceptionHandler);
+      this.uncaughtExceptionHandler = null;
+    }
+    if (this.unhandledRejectionHandler) {
+      process.off('unhandledRejection', this.unhandledRejectionHandler);
+      this.unhandledRejectionHandler = null;
+    }
+  }
+
+  private tryHandleDiscordProcessError(errorLike: unknown, source: 'uncaughtException' | 'unhandledRejection'): boolean {
+    if (!(errorLike instanceof DiscordRecoverableError)) {
+      return false;
+    }
+    const error = errorLike;
+    this.logger.warn(`Captured Discord runtime ${source}: ${error.message}`);
+    if (error.integrationId) {
+      const runtime = this.runtimes.get(error.integrationId);
+      if (runtime) {
+        this.scheduleRuntimeRecovery(runtime, `${source}: ${error.message}`);
+      }
+      return true;
+    }
+    for (const runtime of this.runtimes.values()) {
+      this.scheduleRuntimeRecovery(runtime, `${source}: ${error.message}`);
+    }
+    return true;
   }
 
   private async sendApprovalPrompt(
@@ -4275,6 +4468,16 @@ function shouldSkipUserMessageForSourceBinding(message: BotMessage, context: Plu
     return true;
   }
   return false;
+}
+
+function toError(value: unknown): Error {
+  if (value instanceof Error) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    return new Error(value);
+  }
+  return new Error('Unknown error');
 }
 
 function formatApprovalPromptContent(kind: string, payload: Record<string, unknown>): string {

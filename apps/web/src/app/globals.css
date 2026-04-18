@@ -876,6 +876,46 @@ body {
   background: color-mix(in srgb, var(--bg-subtle) 12%, transparent);
 }
 
+.integration-runtime-light {
+  width: 0.62rem;
+  height: 0.62rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  margin-right: 0.4rem;
+}
+
+.integration-runtime-light span {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  display: block;
+}
+
+.integration-runtime-light-green span {
+  background: #36d78a;
+  box-shadow: 0 0 0.35rem rgba(54, 215, 138, 0.45);
+}
+
+.integration-runtime-light-yellow span {
+  background: #e7c64b;
+  box-shadow: 0 0 0.35rem rgba(231, 198, 75, 0.45);
+}
+
+.integration-runtime-light-red span {
+  background: #ef6a6a;
+  box-shadow: 0 0 0.35rem rgba(239, 106, 106, 0.45);
+}
+
+.integration-runtime-light-gray span {
+  background: #95a0b3;
+}
+
+.integration-runtime-label {
+  vertical-align: middle;
+}
+
 .admin-user-create-bottom {
   margin-top: 0.45rem;
   margin-left: auto;

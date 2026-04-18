@@ -104,6 +104,28 @@ export class ChannelsService {
     });
   }
 
+  async markIntegrationRuntimeHealthyForGateway(integrationId: string): Promise<void> {
+    await this.prisma.botIntegration.updateMany({
+      where: { id: integrationId },
+      data: {
+        lastSyncAt: new Date(),
+        lastErrorAt: null,
+        lastErrorMessage: null,
+      },
+    });
+  }
+
+  async markIntegrationRuntimeErrorForGateway(integrationId: string, message: string): Promise<void> {
+    const nextMessage = message.trim().slice(0, 1000) || 'unknown runtime error';
+    await this.prisma.botIntegration.updateMany({
+      where: { id: integrationId },
+      data: {
+        lastErrorAt: new Date(),
+        lastErrorMessage: nextMessage,
+      },
+    });
+  }
+
   async sendMessage(userId: string, input: SendMessageBody, kind: BotMessageKind): Promise<BotMessage> {
     await this.ensureProjectSessionOwnership(userId, input.projectId, input.sessionId);
     const created = await this.prisma.botMessage.create({
