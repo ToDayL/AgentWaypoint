@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -102,7 +102,7 @@ model Turn {
   effectiveRuntimeConfig Json?
   failureCode            String?
   failureMessage         String?
-  contextRemainingRatio  Decimal?       @db.Decimal(5, 4)
+  contextRemainingRatio  Float?
   contextRemainingTokens Int?
   contextWindowTokens    Int?
   contextUpdatedAt       DateTime?

@@ -1,5 +1,4 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
-import type { ServerResponse } from 'node:http';
 
 export type StartTurnBody = {
   turnId: string;
@@ -11,6 +10,11 @@ export type StartTurnBody = {
   cwd?: string | null;
 };
 
+export type ModelEffortOption = {
+  value: string;
+  description: string;
+};
+
 export type ModelListItem = {
   id: string;
   backend: string;
@@ -19,6 +23,9 @@ export type ModelListItem = {
   description: string;
   hidden: boolean;
   isDefault: boolean;
+  /** Backend-native effort enum values supported by this model. Empty when the model has no per-turn effort knob. */
+  supportedEfforts: ModelEffortOption[];
+  defaultEffort: string | null;
 };
 
 export type SkillListItem = {
@@ -144,6 +151,8 @@ export type ActiveClaudeTurn = ActiveTurnBase & {
 
 export type ActiveTurn = ActiveMockTurn | ActiveCodexTurn | ActiveClaudeTurn;
 
+export type RunnerStreamListener = (event: BufferedRunnerEvent) => void | Promise<void>;
+
 export type BufferedRunnerEvent = {
   turnId: string;
   seq: number;
@@ -158,7 +167,7 @@ export type RunnerTurnStreamState = {
   status: 'queued' | 'running' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled';
   nextSeq: number;
   events: BufferedRunnerEvent[];
-  listeners: Set<ServerResponse>;
+  listeners: Set<RunnerStreamListener>;
   cleanupTimer: ReturnType<typeof setTimeout> | null;
 };
 

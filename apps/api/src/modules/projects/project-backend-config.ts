@@ -5,6 +5,8 @@ export type CodexExecutionMode = 'read-only' | 'safe-write' | 'yolo';
 export type CodexDefaults = {
   model: string;
   executionMode: CodexExecutionMode;
+  /** Codex-native reasoning effort enum (low|medium|high|xhigh). null = use model default. */
+  effort: string | null;
 };
 
 type ProjectLikeWithBackendConfig = {
@@ -16,6 +18,7 @@ export function buildCodexBackendConfig(input: CodexDefaults): Record<string, st
   return {
     model: input.model,
     executionMode: input.executionMode,
+    ...(input.effort ? { effort: input.effort } : {}),
   };
 }
 
@@ -28,6 +31,7 @@ export function resolveProjectCodexDefaults(project: ProjectLikeWithBackendConfi
   return {
     model: fromConfig.model,
     executionMode: fromConfig.executionMode,
+    effort: fromConfig.effort,
   };
 }
 
@@ -50,9 +54,11 @@ export function readCodexBackendConfig(input: unknown): CodexDefaults | null {
   if (!model || !executionMode) {
     return null;
   }
+  const effort = normalizeNullableString(typeof record.effort === 'string' ? record.effort : null);
   return {
     model,
     executionMode,
+    effort,
   };
 }
 
@@ -60,6 +66,7 @@ function codexDefaultsFromFallback(): CodexDefaults {
   return {
     model: DEFAULT_CODEX_MODEL,
     executionMode: DEFAULT_CODEX_EXECUTION_MODE,
+    effort: null,
   };
 }
 

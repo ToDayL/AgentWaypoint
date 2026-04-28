@@ -70,6 +70,20 @@ export class ClaudeBackend {
           typeof model.description === 'string' && model.description.trim().length > 0
             ? model.description.trim()
             : '';
+        // Claude SDK exposes effort levels as a single Options.effort enum
+        // when the model supports adaptive thinking. The SDK does not
+        // currently advertise a per-model effort whitelist; assume the four
+        // canonical levels for adaptive-capable models, and leave the field
+        // empty for older models so the UI hides the control.
+        const adaptive = (model as { supportsAdaptiveThinking?: boolean }).supportsAdaptiveThinking === true;
+        const supportedEfforts = adaptive
+          ? [
+              { value: 'low', description: 'Minimal thinking, fastest responses' },
+              { value: 'medium', description: 'Moderate thinking' },
+              { value: 'high', description: 'Deep reasoning (default)' },
+              { value: 'max', description: 'Maximum effort (Opus 4.6+)' },
+            ]
+          : [];
         items.push({
           id: value,
           backend: 'claude',
@@ -78,6 +92,8 @@ export class ClaudeBackend {
           description,
           hidden: false,
           isDefault: index === 0,
+          supportedEfforts,
+          defaultEffort: adaptive ? 'high' : null,
         });
       });
       return items;
@@ -167,6 +183,8 @@ export class ClaudeBackend {
         permissionMode: PermissionMode;
         allowDangerouslySkipPermissions: boolean;
         sandbox: SandboxSettings;
+        thinking?: { type: 'adaptive' };
+        effort?: ClaudeEffort;
         canUseTool: (
           toolName: string,
           input: Record<string, unknown>,
@@ -201,6 +219,10 @@ export class ClaudeBackend {
         canUseTool: (toolName, toolInput, options) => this.requestToolApproval(turn, cwd, toolName, toolInput, options),
         hooks: this.buildClaudeHooks(turn.turnId),
       };
+      if (config.effort) {
+        queryOptions.thinking = { type: 'adaptive' };
+        queryOptions.effort = config.effort;
+      }
       if (resumedSessionId) {
         queryOptions.resume = resumedSessionId;
       } else {
@@ -1096,16 +1118,26 @@ type AggregatedDiffFile = {
   structuredPatch: StructuredPatchEntry[];
 };
 
+type ClaudeEffort = 'low' | 'medium' | 'high' | 'max';
+
 function readBackendConfig(
   config: Record<string, unknown> | null | undefined,
-): { model: string | null; executionMode: string | null } {
+): { model: string | null; executionMode: string | null; effort: ClaudeEffort | null } {
   const model =
     config && typeof config.model === 'string' && config.model.trim().length > 0 ? config.model.trim() : null;
   const executionMode =
     config && typeof config.executionMode === 'string' && config.executionMode.trim().length > 0
       ? config.executionMode.trim()
       : DEFAULT_CLAUDE_EXECUTION_MODE;
-  return { model, executionMode };
+  const effortRaw =
+    config && typeof config.effort === 'string' && config.effort.trim().length > 0
+      ? config.effort.trim().toLowerCase()
+      : null;
+  const effort: ClaudeEffort | null =
+    effortRaw === 'low' || effortRaw === 'medium' || effortRaw === 'high' || effortRaw === 'max'
+      ? (effortRaw as ClaudeEffort)
+      : null;
+  return { model, executionMode, effort };
 }
 
 function resolveClaudeRuntimePolicy(executionMode: string | null, cwd: string): {

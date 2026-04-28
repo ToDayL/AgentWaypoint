@@ -72,6 +72,11 @@ type Session = {
   updatedAt: string;
 };
 
+type ModelEffortOption = {
+  value: string;
+  description: string;
+};
+
 type AvailableModel = {
   id: string;
   backend: string;
@@ -80,6 +85,9 @@ type AvailableModel = {
   description: string;
   hidden: boolean;
   isDefault: boolean;
+  /** Backend-native effort enum values supported by this model. Empty when the model has no per-turn effort knob. */
+  supportedEfforts: ModelEffortOption[];
+  defaultEffort: string | null;
 };
 
 type ChatMessage = {
@@ -260,6 +268,7 @@ const DEFAULT_CODEX_EXECUTION_MODE = 'safe-write';
 function buildCodexBackendConfig(input: {
   model: string;
   executionMode: string;
+  effort?: string | null;
 }): Record<string, string> | null {
   const config: Record<string, string> = {};
   if (input.model.trim()) {
@@ -268,17 +277,23 @@ function buildCodexBackendConfig(input: {
   if (input.executionMode.trim()) {
     config.executionMode = input.executionMode.trim();
   }
+  const effort = input.effort?.trim();
+  if (effort) {
+    config.effort = effort;
+  }
   return Object.keys(config).length > 0 ? config : null;
 }
 
 function readCodexBackendConfig(config: Record<string, unknown> | null | undefined): {
   model: string;
   executionMode: string;
+  effort: string | null;
 } {
   if (!config) {
     return {
       model: DEFAULT_CODEX_MODEL,
       executionMode: DEFAULT_CODEX_EXECUTION_MODE,
+      effort: null,
     };
   }
   return {
@@ -287,11 +302,45 @@ function readCodexBackendConfig(config: Record<string, unknown> | null | undefin
       typeof config.executionMode === 'string' && config.executionMode.trim()
         ? config.executionMode
         : DEFAULT_CODEX_EXECUTION_MODE,
+    effort:
+      typeof config.effort === 'string' && config.effort.trim().length > 0 ? config.effort.trim() : null,
   };
 }
 
 function resolveModelDefault(models: AvailableModel[]): string {
   return models.find((model) => model.isDefault)?.model ?? models[0]?.model ?? DEFAULT_CODEX_MODEL;
+}
+
+/**
+ * Render the per-model effort selector. Returns null when the active model
+ * doesn't expose an effort knob (mock backend / older Claude models).
+ */
+function renderEffortSelect(
+  models: AvailableModel[],
+  selectedModel: string,
+  value: string,
+  onChange: (value: string) => void,
+): React.ReactElement | null {
+  const model = models.find((entry) => entry.model === selectedModel);
+  const efforts = model?.supportedEfforts ?? [];
+  if (!model || efforts.length === 0) {
+    return null;
+  }
+  const defaultLabel = model.defaultEffort ? `Model default (${model.defaultEffort})` : 'Model default';
+  return (
+    <label>
+      Reasoning Effort
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="">{defaultLabel}</option>
+        {efforts.map((entry) => (
+          <option key={entry.value} value={entry.value}>
+            {entry.value}
+            {entry.description ? ` — ${entry.description}` : ''}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
 }
 
 function normalizeSupportedBackends(input: unknown): string[] {
@@ -574,31 +623,35 @@ export default function HomePage() {
   const [defaultWorkspaceRootInput, setDefaultWorkspaceRootInput] = useState('');
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
-  const [newProjectName, setNewProjectName] = useState('Simulation Workspace');
+  const [newProjectName, setNewProjectName] = useState('My Workspace');
   const [newProjectRepoPath, setNewProjectRepoPath] = useState('');
   const [newProjectBackend, setNewProjectBackend] = useState('codex');
   const [workspaceSuggestions, setWorkspaceSuggestions] = useState<string[]>([]);
   const [workspaceSuggestionBusy, setWorkspaceSuggestionBusy] = useState(false);
   const [newProjectDefaultModel, setNewProjectDefaultModel] = useState('');
   const [newProjectExecutionMode, setNewProjectExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
+  const [newProjectEffort, setNewProjectEffort] = useState('');
   const [projectConfigName, setProjectConfigName] = useState('');
   const [projectConfigRepoPath, setProjectConfigRepoPath] = useState('');
   const [projectConfigBackend, setProjectConfigBackend] = useState('codex');
   const [projectConfigDefaultModel, setProjectConfigDefaultModel] = useState(DEFAULT_CODEX_MODEL);
   const [projectConfigExecutionMode, setProjectConfigExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
+  const [projectConfigEffort, setProjectConfigEffort] = useState('');
   const [projectConfigTargetProjectId, setProjectConfigTargetProjectId] = useState('');
   const [sessionConfigName, setSessionConfigName] = useState('');
   const [sessionConfigBackend, setSessionConfigBackend] = useState('codex');
   const [sessionConfigWorkspacePath, setSessionConfigWorkspacePath] = useState('');
   const [sessionConfigDefaultModel, setSessionConfigDefaultModel] = useState(DEFAULT_CODEX_MODEL);
   const [sessionConfigExecutionMode, setSessionConfigExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
+  const [sessionConfigEffort, setSessionConfigEffort] = useState('');
   const [sessionConfigTargetProjectId, setSessionConfigTargetProjectId] = useState('');
   const [sessionConfigTargetSessionId, setSessionConfigTargetSessionId] = useState('');
-  const [newSessionTitle, setNewSessionTitle] = useState('First Simulation Session');
+  const [newSessionTitle, setNewSessionTitle] = useState('New Session');
   const [newSessionRepoPath, setNewSessionRepoPath] = useState('');
   const [newSessionBackend, setNewSessionBackend] = useState('codex');
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState(DEFAULT_CODEX_MODEL);
   const [newSessionExecutionMode, setNewSessionExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
+  const [newSessionEffort, setNewSessionEffort] = useState('');
   const [availableSkills, setAvailableSkills] = useState<SkillOption[]>([]);
   const [prompt, setPrompt] = useState('');
   const [promptCursor, setPromptCursor] = useState(0);
@@ -753,7 +806,12 @@ export default function HomePage() {
     const parts = normalized.split(/[\\/]/).filter((part) => part.length > 0);
     return parts[parts.length - 1] ?? normalized;
   }, [activeWorkspacePath]);
-  const commandSuggestionMode: CommandSuggestionMode = selectedProject?.backend === 'claude' ? 'claude-slash' : 'codex-skill';
+  const effectiveBackend =
+    readSessionRuntimeConfig(selectedSession?.meta ?? null).backend ??
+    (typeof selectedProject?.backend === 'string' && selectedProject.backend.trim()
+      ? selectedProject.backend.trim()
+      : null);
+  const commandSuggestionMode: CommandSuggestionMode = effectiveBackend === 'claude' ? 'claude-slash' : 'codex-skill';
   const commandSuggestionPrefix = commandSuggestionMode === 'claude-slash' ? '/' : '$';
   const activeSkillToken = useMemo(
     () => findSkillTokenContext(prompt, promptCursor, commandSuggestionMode),
@@ -1209,9 +1267,12 @@ export default function HomePage() {
     }
 
     const controller = new AbortController();
-    const backend = typeof selectedProject?.backend === 'string' && selectedProject.backend.trim()
-      ? selectedProject.backend.trim()
-      : 'codex';
+    const sessionBackend = readSessionRuntimeConfig(selectedSession?.meta ?? null).backend;
+    const projectBackend =
+      typeof selectedProject?.backend === 'string' && selectedProject.backend.trim()
+        ? selectedProject.backend.trim()
+        : null;
+    const backend = sessionBackend ?? projectBackend ?? 'codex';
     const query = new URLSearchParams({
       cwd: activeWorkspacePath,
       backend,
@@ -1250,7 +1311,7 @@ export default function HomePage() {
     return () => {
       controller.abort();
     };
-  }, [mounted, authenticated, activeWorkspacePath, selectedProject?.backend]);
+  }, [mounted, authenticated, activeWorkspacePath, selectedProject?.backend, selectedSession?.meta]);
 
   useEffect(() => {
     setSkillSuggestionIndex(0);
@@ -1994,8 +2055,7 @@ export default function HomePage() {
       <main className="sim-shell">
         <section className="sim-panel">
           <header className="sim-header">
-            <p className="sim-kicker">AgentWaypoint Simulation</p>
-            <h1>Web Interface MVP</h1>
+            <h1>AgentWaypoint</h1>
             <p className="sim-subtitle">Loading…</p>
           </header>
         </section>
@@ -2363,6 +2423,7 @@ export default function HomePage() {
       const backendConfig = buildCodexBackendConfig({
         model: newProjectDefaultModel,
         executionMode: newProjectExecutionMode,
+        effort: newProjectEffort,
       });
       const created = await apiRequest<Project>('/api/channels/plugins/web/app/projects', {
         method: 'POST',
@@ -2396,6 +2457,7 @@ export default function HomePage() {
       const backendConfig = buildCodexBackendConfig({
         model: newSessionDefaultModel,
         executionMode: newSessionExecutionMode,
+        effort: newSessionEffort,
       });
       const created = await apiRequest<Session>(`/api/channels/plugins/web/app/projects/${selectedProjectId}/sessions`, {
         method: 'POST',
@@ -2998,6 +3060,7 @@ export default function HomePage() {
       const backendConfig = buildCodexBackendConfig({
         model: projectConfigDefaultModel,
         executionMode: projectConfigExecutionMode,
+        effort: projectConfigEffort,
       });
       const updated = await apiRequest<Project>(`/api/channels/plugins/web/app/projects/${projectConfigTargetProjectId}`, {
         method: 'PATCH',
@@ -3027,6 +3090,7 @@ export default function HomePage() {
       const backendConfig = buildCodexBackendConfig({
         model: sessionConfigDefaultModel,
         executionMode: sessionConfigExecutionMode,
+        effort: sessionConfigEffort,
       });
       await apiRequest<Session>(`/api/channels/plugins/web/app/sessions/${sessionConfigTargetSessionId}`, {
         method: 'PATCH',
@@ -3085,17 +3149,19 @@ export default function HomePage() {
     if (mode === 'createProject') {
       setNewProjectBackend(fallbackProjectBackend);
       setNewProjectExecutionMode(DEFAULT_CODEX_EXECUTION_MODE);
+      setNewProjectEffort('');
       void loadAvailableModels(fallbackProjectBackend, { target: 'new' });
     }
     if (mode === 'createSession' && selectedProject) {
       const backendConfig = readCodexBackendConfig(selectedProject.backendConfig);
       const backend = selectedProject.backend?.trim() || fallbackProjectBackend;
       const resolvedBackend = supportedBackends.includes(backend) ? backend : fallbackProjectBackend;
-      setNewSessionTitle('First Simulation Session');
+      setNewSessionTitle('New Session');
       setNewSessionRepoPath(selectedProject.repoPath ?? '');
       setNewSessionBackend(resolvedBackend);
       setNewSessionExecutionMode(backendConfig.executionMode);
       setNewSessionDefaultModel(backendConfig.model);
+      setNewSessionEffort(backendConfig.effort ?? '');
       void loadAvailableModels(resolvedBackend, { target: 'session', preferredModel: backendConfig.model });
     }
     setActionPanelMode(mode);
@@ -3106,11 +3172,12 @@ export default function HomePage() {
     const backend = project.backend?.trim() || fallbackProjectBackend;
     const resolvedBackend = supportedBackends.includes(backend) ? backend : fallbackProjectBackend;
     setSelectedProjectId(project.id);
-    setNewSessionTitle('First Simulation Session');
+    setNewSessionTitle('New Session');
     setNewSessionRepoPath(project.repoPath ?? '');
     setNewSessionBackend(resolvedBackend);
     setNewSessionExecutionMode(backendConfig.executionMode);
     setNewSessionDefaultModel(backendConfig.model);
+    setNewSessionEffort(backendConfig.effort ?? '');
     void loadAvailableModels(resolvedBackend, { target: 'session', preferredModel: backendConfig.model });
     setActionPanelMode('createSession');
   }
@@ -3144,6 +3211,7 @@ export default function HomePage() {
     setProjectConfigBackend(resolvedBackend);
     setProjectConfigDefaultModel(backendConfig.model);
     setProjectConfigExecutionMode(backendConfig.executionMode);
+    setProjectConfigEffort(backendConfig.effort ?? '');
     void loadAvailableModels(resolvedBackend, { target: 'config', preferredModel: backendConfig.model });
     openActionPanel('projectConfig');
   }
@@ -3160,6 +3228,7 @@ export default function HomePage() {
     setSessionConfigWorkspacePath(sessionRuntime.cwd ?? project.repoPath ?? '');
     setSessionConfigDefaultModel(sessionBackendConfig.model);
     setSessionConfigExecutionMode(sessionBackendConfig.executionMode);
+    setSessionConfigEffort(sessionBackendConfig.effort ?? '');
     void loadAvailableModels(resolvedBackend, { target: 'sessionConfig', preferredModel: sessionBackendConfig.model });
     openActionPanel('sessionConfig');
   }
@@ -3753,6 +3822,7 @@ export default function HomePage() {
                       ))}
                     </select>
                   </label>
+                  {renderEffortSelect(availableModels, newProjectDefaultModel, newProjectEffort, setNewProjectEffort)}
                   <div className="sim-actions action-panel-actions-inline">
                     <button type="button" onClick={() => void handleCreateProjectFromPanel()} disabled={busy}>
                       Create
@@ -3855,6 +3925,7 @@ export default function HomePage() {
                       ))}
                     </select>
                   </label>
+                  {renderEffortSelect(availableModels, newSessionDefaultModel, newSessionEffort, setNewSessionEffort)}
                   <div className="sim-actions action-panel-actions-inline">
                     <button type="button" onClick={() => void handleCreateSessionFromPanel()} disabled={busy}>
                       Create
@@ -3954,6 +4025,7 @@ export default function HomePage() {
                       ))}
                     </select>
                   </label>
+                  {renderEffortSelect(availableModels, projectConfigDefaultModel, projectConfigEffort, setProjectConfigEffort)}
                   <div className="sim-actions">
                     <button
                       type="button"
@@ -4014,6 +4086,7 @@ export default function HomePage() {
                       ))}
                     </select>
                   </label>
+                  {renderEffortSelect(availableModels, sessionConfigDefaultModel, sessionConfigEffort, setSessionConfigEffort)}
                   <div className="sim-actions">
                     <button
                       type="button"
@@ -4969,8 +5042,11 @@ export default function HomePage() {
                   <div className="sim-approval-body">
                     {(() => {
                       const reason = readApprovalTextField(pendingApproval.payload, 'reason');
-                      const command = readApprovalCommand(pendingApproval.payload);
-                      const cwd = readApprovalTextField(pendingApproval.payload, 'cwd');
+                      const isFileChange = pendingApproval.kind === 'file_change';
+                      const filePaths = isFileChange ? readApprovalFileChangePaths(pendingApproval.payload) : [];
+                      const fileDiff = isFileChange ? readApprovalFileChangeDiff(pendingApproval.payload) : null;
+                      const command = !isFileChange ? readApprovalCommand(pendingApproval.payload) : null;
+                      const cwd = !isFileChange ? readApprovalTextField(pendingApproval.payload, 'cwd') : null;
                       return (
                         <>
                           <p>
@@ -4979,17 +5055,40 @@ export default function HomePage() {
                           <p className="sim-approval-meta">
                             Purpose: {reason ?? 'Not provided by runtime'}
                           </p>
-                          {command ? (
-                            <pre className="sim-approval-command">{command}</pre>
+                          {isFileChange ? (
+                            <>
+                              {filePaths.length > 0 ? (
+                                <p className="sim-approval-meta sim-approval-meta-cwd">
+                                  {filePaths.length === 1 ? 'File:' : 'Files:'}{' '}
+                                  {filePaths.map((p, i) => (
+                                    <span key={p}>
+                                      {i > 0 ? ', ' : ''}
+                                      <code>{p}</code>
+                                    </span>
+                                  ))}
+                                </p>
+                              ) : (
+                                <p className="sim-approval-meta">File: Not provided by runtime</p>
+                              )}
+                              {fileDiff ? (
+                                <pre className="sim-approval-command">{fileDiff}</pre>
+                              ) : null}
+                            </>
                           ) : (
-                            <p className="sim-approval-meta">Command: Not provided by runtime</p>
-                          )}
-                          {cwd ? (
-                            <p className="sim-approval-meta sim-approval-meta-cwd">
-                              CWD: <code>{cwd}</code>
-                            </p>
-                          ) : (
-                            <p className="sim-approval-meta">CWD: Not provided by runtime</p>
+                            <>
+                              {command ? (
+                                <pre className="sim-approval-command">{command}</pre>
+                              ) : (
+                                <p className="sim-approval-meta">Command: Not provided by runtime</p>
+                              )}
+                              {cwd ? (
+                                <p className="sim-approval-meta sim-approval-meta-cwd">
+                                  CWD: <code>{cwd}</code>
+                                </p>
+                              ) : (
+                                <p className="sim-approval-meta">CWD: Not provided by runtime</p>
+                              )}
+                            </>
                           )}
                         </>
                       );
@@ -6375,13 +6474,64 @@ function readApprovalCommand(payload: Record<string, unknown>): string | null {
   return null;
 }
 
-function readApprovalTextField(payload: Record<string, unknown>, key: 'reason' | 'cwd'): string | null {
+function readApprovalTextField(payload: Record<string, unknown>, key: 'reason' | 'cwd' | 'path' | 'diff'): string | null {
   const value = payload[key];
   if (typeof value !== 'string') {
     return null;
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function readApprovalFileChangePaths(payload: Record<string, unknown>): string[] {
+  const direct = readApprovalTextField(payload, 'path');
+  if (direct) return [direct];
+  const changes = payload.changes;
+  if (changes && typeof changes === 'object' && !Array.isArray(changes)) {
+    return Object.keys(changes as Record<string, unknown>);
+  }
+  if (Array.isArray(changes)) {
+    const paths: string[] = [];
+    for (const entry of changes) {
+      if (typeof entry === 'string' && entry.trim().length > 0) {
+        paths.push(entry.trim());
+      } else if (entry && typeof entry === 'object' && typeof (entry as Record<string, unknown>).path === 'string') {
+        const p = (entry as Record<string, unknown>).path as string;
+        if (p.trim().length > 0) paths.push(p.trim());
+      }
+    }
+    if (paths.length > 0) return paths;
+  }
+  const item = payload.item;
+  if (item && typeof item === 'object' && !Array.isArray(item)) {
+    const itemPath = (item as Record<string, unknown>).path;
+    if (typeof itemPath === 'string' && itemPath.trim().length > 0) {
+      return [itemPath.trim()];
+    }
+  }
+  return [];
+}
+
+function readApprovalFileChangeDiff(payload: Record<string, unknown>): string | null {
+  const direct = readApprovalTextField(payload, 'diff');
+  if (direct) return direct;
+  const changes = payload.changes;
+  if (changes && typeof changes === 'object' && !Array.isArray(changes)) {
+    const parts: string[] = [];
+    for (const [path, change] of Object.entries(changes as Record<string, unknown>)) {
+      if (!change || typeof change !== 'object') continue;
+      const rec = change as Record<string, unknown>;
+      const diffText =
+        (typeof rec.diff === 'string' && rec.diff) ||
+        (typeof rec.unifiedDiff === 'string' && rec.unifiedDiff) ||
+        null;
+      if (diffText) {
+        parts.push(`--- ${path}\n${diffText}`);
+      }
+    }
+    if (parts.length > 0) return parts.join('\n\n');
+  }
+  return null;
 }
 
 function formatPlanPayload(payload: Record<string, unknown>): string {

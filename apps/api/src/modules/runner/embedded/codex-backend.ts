@@ -37,6 +37,11 @@ type CodexBackendDeps = {
 export class CodexBackend {
   private codexWorkerPromise: Promise<CodexWorker> | null = null;
   private readonly pendingApprovalRequests = new Map<string, PendingApprovalRequest>();
+  // itemId -> last seen file-change item details (path, diff, etc).
+  // The approval JSON-RPC request only carries itemId, so we rely on the
+  // item/started or item/fileChange/outputDelta notifications to remember
+  // path/diff metadata and inject it into the approval payload.
+  private readonly fileChangeItemDetails = new Map<string, Record<string, unknown>>();
   private readonly rawNotificationLogMode: 'off' | 'all' | 'usage';
 
   constructor(
@@ -77,6 +82,20 @@ export class CodexBackend {
         if (!id || !model) {
           continue;
         }
+        const supportedEfforts: { value: string; description: string }[] = [];
+        const rawEfforts = Array.isArray(record.supportedReasoningEfforts)
+          ? record.supportedReasoningEfforts
+          : [];
+        for (const entry of rawEfforts) {
+          if (!entry || typeof entry !== 'object') continue;
+          const eff = entry as Record<string, unknown>;
+          const value = readOptionalString(eff.reasoningEffort) ?? readOptionalString(eff.value);
+          if (!value) continue;
+          supportedEfforts.push({
+            value,
+            description: readOptionalString(eff.description) ?? '',
+          });
+        }
         items.push({
           id,
           backend: 'codex',
@@ -85,6 +104,8 @@ export class CodexBackend {
           description: readOptionalString(record.description) ?? '',
           hidden: record.hidden === true,
           isDefault: record.isDefault === true,
+          supportedEfforts,
+          defaultEffort: readOptionalString(record.defaultReasoningEffort),
         });
       }
 
@@ -179,7 +200,7 @@ export class CodexBackend {
       await worker.readyPromise;
 
       const workspaceCwd = input.cwd?.trim() || this.config.codexDefaultCwd;
-      const { model, sandbox, approvalPolicy } = resolveCodexExecutionConfig(
+      const { model, sandbox, approvalPolicy, effort } = resolveCodexExecutionConfig(
         input.backendConfig,
         this.config,
       );
@@ -193,6 +214,8 @@ export class CodexBackend {
       const turnStartResult = (await this.sendWorkerRequest(worker, 'turn/start', {
         threadId,
         input: [{ type: 'text', text: input.content, text_elements: [] }],
+        ...(model ? { model } : {}),
+        ...(effort ? { effort } : {}),
       })) as Record<string, unknown>;
       turn.codexTurnId = readNestedString(turnStartResult, ['turn', 'id']);
 
@@ -202,6 +225,7 @@ export class CodexBackend {
         ...(model ? { model } : {}),
         ...(sandbox ? { sandbox } : {}),
         ...(approvalPolicy ? { approvalPolicy } : {}),
+        ...(effort ? { effort } : {}),
       });
       await completionPromise;
     } catch (error: unknown) {
@@ -603,6 +627,9 @@ export class CodexBackend {
       if (!turn || turn.finalized) {
         return;
       }
+      if (method === 'item/fileChange/outputDelta') {
+        this.captureFileChangeItem(params);
+      }
       const payload = buildToolOutputPayload(method, params);
       if (!payload.text) {
         return;
@@ -645,6 +672,7 @@ export class CodexBackend {
       if (!turn || turn.finalized) {
         return;
       }
+      this.captureFileChangeItem(params);
       await this.deps.appendTurnEvent(turn.turnId, 'tool.started', buildToolLifecyclePayload('started', params));
       return;
     }
@@ -845,7 +873,52 @@ export class CodexBackend {
       params: paramsRecord,
     });
 
-    await this.deps.appendTurnEvent(turn.turnId, 'turn.approval.requested', buildApprovalRequestedPayload(requestId, method, paramsRecord));
+    try {
+      console.log(`[codex-backend] approval request method=${method} params=${JSON.stringify(paramsRecord)}`);
+    } catch {
+      console.log(`[codex-backend] approval request method=${method} params=<unserializable>`);
+    }
+
+    const payload = buildApprovalRequestedPayload(requestId, method, paramsRecord);
+    if (method === 'item/fileChange/requestApproval') {
+      const itemId = readOptionalPayloadString(paramsRecord.itemId);
+      const cached = itemId ? this.fileChangeItemDetails.get(itemId) : null;
+      if (cached) {
+        const summary = summarizeFileChangeItem(cached);
+        if (!payload.path && summary.paths.length > 0) {
+          payload.path = summary.paths.length === 1 ? summary.paths[0] : summary.paths.join(', ');
+        }
+        if (!payload.diff && summary.diff) {
+          payload.diff = summary.diff;
+        }
+        if (!payload.changes && summary.changes) {
+          payload.changes = summary.changes;
+        }
+        if (!payload.item) {
+          payload.item = cached;
+        }
+      }
+    }
+
+    await this.deps.appendTurnEvent(turn.turnId, 'turn.approval.requested', payload);
+  }
+
+  private captureFileChangeItem(params: Record<string, unknown>): void {
+    const item = readOptionalObject(params.item);
+    if (!item) return;
+    const itemId =
+      readOptionalPayloadString(item.id) ?? readOptionalPayloadString(params.itemId);
+    if (!itemId) return;
+    const itemType = readOptionalPayloadString(item.type);
+    // Codex emits item types like "file_change" / "fileChange"; capture either.
+    if (itemType && !itemType.toLowerCase().includes('file')) return;
+    const previous = this.fileChangeItemDetails.get(itemId) ?? {};
+    this.fileChangeItemDetails.set(itemId, { ...previous, ...item });
+    // Bound the cache so it can't grow unbounded across long-running sessions.
+    if (this.fileChangeItemDetails.size > 256) {
+      const oldest = this.fileChangeItemDetails.keys().next().value;
+      if (oldest) this.fileChangeItemDetails.delete(oldest);
+    }
   }
 
   private findTurnByThread(threadId: string, codexTurnId: string | null): ActiveCodexTurn | null {
@@ -887,14 +960,15 @@ export class CodexBackend {
 function resolveCodexExecutionConfig(
   backendConfig: Record<string, unknown> | null | undefined,
   defaults: CodexBackendConfig,
-): { model: string | null; sandbox: string | null; approvalPolicy: string } {
+): { model: string | null; sandbox: string | null; approvalPolicy: string; effort: string | null } {
   const config = backendConfig ?? {};
   const model = readOptionalString(config.model) ?? defaults.codexDefaultModel;
   const executionMode = readOptionalString(config.executionMode) ?? DEFAULT_CODEX_EXECUTION_MODE;
   const modeDefaults = mapCodexExecutionModeToRuntimeConfig(executionMode);
   const sandbox = modeDefaults.sandbox ?? defaults.codexSandboxMode;
   const approvalPolicy = modeDefaults.approvalPolicy ?? defaults.codexApprovalPolicy;
-  return { model, sandbox, approvalPolicy };
+  const effort = readOptionalString(config.effort);
+  return { model, sandbox, approvalPolicy, effort };
 }
 
 function mapCodexExecutionModeToRuntimeConfig(executionMode: string | null): {
@@ -1001,6 +1075,58 @@ function readOptionalObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
+/**
+ * Codex fileChange items carry `item.changes` as an array like
+ * `[{ path, kind: { type: 'add'|'modify'|'delete' }, diff }]`. Flatten that
+ * into the (path, diff, changes) shape our approval UI consumes.
+ */
+function summarizeFileChangeItem(
+  item: Record<string, unknown>,
+): {
+  paths: string[];
+  diff: string | null;
+  changes: Record<string, { kind: string | null; diff: string | null }> | null;
+} {
+  const paths: string[] = [];
+  const changesMap: Record<string, { kind: string | null; diff: string | null }> = {};
+  const diffParts: string[] = [];
+
+  const rawChanges = item.changes;
+  if (Array.isArray(rawChanges)) {
+    for (const entry of rawChanges) {
+      if (!entry || typeof entry !== 'object') continue;
+      const rec = entry as Record<string, unknown>;
+      const path = readOptionalPayloadString(rec.path);
+      if (!path) continue;
+      paths.push(path);
+      const kindRec = readOptionalObject(rec.kind);
+      const kindType = kindRec ? readOptionalPayloadString(kindRec.type) : null;
+      const diffText =
+        readOptionalPayloadString(rec.diff) ?? readOptionalPayloadString(rec.unifiedDiff);
+      changesMap[path] = { kind: kindType, diff: diffText };
+      if (diffText) {
+        diffParts.push(`--- ${path}${kindType ? ` (${kindType})` : ''}\n${diffText}`);
+      }
+    }
+  }
+
+  const fallbackPath = readOptionalPayloadString(item.path);
+  if (paths.length === 0 && fallbackPath) {
+    paths.push(fallbackPath);
+  }
+  const fallbackDiff =
+    readOptionalPayloadString(item.diff) ?? readOptionalPayloadString(item.unifiedDiff);
+  if (diffParts.length === 0 && fallbackDiff) {
+    diffParts.push(fallbackDiff);
+  }
+
+  return {
+    paths,
+    diff: diffParts.length > 0 ? diffParts.join('\n\n') : null,
+    changes: Object.keys(changesMap).length > 0 ? changesMap : null,
+  };
+}
+
 function buildApprovalRequestedPayload(
   requestId: string,
   method: PendingApprovalRequest['method'],
@@ -1036,6 +1162,14 @@ function buildApprovalRequestedPayload(
       reason: readOptionalPayloadString(params.reason),
       itemId: readOptionalPayloadString(params.itemId),
       grantRoot: readOptionalPayloadString(params.grantRoot),
+      path:
+        readOptionalPayloadString(params.path) ??
+        readOptionalPayloadString((readOptionalObject(params.item) ?? {}).path),
+      changes: readOptionalObject(params.changes) ?? readOptionalObject(params.fileChange) ?? null,
+      diff:
+        readOptionalPayloadString(params.diff) ??
+        readOptionalPayloadString((readOptionalObject(params.item) ?? {}).diff),
+      item: readOptionalObject(params.item),
     };
   }
 

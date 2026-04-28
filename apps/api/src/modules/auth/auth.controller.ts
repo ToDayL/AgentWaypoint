@@ -74,11 +74,10 @@ function setSessionCookie(reply: ReplyLike, sessionToken: string, expiresAt: Dat
     `${readSessionCookieName()}=${encodeURIComponent(sessionToken)}`,
     'Path=/',
     'HttpOnly',
-    process.env.NODE_ENV === 'development' ? '' : 'Secure',
     'SameSite=Lax',
     `Expires=${expiresAt.toUTCString()}`,
     `Max-Age=${maxAge}`,
-  ].filter((entry) => entry.length > 0);
+  ];
   reply.header('Set-Cookie', parts.join('; '));
 }
 
@@ -87,11 +86,10 @@ function clearSessionCookie(reply: ReplyLike): void {
     `${readSessionCookieName()}=`,
     'Path=/',
     'HttpOnly',
-    process.env.NODE_ENV === 'development' ? '' : 'Secure',
     'SameSite=Lax',
     'Expires=Thu, 01 Jan 1970 00:00:00 GMT',
     'Max-Age=0',
-  ].filter((entry) => entry.length > 0);
+  ];
   reply.header('Set-Cookie', parts.join('; '));
 }
 

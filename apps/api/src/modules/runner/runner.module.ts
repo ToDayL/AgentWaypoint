@@ -1,10 +1,12 @@
 import { Inject, Injectable, Logger, Module, OnModuleInit } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
+import { EmbeddedRunnerService } from './embedded/embedded-runner.service';
 import { FilesystemController } from './filesystem.controller';
-import { PrismaModule } from '../prisma/prisma.module';
 import { HttpRunnerAdapter } from './http-runner.adapter';
+import { InProcessRunnerAdapter } from './in-process-runner.adapter';
 import { ModelsController } from './models.controller';
 import { MockRunnerAdapter } from './mock-runner.adapter';
+import { PrismaModule } from '../prisma/prisma.module';
 import { RUNNER_ADAPTER } from './runner.types';
 import { SkillsController } from './skills.controller';
 
@@ -29,14 +31,26 @@ class RunnerModeLogger implements OnModuleInit {
   imports: [PrismaModule, AuthModule],
   controllers: [ModelsController, SkillsController, FilesystemController],
   providers: [
+    EmbeddedRunnerService,
+    InProcessRunnerAdapter,
     MockRunnerAdapter,
     HttpRunnerAdapter,
     {
       provide: RUNNER_ADAPTER,
-      inject: [MockRunnerAdapter, HttpRunnerAdapter],
-      useFactory: (mockRunnerAdapter: MockRunnerAdapter, httpRunnerAdapter: HttpRunnerAdapter) => {
-        const mode = (process.env.RUNNER_MODE ?? 'mock').trim().toLowerCase();
-        return mode === 'http' ? httpRunnerAdapter : mockRunnerAdapter;
+      inject: [InProcessRunnerAdapter, MockRunnerAdapter, HttpRunnerAdapter],
+      useFactory: (
+        inProcessRunnerAdapter: InProcessRunnerAdapter,
+        mockRunnerAdapter: MockRunnerAdapter,
+        httpRunnerAdapter: HttpRunnerAdapter,
+      ) => {
+        const mode = (process.env.RUNNER_MODE ?? 'embedded').trim().toLowerCase();
+        if (mode === 'http') {
+          return httpRunnerAdapter;
+        }
+        if (mode === 'mock') {
+          return mockRunnerAdapter;
+        }
+        return inProcessRunnerAdapter;
       },
     },
     RunnerModeLogger,
