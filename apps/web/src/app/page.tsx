@@ -167,6 +167,17 @@ type TimelineEvent = {
   status?: 'running' | 'completed';
   toolKey?: string;
 };
+type TurnEventSnapshot = {
+  timelineEvents: TimelineEvent[];
+  latestDiffSummary: string;
+  latestPlan: string;
+  assistantText: string;
+  reasoningText: string;
+  toolOutput: string;
+  contextRemainingRatio: number | null;
+  latestSeq: number;
+  sawNonReasoningAssistantDelta: boolean;
+};
 type ParsedDiffFile = ReturnType<typeof parseDiff>[number];
 
 type TurnStatusResponse = {
@@ -724,6 +735,8 @@ export default function HomePage() {
   const [uploadingFiles, setUploadingFiles] = useState(false);
   const [uploadError, setUploadError] = useState('');
   const eventSourceRef = useRef<EventSource | null>(null);
+  const turnStreamCursorRef = useRef<Record<string, number>>({});
+  const sessionHistoryRequestRef = useRef(0);
   const turnPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pendingTurnCreateAbortRef = useRef<AbortController | null>(null);
   const leftPaneRef = useRef<HTMLElement | null>(null);
@@ -2807,10 +2820,49 @@ export default function HomePage() {
     }
   }
 
+  function rememberTurnStreamCursor(turnId: string, seq: number): void {
+    const normalizedTurnId = turnId.trim();
+    if (!normalizedTurnId || !Number.isFinite(seq)) {
+      return;
+    }
+    const current = turnStreamCursorRef.current[normalizedTurnId] ?? 0;
+    if (seq > current) {
+      turnStreamCursorRef.current[normalizedTurnId] = seq;
+    }
+  }
+
+  function getTurnStreamCursor(turnId: string): number {
+    const normalizedTurnId = turnId.trim();
+    if (!normalizedTurnId) {
+      return 0;
+    }
+    return Math.max(turnStreamCursorRef.current[normalizedTurnId] ?? 0, 0);
+  }
+
+  async function fetchTurnEventSnapshot(turnId: string): Promise<TurnEventSnapshot> {
+    const normalizedTurnId = turnId.trim();
+    const events = await apiRequest<TurnEventHistoryItem[]>(
+      `/api/channels/plugins/web/app/turns/${normalizedTurnId}/events?${new URLSearchParams({ since: '0' }).toString()}`,
+      {
+        method: 'GET',
+      },
+    );
+    const normalizedEvents = events
+      .map((event) => normalizeHistoryEventItem(event, normalizedTurnId))
+      .filter((event): event is StreamEnvelope => event !== null);
+    const snapshot = buildTurnEventSnapshot(normalizedEvents);
+    rememberTurnStreamCursor(normalizedTurnId, snapshot.latestSeq);
+    return snapshot;
+  }
+
   async function loadSessionHistory(
     sessionId: string,
     options: { resumeStream: boolean; resetEventLog: boolean; resetInspectPanel: boolean },
   ): Promise<void> {
+    const requestId = sessionHistoryRequestRef.current + 1;
+    sessionHistoryRequestRef.current = requestId;
+    const isCurrentRequest = (): boolean => sessionHistoryRequestRef.current === requestId;
+
     if (!sessionId) {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
@@ -2846,6 +2898,9 @@ export default function HomePage() {
       const history = await apiRequest<SessionHistory>(`/api/channels/plugins/web/app/sessions/${sessionId}/history`, {
         method: 'GET',
       });
+      if (!isCurrentRequest()) {
+        return;
+      }
       setMessages(history.messages);
       setTurns(history.turns);
       setTurnStatus(history.activeTurnStatus ?? 'idle');
@@ -2853,6 +2908,8 @@ export default function HomePage() {
       setContextRemainingRatio(latestTurn?.contextRemainingRatio ?? null);
       setActiveTurnId(history.activeTurnId ?? '');
       setPendingApproval(null);
+      let streamSince = history.activeTurnId ? getTurnStreamCursor(history.activeTurnId) : 0;
+      let sawNonReasoningAssistantDelta = false;
       if (history.activeTurnId) {
         setStreamBubbleTurnId(history.activeTurnId);
         setStreamActive(true);
@@ -2874,23 +2931,60 @@ export default function HomePage() {
         setTimelineEvents([]);
       }
       if (history.activeTurnId) {
-        await syncTurnState(history.activeTurnId);
+        if (options.resetEventLog || options.resetInspectPanel) {
+          const snapshot = await fetchTurnEventSnapshot(history.activeTurnId);
+          if (!isCurrentRequest()) {
+            return;
+          }
+          streamSince = Math.max(streamSince, snapshot.latestSeq);
+          sawNonReasoningAssistantDelta = snapshot.sawNonReasoningAssistantDelta;
+          if (options.resetEventLog) {
+            setTimelineEvents(snapshot.timelineEvents);
+          }
+          if (options.resetInspectPanel) {
+            setAssistantText(snapshot.assistantText);
+            setReasoningText(snapshot.reasoningText);
+            setLatestPlan(snapshot.latestPlan);
+            setToolOutput(snapshot.toolOutput);
+            setLatestDiffSummary(snapshot.latestDiffSummary);
+          }
+          if (snapshot.contextRemainingRatio !== null) {
+            setContextRemainingRatio(snapshot.contextRemainingRatio);
+          }
+        }
+        const currentTurnState = await fetchTurnState(history.activeTurnId);
+        if (!isCurrentRequest()) {
+          return;
+        }
+        applyTurnState(currentTurnState);
       }
       if (options.resumeStream && history.activeTurnId) {
         setResumedTurnHint(`Resumed in-flight turn: ${history.activeTurnId}`);
-        openStream(history.activeTurnId, sessionId);
+        openStream(history.activeTurnId, sessionId, {
+          since: streamSince,
+          initialSawNonReasoningAssistantDelta: sawNonReasoningAssistantDelta,
+        });
       } else {
         setResumedTurnHint('');
       }
     } catch (requestError) {
-      setError(extractMessage(requestError));
+      if (isCurrentRequest()) {
+        setError(extractMessage(requestError));
+      }
     }
   }
 
   async function syncTurnState(turnId: string): Promise<void> {
-    const status = await apiRequest<TurnStatusResponse>(`/api/channels/plugins/web/app/turns/${turnId}`, {
+    applyTurnState(await fetchTurnState(turnId));
+  }
+
+  async function fetchTurnState(turnId: string): Promise<TurnStatusResponse> {
+    return apiRequest<TurnStatusResponse>(`/api/channels/plugins/web/app/turns/${turnId}`, {
       method: 'GET',
     });
+  }
+
+  function applyTurnState(status: TurnStatusResponse): void {
     setTurnStatus(status.status);
     setContextRemainingRatio((current) => status.contextRemainingRatio ?? current);
     setPendingApproval(status.pendingApproval);
@@ -2899,14 +2993,20 @@ export default function HomePage() {
     }
   }
 
-  function openStream(turnId: string, sessionId: string): void {
+  function openStream(
+    turnId: string,
+    sessionId: string,
+    options?: { since?: number; initialSawNonReasoningAssistantDelta?: boolean },
+  ): void {
     eventSourceRef.current?.close();
     inspectedTurnIdRef.current = turnId;
     setInspectedTurnId(turnId);
-    const streamUrl = `/api/channels/plugins/web/app/turns/${turnId}/stream`;
+    const since = Math.max(options?.since ?? getTurnStreamCursor(turnId), 0);
+    const query = since > 0 ? `?${new URLSearchParams({ since: String(since) }).toString()}` : '';
+    const streamUrl = `/api/channels/plugins/web/app/turns/${turnId}/stream${query}`;
     const source = new EventSource(streamUrl);
     eventSourceRef.current = source;
-    let sawNonReasoningAssistantDelta = false;
+    let sawNonReasoningAssistantDelta = options?.initialSawNonReasoningAssistantDelta === true;
 
     const appendTimelineEvent = (envelope: StreamEnvelope): void => {
       setTimelineEvents((current) => mergeTimelineEvent(current, envelope));
@@ -2928,8 +3028,12 @@ export default function HomePage() {
 
     STREAM_EVENTS.forEach((eventType) => {
       source.addEventListener(eventType, (evt) => {
+        if (eventSourceRef.current !== source) {
+          return;
+        }
         const message = evt as MessageEvent<string>;
         const envelope = JSON.parse(message.data) as StreamEnvelope;
+        rememberTurnStreamCursor(envelope.turnId, envelope.seq);
         const selectedTurnId = inspectedTurnIdRef.current.trim();
         const shouldUpdateInspectPanel = !selectedTurnId || selectedTurnId === envelope.turnId;
         if (shouldUpdateInspectPanel) {
@@ -2988,15 +3092,8 @@ export default function HomePage() {
         }
 
         if (envelope.type === 'turn.approval.requested') {
-          setTurnStatus('waiting_approval');
-          setPendingApproval({
-            id: String(envelope.payload.requestId ?? ''),
-            kind: typeof envelope.payload.kind === 'string' ? envelope.payload.kind : 'approval',
-            status: 'pending',
-            decision: null,
-            createdAt: envelope.createdAt,
-            resolvedAt: null,
-            payload: envelope.payload,
+          void syncTurnState(turnId).catch(() => {
+            // Keep current UI state on transient sync failure.
           });
         }
 
@@ -3046,13 +3143,13 @@ export default function HomePage() {
           setResumedTurnHint('');
           setPendingApproval(null);
           stopTurnStatusPolling();
-            if (sessionId) {
-              void loadSessionHistory(sessionId, {
-                resumeStream: false,
-                resetEventLog: false,
-                resetInspectPanel: false,
-              });
-            }
+          if (sessionId) {
+            void loadSessionHistory(sessionId, {
+              resumeStream: false,
+              resetEventLog: false,
+              resetInspectPanel: false,
+            });
+          }
           source.close();
           eventSourceRef.current = null;
         }
@@ -3060,6 +3157,9 @@ export default function HomePage() {
     });
 
     source.onerror = () => {
+      if (eventSourceRef.current !== source) {
+        return;
+      }
       appendSystemTimelineEvent('Stream disconnected');
       source.close();
       eventSourceRef.current = null;
@@ -3426,24 +3526,12 @@ export default function HomePage() {
     openInsightsPanel('events');
 
     try {
-      const events = await apiRequest<TurnEventHistoryItem[]>(
-        `/api/channels/plugins/web/app/turns/${normalizedTurnId}/events?${new URLSearchParams({ since: '0' }).toString()}`,
-        {
-          method: 'GET',
-        },
-      );
+      const snapshot = await fetchTurnEventSnapshot(normalizedTurnId);
       if (inspectedTurnIdRef.current !== normalizedTurnId) {
         return;
       }
-      const normalizedEvents = events
-        .map((event) => normalizeHistoryEventItem(event, normalizedTurnId))
-        .filter((event): event is StreamEnvelope => event !== null);
-      const timeline = buildTimelineFromEvents(normalizedEvents);
-      if (inspectedTurnIdRef.current !== normalizedTurnId) {
-        return;
-      }
-      setTimelineEvents(timeline.timelineEvents);
-      setLatestDiffSummary(timeline.latestDiffSummary);
+      setTimelineEvents(snapshot.timelineEvents);
+      setLatestDiffSummary(snapshot.latestDiffSummary);
     } catch (requestError) {
       if (inspectedTurnIdRef.current !== normalizedTurnId) {
         return;
@@ -5964,22 +6052,74 @@ function normalizeHistoryEventItem(item: TurnEventHistoryItem, fallbackTurnId: s
   };
 }
 
-function buildTimelineFromEvents(events: StreamEnvelope[]): { timelineEvents: TimelineEvent[]; latestDiffSummary: string } {
+function buildTurnEventSnapshot(events: StreamEnvelope[]): TurnEventSnapshot {
   let timelineEvents: TimelineEvent[] = [];
   let latestDiffSummary = '';
+  let latestPlan = '';
+  let assistantText = '';
+  let reasoningText = '';
+  let toolOutput = '';
+  let contextRemainingRatio: number | null = null;
+  let latestSeq = 0;
+  let sawNonReasoningAssistantDelta = false;
   const sortedEvents = [...events].sort((a, b) => a.seq - b.seq);
   sortedEvents.forEach((event) => {
+    latestSeq = Math.max(latestSeq, event.seq);
     timelineEvents = mergeTimelineEvent(timelineEvents, event);
+    if (event.type === 'assistant.delta') {
+      const delta = event.payload.text;
+      if (typeof delta === 'string') {
+        const isReasoningDelta = event.payload.isReasoning === true;
+        if (!isReasoningDelta && delta.length > 0) {
+          sawNonReasoningAssistantDelta = true;
+        }
+        assistantText += delta;
+      }
+    }
+    if (event.type === 'reasoning.delta') {
+      const delta = event.payload.delta;
+      if (typeof delta === 'string') {
+        reasoningText += delta;
+      }
+    }
+    if (event.type === 'plan.updated') {
+      latestPlan = formatPlanPayload(event.payload);
+    }
+    if (event.type === 'thread.token_usage.updated') {
+      const ratio = resolveRemainingContextRatio(event.payload);
+      if (ratio !== null) {
+        contextRemainingRatio = ratio;
+      }
+    }
+    if (event.type === 'tool.output') {
+      const delta = event.payload.text;
+      if (typeof delta === 'string') {
+        toolOutput += delta;
+      }
+    }
     if (event.type === 'diff.updated') {
       const formatted = formatDiffPayload(event.payload);
       if (formatted) {
         latestDiffSummary = formatted;
       }
     }
+    if (event.type === 'turn.completed' && !sawNonReasoningAssistantDelta) {
+      const completedContent = typeof event.payload.content === 'string' ? event.payload.content : '';
+      if (completedContent.length > 0) {
+        assistantText = `${ensureBalancedThinkTags(assistantText)}${completedContent}`;
+      }
+    }
   });
   return {
     timelineEvents,
     latestDiffSummary,
+    latestPlan,
+    assistantText,
+    reasoningText,
+    toolOutput,
+    contextRemainingRatio,
+    latestSeq,
+    sawNonReasoningAssistantDelta,
   };
 }
 

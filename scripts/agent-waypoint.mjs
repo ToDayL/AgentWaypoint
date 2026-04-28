@@ -17,7 +17,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const packageManager = resolvePackageManager();
 
 const args = process.argv.slice(2);
-const { command, home: homeOverride, commandArgs } = parseArgs(args);
+const { command, home: homeOverride, commandArgs, rebuild: forceRebuild } = parseArgs(args);
 
 if (!command) {
   printUsage();
@@ -59,7 +59,7 @@ switch (command) {
 }
 
 function parseArgs(input) {
-  const out = { command: null, home: null, commandArgs: [] };
+  const out = { command: null, home: null, commandArgs: [], rebuild: false };
   const positional = [];
   for (let i = 0; i < input.length; i += 1) {
     const arg = input[i];
@@ -68,6 +68,8 @@ function parseArgs(input) {
       i += 1;
     } else if (arg.startsWith('--home=')) {
       out.home = arg.slice('--home='.length);
+    } else if (arg === '--rebuild') {
+      out.rebuild = true;
     } else {
       positional.push(arg);
     }
@@ -88,7 +90,7 @@ function resolveDataHome(override) {
 function printUsage() {
   process.stdout.write(
     [
-      'Usage: agent-waypoint <command> [--home <dir>]',
+      'Usage: agent-waypoint <command> [--home <dir>] [--rebuild]',
       '',
       'Commands:',
       '  start     Bootstrap (if needed) and launch API + Web in the background.',
@@ -99,6 +101,7 @@ function printUsage() {
       '',
       'Options:',
       '  --home <dir>  Override the data directory (default: $AGENTWAYPOINT_HOME or ~/.agentwaypoint).',
+      '  --rebuild     Force a web rebuild before start/restart.',
       '',
     ].join('\n'),
   );
@@ -122,7 +125,7 @@ async function cmdStart() {
   ensureDirs();
   const config = await runBootstrapForeground();
 
-  ensureWebBuild();
+  ensureWebBuild({ force: forceRebuild });
 
   const apiCmd = pnpmCommand(['--filter', '@agentwaypoint/api', 'start']);
   // Skip web's package.json `start` script (it hardcodes -p 3000); call next directly.
@@ -276,12 +279,12 @@ function ensureDirs() {
   fs.mkdirSync(logsDir, { recursive: true });
 }
 
-function ensureWebBuild() {
-  const nextDir = path.join(REPO_ROOT, 'apps/web/.next');
-  if (fs.existsSync(path.join(nextDir, 'BUILD_ID'))) {
+function ensureWebBuild(options = {}) {
+  const buildReason = getWebBuildReason(options);
+  if (!buildReason) {
     return;
   }
-  process.stdout.write('Building web (one-time, takes a minute)...\n');
+  process.stdout.write(`Building web (${buildReason}, takes a minute)...\n`);
   const [command, ...args] = pnpmCommand(['--filter', '@agentwaypoint/web', 'build']);
   const result = spawnSync(command, args, {
     cwd: REPO_ROOT,
@@ -290,6 +293,84 @@ function ensureWebBuild() {
   if (result.status !== 0) {
     throw new Error(`web build failed with status ${result.status}`);
   }
+}
+
+function getWebBuildReason(options = {}) {
+  if (options.force) {
+    return 'forced';
+  }
+
+  const buildMarker = path.join(REPO_ROOT, 'apps/web/.next/BUILD_ID');
+  const buildMarkerMtime = readMtimeMs(buildMarker);
+  if (buildMarkerMtime === null) {
+    return 'missing build';
+  }
+
+  const newestInput = findNewestWebBuildInputMtime();
+  if (newestInput !== null && newestInput > buildMarkerMtime) {
+    return 'source changed';
+  }
+  return null;
+}
+
+function findNewestWebBuildInputMtime() {
+  const inputs = [
+    'package.json',
+    'pnpm-lock.yaml',
+    'apps/web/package.json',
+    'apps/web/next.config.js',
+    'apps/web/next.config.mjs',
+    'apps/web/tsconfig.json',
+    'apps/web/src',
+    'apps/web/public',
+    'packages/shared/package.json',
+    'packages/shared/src',
+  ];
+  let newest = null;
+  for (const input of inputs) {
+    const mtime = findNewestMtimeMs(path.join(REPO_ROOT, input));
+    if (mtime !== null && (newest === null || mtime > newest)) {
+      newest = mtime;
+    }
+  }
+  return newest;
+}
+
+function findNewestMtimeMs(targetPath) {
+  let stat;
+  try {
+    stat = fs.statSync(targetPath);
+  } catch {
+    return null;
+  }
+
+  if (!stat.isDirectory()) {
+    return stat.mtimeMs;
+  }
+
+  let newest = stat.mtimeMs;
+  for (const entry of fs.readdirSync(targetPath, { withFileTypes: true })) {
+    if (shouldSkipBuildInput(entry.name)) {
+      continue;
+    }
+    const childNewest = findNewestMtimeMs(path.join(targetPath, entry.name));
+    if (childNewest !== null && childNewest > newest) {
+      newest = childNewest;
+    }
+  }
+  return newest;
+}
+
+function readMtimeMs(targetPath) {
+  try {
+    return fs.statSync(targetPath).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+function shouldSkipBuildInput(name) {
+  return name === 'node_modules' || name === '.next' || name === 'dist' || name === '.turbo';
 }
 
 function spawnDetached(argv, logFilePath, env) {

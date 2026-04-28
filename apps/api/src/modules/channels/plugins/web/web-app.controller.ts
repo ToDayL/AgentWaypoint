@@ -296,7 +296,11 @@ export class WebPluginAppController {
   async getTurnEvents(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown, @Query() query: unknown) {
     const { id } = parseWithZod(TurnIdParamsSchema, params);
     const queryInput = parseWithZod(StreamTurnQuerySchema, query);
-    return this.webPlugin.getEventsForTurn(user.id, id, queryInput.since ?? 0);
+    const turn = await this.webPlugin.getTurnForUser(user.id, id);
+    const cursor = queryInput.since ?? 0;
+    const persistedEvents = await this.webPlugin.getEventsForTurn(user.id, id, cursor);
+    const dispatchedEvents = this.webPlugin.getDispatchedEventsForSessionTurn(turn.sessionId, id, cursor);
+    return mergeBySeq(persistedEvents, dispatchedEvents);
   }
 
   @Get('turns/:id/stream')

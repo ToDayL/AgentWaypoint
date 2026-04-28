@@ -37,6 +37,10 @@ pnpm dev:up
 ```
 
 On first run, bootstrap prompts for admin credentials and ports. Use non-reserved ports such as API `4000` and Web `3000`.
+The launcher rebuilds the web app when the existing `.next` build is missing or stale. To force a rebuild, run:
+```bash
+./agent-waypoint restart --home ./.agentwaypoint-dev --rebuild
+```
 
 ## Verify
 Status:
