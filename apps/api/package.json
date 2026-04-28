@@ -12,8 +12,7 @@
     "test": "vitest run --passWithNoTests",
     "format": "prettier --write \"src/**/*.ts\"",
     "prisma:generate": "prisma generate",
-    "prisma:migrate:dev": "prisma migrate dev",
-    "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:push": "prisma db push",
     "auth:bootstrap-admin": "tsx src/scripts/bootstrap-admin.ts"
   },
   "dependencies": {

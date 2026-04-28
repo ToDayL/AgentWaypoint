@@ -14,9 +14,10 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const packageManager = resolvePackageManager();
 
 const args = process.argv.slice(2);
-const { command, home: homeOverride } = parseArgs(args);
+const { command, home: homeOverride, commandArgs } = parseArgs(args);
 
 if (!command) {
   printUsage();
@@ -44,7 +45,7 @@ switch (command) {
     cmdStatus();
     break;
   case 'logs':
-    cmdLogs(args);
+    cmdLogs(commandArgs);
     break;
   case 'help':
   case '--help':
@@ -58,7 +59,7 @@ switch (command) {
 }
 
 function parseArgs(input) {
-  const out = { command: null, home: null };
+  const out = { command: null, home: null, commandArgs: [] };
   const positional = [];
   for (let i = 0; i < input.length; i += 1) {
     const arg = input[i];
@@ -72,7 +73,7 @@ function parseArgs(input) {
     }
   }
   out.command = positional[0] ?? null;
-  process.argv = [process.argv[0], process.argv[1], ...positional.slice(1)];
+  out.commandArgs = positional.slice(1);
   return out;
 }
 
@@ -123,10 +124,9 @@ async function cmdStart() {
 
   ensureWebBuild();
 
-  const apiCmd = ['pnpm', '--filter', '@agentwaypoint/api', 'start'];
+  const apiCmd = pnpmCommand(['--filter', '@agentwaypoint/api', 'start']);
   // Skip web's package.json `start` script (it hardcodes -p 3000); call next directly.
-  const webCmd = [
-    'pnpm',
+  const webCmd = pnpmCommand([
     '--filter',
     '@agentwaypoint/web',
     'exec',
@@ -134,7 +134,7 @@ async function cmdStart() {
     'start',
     '-p',
     String(config.WEB_PORT),
-  ];
+  ]);
 
   const apiChild = spawnDetached(apiCmd, apiLog, {
     ...process.env,
@@ -236,7 +236,7 @@ function cmdStatus() {
 }
 
 function cmdLogs(rawArgs) {
-  const target = rawArgs[1] ?? 'api';
+  const target = rawArgs[0] ?? 'api';
   const file = target === 'web' ? webLog : apiLog;
   if (!fs.existsSync(file)) {
     process.stderr.write(`No log file at ${file} yet.\n`);
@@ -282,7 +282,8 @@ function ensureWebBuild() {
     return;
   }
   process.stdout.write('Building web (one-time, takes a minute)...\n');
-  const result = spawnSync('pnpm', ['--filter', '@agentwaypoint/web', 'build'], {
+  const [command, ...args] = pnpmCommand(['--filter', '@agentwaypoint/web', 'build']);
+  const result = spawnSync(command, args, {
     cwd: REPO_ROOT,
     stdio: 'inherit',
   });
@@ -314,15 +315,18 @@ function sleep(ms) {
 async function runBootstrapForeground() {
   const configPath = path.join(dataHome, 'config.json');
   if (!fs.existsSync(configPath)) {
-    const result = spawnSync(
-      'pnpm',
-      ['--filter', '@agentwaypoint/api', 'exec', 'tsx', 'src/bootstrap/run-bootstrap.ts'],
-      {
-        cwd: REPO_ROOT,
-        stdio: 'inherit',
-        env: { ...process.env, AGENTWAYPOINT_HOME: dataHome },
-      },
-    );
+    const [command, ...args] = pnpmCommand([
+      '--filter',
+      '@agentwaypoint/api',
+      'exec',
+      'tsx',
+      'src/bootstrap/run-bootstrap.ts',
+    ]);
+    const result = spawnSync(command, args, {
+      cwd: REPO_ROOT,
+      stdio: 'inherit',
+      env: { ...process.env, AGENTWAYPOINT_HOME: dataHome },
+    });
     if (result.status !== 0) {
       throw new Error(`Bootstrap failed with status ${result.status}`);
     }
@@ -334,4 +338,20 @@ async function runBootstrapForeground() {
     }
   }
   return JSON.parse(fs.readFileSync(configPath, 'utf8'));
+}
+
+function resolvePackageManager() {
+  if (commandExists('pnpm')) {
+    return { command: 'pnpm', prefixArgs: [] };
+  }
+  return { command: 'corepack', prefixArgs: ['pnpm'] };
+}
+
+function pnpmCommand(args) {
+  return [packageManager.command, ...packageManager.prefixArgs, ...args];
+}
+
+function commandExists(command) {
+  const result = spawnSync(command, ['--version'], { stdio: 'ignore' });
+  return !result.error && result.status === 0;
 }
