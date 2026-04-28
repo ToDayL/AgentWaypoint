@@ -134,6 +134,7 @@ export type ActiveCodexTurn = ActiveTurnBase & {
   threadId: string | null;
   codexTurnId: string | null;
   assistantText: string;
+  pendingAgentMessageBreak: boolean;
   completionResolve: (() => void) | null;
   completionReject: ((error: Error) => void) | null;
 };

@@ -4,6 +4,7 @@ import { AuthGuard } from '../auth/auth.guard';
 import { QueueSignalModule } from '../queue-signal/queue-signal.module';
 import { RunnerModule } from '../runner/runner.module';
 import { SettingsModule } from '../settings/settings.module';
+import { ApprovalQueueService } from './approval-queue.service';
 import { RunnerEventsController } from './runner-events.controller';
 import { TurnsController } from './turns.controller';
 import { TurnsService } from './turns.service';
@@ -11,7 +12,7 @@ import { TurnsService } from './turns.service';
 @Module({
   imports: [AuthModule, RunnerModule, SettingsModule, QueueSignalModule],
   controllers: [TurnsController, RunnerEventsController],
-  providers: [TurnsService, AuthGuard],
-  exports: [TurnsService],
+  providers: [TurnsService, ApprovalQueueService, AuthGuard],
+  exports: [TurnsService, ApprovalQueueService],
 })
 export class TurnsModule {}

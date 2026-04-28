@@ -190,6 +190,7 @@ export class CodexBackend {
       threadId: null,
       codexTurnId: null,
       assistantText: '',
+      pendingAgentMessageBreak: false,
       completionResolve,
       completionReject,
     };
@@ -612,8 +613,14 @@ export class CodexBackend {
       if (codexTurnId && !turn.codexTurnId) {
         turn.codexTurnId = codexTurnId;
       }
-      turn.assistantText += delta;
-      await this.deps.appendTurnEvent(turn.turnId, 'assistant.delta', { text: delta });
+      // Codex can emit multiple agentMessage items per turn (e.g. one per
+      // narrated step). Deltas within one item are continuous; only insert
+      // a paragraph break at the boundary between distinct items.
+      const effectiveDelta =
+        turn.pendingAgentMessageBreak && turn.assistantText.length > 0 ? `\n\n${delta}` : delta;
+      turn.pendingAgentMessageBreak = false;
+      turn.assistantText += effectiveDelta;
+      await this.deps.appendTurnEvent(turn.turnId, 'assistant.delta', { text: effectiveDelta });
       return;
     }
 
@@ -655,6 +662,9 @@ export class CodexBackend {
         if (text && turn.assistantText.length === 0) {
           turn.assistantText = text;
         }
+        // Mark a pending break so the next agentMessage's first delta
+        // starts on a new paragraph instead of running into this one.
+        turn.pendingAgentMessageBreak = true;
         return;
       }
 

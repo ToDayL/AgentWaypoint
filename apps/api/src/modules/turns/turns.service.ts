@@ -5,6 +5,7 @@ import { RUNNER_ADAPTER, RunnerAdapter, RunnerStreamEvent } from '../runner/runn
 import { SettingsService } from '../settings/settings.service';
 import { CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from './turns.schemas';
 import { QueueSignalService } from '../queue-signal/queue-signal.service';
+import { ApprovalQueueService } from './approval-queue.service';
 
 const ACTIVE_TURN_STATUSES = ['queued', 'running', 'waiting_approval'];
 const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
@@ -15,6 +16,8 @@ export type RunnerEventType =
   | 'assistant.delta'
   | 'turn.approval.requested'
   | 'turn.approval.resolved'
+  | 'turn.approval.timer_paused'
+  | 'turn.approval.timer_resumed'
   | 'thread.token_usage.updated'
   | 'plan.updated'
   | 'reasoning.delta'
@@ -63,6 +66,7 @@ export class TurnsService implements OnModuleInit {
     @Inject(RUNNER_ADAPTER) private readonly runnerAdapter: RunnerAdapter,
     @Inject(SettingsService) private readonly settingsService: SettingsService,
     @Inject(QueueSignalService) private readonly queueSignalService: QueueSignalService,
+    @Inject(ApprovalQueueService) private readonly approvalQueue: ApprovalQueueService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -155,6 +159,14 @@ export class TurnsService implements OnModuleInit {
           status: 'queued',
           backend,
           requestedBackendConfig: buildRequestedBackendConfig(backendConfig, cwd),
+          // Snapshot the session's auto-approve policy at turn-start so the
+          // approval queue can read it even before `turn.started` is ingested
+          // (and so cron-launched turns can override it without touching the
+          // session record).
+          effectiveRuntimeConfig: {
+            autoApprove: runtime.autoApprove,
+            autoApproveTimeoutSeconds: runtime.autoApproveTimeoutSeconds,
+          },
         },
       });
       return {
@@ -259,6 +271,20 @@ export class TurnsService implements OnModuleInit {
       decision: normalizeApprovalDecisionInput(input.decision),
     });
 
+    return this.getTurnStatusForUser(userId, turnId);
+  }
+
+  async controlApprovalTimerForUser(
+    userId: string,
+    turnId: string,
+    input: { approvalId: string; action: 'pause' | 'resume' },
+  ) {
+    await this.getTurnForUser(userId, turnId);
+    if (input.action === 'pause') {
+      await this.approvalQueue.pauseTimer(turnId, input.approvalId);
+    } else {
+      await this.approvalQueue.resumeTimer(turnId, input.approvalId);
+    }
     return this.getTurnStatusForUser(userId, turnId);
   }
 
@@ -371,6 +397,7 @@ export class TurnsService implements OnModuleInit {
         status: true,
         backend: true,
         requestedBackendConfig: true,
+        effectiveRuntimeConfig: true,
         triggerIdentifier: true,
         triggerProvider: true,
         triggerIntegrationId: true,
@@ -404,7 +431,7 @@ export class TurnsService implements OnModuleInit {
               status: 'running',
               startedAt: new Date(),
               effectiveBackendConfig: buildEffectiveBackendConfig(payload, turn),
-              effectiveRuntimeConfig: buildEffectiveRuntimeConfig(payload),
+              effectiveRuntimeConfig: buildEffectiveRuntimeConfig(payload, turn.effectiveRuntimeConfig),
             },
           });
         } else {
@@ -412,7 +439,7 @@ export class TurnsService implements OnModuleInit {
             where: { id: turnId },
             data: {
               effectiveBackendConfig: buildEffectiveBackendConfig(payload, turn),
-              effectiveRuntimeConfig: buildEffectiveRuntimeConfig(payload),
+              effectiveRuntimeConfig: buildEffectiveRuntimeConfig(payload, turn.effectiveRuntimeConfig),
             },
           });
         }
@@ -454,61 +481,16 @@ export class TurnsService implements OnModuleInit {
         }
 
         const normalizedPayload = this.normalizePayload(payload);
-        await this.prisma.$transaction(async (tx) => {
-          await tx.turn.update({
-            where: { id: turnId },
-            data: {
-              status: 'waiting_approval',
-              startedAt: turn.status === 'queued' ? new Date() : undefined,
-            },
-          });
-
-          await tx.turnApproval.upsert({
-            where: {
-              turnId_requestId: {
-                turnId,
-                requestId,
-              },
-            },
-            update: {
-              kind,
-              status: 'pending',
-              decision: null,
-              resolvedAt: null,
-              payload: normalizedPayload,
-            },
-            create: {
-              turnId,
-              requestId,
-              kind,
-              status: 'pending',
-              payload: normalizedPayload,
-            },
-          });
-
-          if (turn.triggerIdentifier !== 'web') {
-            await tx.botMessage.create({
-              data: {
-                projectId: turn.session.projectId,
-                sessionId: turn.sessionId,
-                kind: 'approval_request',
-                payloadRaw: {
-                  turnId: turn.id,
-                  approvalId: requestId,
-                  kind,
-                  payload: normalizedPayload,
-                  triggerIdentifier: turn.triggerIdentifier,
-                  triggerProvider: turn.triggerProvider,
-                  triggerIntegrationId: turn.triggerIntegrationId,
-                  triggerMessageId: turn.triggerMessageId,
-                },
-                status: 'queued',
-              },
-            });
-          }
+        // Hand off to the approval queue, which inserts the row as 'queued',
+        // promotes it to 'pending' (and emits the user-visible event) only
+        // when no other approval is in flight for this turn, and arms an
+        // auto-approve timer if the turn's effectiveRuntimeConfig says so.
+        await this.approvalQueue.enqueueApprovalRequest({
+          turnId,
+          requestId,
+          kind,
+          payload: normalizedPayload,
         });
-
-        await this.appendEvent(turnId, 'turn.approval.requested', normalizedPayload);
         return;
       }
       case 'turn.approval.resolved': {
@@ -540,7 +522,10 @@ export class TurnsService implements OnModuleInit {
           }
         });
 
+        this.approvalQueue.cancelLocalTimer(turnId, requestId);
         await this.appendEvent(turnId, 'turn.approval.resolved', normalizedPayload);
+        // Promote the next queued approval (if any) for this turn.
+        await this.approvalQueue.tryPublishNext(turnId);
         return;
       }
       case 'plan.updated':
@@ -923,6 +908,12 @@ export class TurnsService implements OnModuleInit {
       return null;
     }
 
+    const payload = {
+      ...((approval.payload as Record<string, unknown>) ?? {}),
+      autoApproveAt: approval.autoApproveAt ? approval.autoApproveAt.toISOString() : null,
+      pausedAt: approval.pausedAt ? approval.pausedAt.toISOString() : null,
+      pausedRemainingMs: approval.pausedRemainingMs,
+    };
     return {
       id: approval.requestId,
       kind: approval.kind,
@@ -930,7 +921,7 @@ export class TurnsService implements OnModuleInit {
       decision: approval.decision,
       createdAt: approval.createdAt,
       resolvedAt: approval.resolvedAt,
-      payload: (approval.payload as Record<string, unknown>) ?? {},
+      payload,
     };
   }
 }
@@ -994,6 +985,8 @@ function readSessionRuntimeFromMeta(meta: Prisma.JsonValue | null): {
   backend: string | null;
   cwd: string | null;
   backendConfig: Record<string, unknown> | null;
+  autoApprove: boolean;
+  autoApproveTimeoutSeconds: number;
 } {
   const root = normalizeJsonRecord(meta);
   const runtime = normalizeJsonRecord((root?.runtime as Prisma.JsonValue | undefined) ?? null);
@@ -1008,10 +1001,19 @@ function readSessionRuntimeFromMeta(meta: Prisma.JsonValue | null): {
   }
   const cwd = typeof runtime.cwd === 'string' && runtime.cwd.trim().length > 0 ? runtime.cwd.trim() : null;
   const backendConfig = normalizeJsonRecord((runtime.backendConfig as Prisma.JsonValue | undefined) ?? null) ?? null;
+  const autoApprove = typeof runtime.autoApprove === 'boolean' ? runtime.autoApprove : false;
+  const autoApproveTimeoutSeconds =
+    typeof runtime.autoApproveTimeoutSeconds === 'number' &&
+    Number.isFinite(runtime.autoApproveTimeoutSeconds) &&
+    runtime.autoApproveTimeoutSeconds >= 0
+      ? Math.floor(runtime.autoApproveTimeoutSeconds)
+      : 10;
   return {
     backend,
     cwd,
     backendConfig,
+    autoApprove,
+    autoApproveTimeoutSeconds,
   };
 }
 
@@ -1071,8 +1073,19 @@ function buildEffectiveBackendConfig(
 
 function buildEffectiveRuntimeConfig(
   payload: Record<string, unknown>,
+  existing: Prisma.JsonValue | null | undefined,
 ): Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput {
-  const runtime: Record<string, unknown> = {};
+  // Preserve auto-approve fields snapshotted at turn-start; the runner
+  // doesn't know about them and `turn.started` would otherwise overwrite.
+  const carried: Record<string, unknown> = {};
+  if (existing && typeof existing === 'object' && !Array.isArray(existing)) {
+    const e = existing as Record<string, unknown>;
+    if (typeof e.autoApprove === 'boolean') carried.autoApprove = e.autoApprove;
+    if (typeof e.autoApproveTimeoutSeconds === 'number') {
+      carried.autoApproveTimeoutSeconds = e.autoApproveTimeoutSeconds;
+    }
+  }
+  const runtime: Record<string, unknown> = { ...carried };
   if (typeof payload.cwd === 'string' && payload.cwd.trim().length > 0) {
     runtime.cwd = payload.cwd.trim();
   }

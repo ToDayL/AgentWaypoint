@@ -53,6 +53,7 @@ import CodeMirror from '@uiw/react-codemirror';
 import { Diff, Hunk, parseDiff } from 'react-diff-view';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 
 type Project = {
   id: string;
@@ -312,21 +313,22 @@ function resolveModelDefault(models: AvailableModel[]): string {
 }
 
 /**
- * Render the per-model effort selector. Returns null when the active model
- * doesn't expose an effort knob (mock backend / older Claude models).
+ * Render the per-model effort selector. Always renders the control so the
+ * panel layout doesn't shift when model metadata arrives later — only the
+ * options change in place. If the saved value isn't in the loaded options
+ * yet, it's shown as a fallback so the user's existing setting is visible
+ * during the network round-trip.
  */
 function renderEffortSelect(
   models: AvailableModel[],
   selectedModel: string,
   value: string,
   onChange: (value: string) => void,
-): React.ReactElement | null {
+): React.ReactElement {
   const model = models.find((entry) => entry.model === selectedModel);
   const efforts = model?.supportedEfforts ?? [];
-  if (!model || efforts.length === 0) {
-    return null;
-  }
-  const defaultLabel = model.defaultEffort ? `Model default (${model.defaultEffort})` : 'Model default';
+  const defaultLabel = model?.defaultEffort ? `Model default (${model.defaultEffort})` : 'Model default';
+  const hasSavedValueInOptions = value === '' || efforts.some((entry) => entry.value === value);
   return (
     <label>
       Reasoning Effort
@@ -338,6 +340,7 @@ function renderEffortSelect(
             {entry.description ? ` — ${entry.description}` : ''}
           </option>
         ))}
+        {!hasSavedValueInOptions ? <option value={value}>{value}</option> : null}
       </select>
     </label>
   );
@@ -406,16 +409,18 @@ function readSessionRuntimeConfig(meta: Record<string, unknown> | null | undefin
   backend: string | null;
   cwd: string | null;
   backendConfig: Record<string, unknown> | null;
+  autoApprove: boolean;
+  autoApproveTimeoutSeconds: number;
 } {
   if (!meta || typeof meta !== 'object') {
-    return { backend: null, cwd: null, backendConfig: null };
+    return { backend: null, cwd: null, backendConfig: null, autoApprove: false, autoApproveTimeoutSeconds: 10 };
   }
   const runtime =
     meta.runtime && typeof meta.runtime === 'object' && !Array.isArray(meta.runtime)
       ? (meta.runtime as Record<string, unknown>)
       : null;
   if (!runtime) {
-    return { backend: null, cwd: null, backendConfig: null };
+    return { backend: null, cwd: null, backendConfig: null, autoApprove: false, autoApproveTimeoutSeconds: 10 };
   }
   const backend = typeof runtime.backend === 'string' && runtime.backend.trim() ? runtime.backend.trim() : null;
   const cwd = typeof runtime.cwd === 'string' && runtime.cwd.trim() ? runtime.cwd.trim() : null;
@@ -423,7 +428,14 @@ function readSessionRuntimeConfig(meta: Record<string, unknown> | null | undefin
     runtime.backendConfig && typeof runtime.backendConfig === 'object' && !Array.isArray(runtime.backendConfig)
       ? (runtime.backendConfig as Record<string, unknown>)
       : null;
-  return { backend, cwd, backendConfig };
+  const autoApprove = typeof runtime.autoApprove === 'boolean' ? runtime.autoApprove : false;
+  const autoApproveTimeoutSeconds =
+    typeof runtime.autoApproveTimeoutSeconds === 'number' &&
+    Number.isFinite(runtime.autoApproveTimeoutSeconds) &&
+    runtime.autoApproveTimeoutSeconds >= 0
+      ? Math.floor(runtime.autoApproveTimeoutSeconds)
+      : 10;
+  return { backend, cwd, backendConfig, autoApprove, autoApproveTimeoutSeconds };
 }
 
 type RateLimitWindow = {
@@ -519,6 +531,8 @@ const STREAM_EVENTS = [
   'assistant.delta',
   'turn.approval.requested',
   'turn.approval.resolved',
+  'turn.approval.timer_paused',
+  'turn.approval.timer_resumed',
   'thread.token_usage.updated',
   'plan.updated',
   'reasoning.delta',
@@ -531,7 +545,7 @@ const STREAM_EVENTS = [
   'turn.cancelled',
 ];
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
-const CHAT_MARKDOWN_REMARK_PLUGINS = [remarkGfm];
+const CHAT_MARKDOWN_REMARK_PLUGINS = [remarkGfm, remarkBreaks];
 const WORKSPACE_SUGGESTIONS_LIST_ID = 'workspace-path-suggestions';
 const LAST_PROJECT_STORAGE_KEY_PREFIX = 'agentwaypoint:last-project:';
 const LAST_SESSION_STORAGE_KEY_PREFIX = 'agentwaypoint:last-session:';
@@ -593,6 +607,7 @@ export default function HomePage() {
   const [sessionsByProject, setSessionsByProject] = useState<Record<string, Session[]>>({});
   const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>([]);
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
+  const [availableModelsByBackend, setAvailableModelsByBackend] = useState<Record<string, AvailableModel[]>>({});
   const [appSettings, setAppSettings] = useState<AppSettings>({
     turnSteerEnabled: false,
     defaultWorkspaceRoot: null,
@@ -644,6 +659,8 @@ export default function HomePage() {
   const [sessionConfigDefaultModel, setSessionConfigDefaultModel] = useState(DEFAULT_CODEX_MODEL);
   const [sessionConfigExecutionMode, setSessionConfigExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
   const [sessionConfigEffort, setSessionConfigEffort] = useState('');
+  const [sessionConfigAutoApprove, setSessionConfigAutoApprove] = useState(false);
+  const [sessionConfigAutoApproveTimeout, setSessionConfigAutoApproveTimeout] = useState(10);
   const [sessionConfigTargetProjectId, setSessionConfigTargetProjectId] = useState('');
   const [sessionConfigTargetSessionId, setSessionConfigTargetSessionId] = useState('');
   const [newSessionTitle, setNewSessionTitle] = useState('New Session');
@@ -652,6 +669,8 @@ export default function HomePage() {
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState(DEFAULT_CODEX_MODEL);
   const [newSessionExecutionMode, setNewSessionExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
   const [newSessionEffort, setNewSessionEffort] = useState('');
+  const [newSessionAutoApprove, setNewSessionAutoApprove] = useState(false);
+  const [newSessionAutoApproveTimeout, setNewSessionAutoApproveTimeout] = useState(10);
   const [availableSkills, setAvailableSkills] = useState<SkillOption[]>([]);
   const [prompt, setPrompt] = useState('');
   const [promptCursor, setPromptCursor] = useState(0);
@@ -2005,6 +2024,14 @@ export default function HomePage() {
     backend = 'codex',
     options?: { target?: 'new' | 'config' | 'session' | 'sessionConfig' | 'both'; preferredModel?: string | null },
   ): Promise<void> {
+    // Show whatever was cached for this backend immediately so the panel
+    // never appears with empty model/effort selectors during the network
+    // round-trip. The fresh response below replaces the cache.
+    const cacheKey = backend.trim().toLowerCase() || 'codex';
+    const cached = availableModelsByBackend[cacheKey];
+    if (cached && cached.length > 0) {
+      setAvailableModels(cached);
+    }
     try {
       const query = new URLSearchParams();
       if (backend.trim()) {
@@ -2020,6 +2047,7 @@ export default function HomePage() {
       );
       const models = response.data ?? [];
       setAvailableModels(models);
+      setAvailableModelsByBackend((current) => ({ ...current, [cacheKey]: models }));
       const modelDefault = resolveModelDefault(models);
       const target = options?.target ?? 'both';
       const preferredModel =
@@ -2466,6 +2494,8 @@ export default function HomePage() {
           backend: newSessionBackend,
           ...(backendConfig ? { backendConfig } : {}),
           ...(newSessionRepoPath.trim() ? { repoPath: newSessionRepoPath.trim() } : {}),
+          autoApprove: newSessionAutoApprove,
+          autoApproveTimeoutSeconds: newSessionAutoApproveTimeout,
         },
       });
       await loadSessions(selectedProjectId);
@@ -2757,6 +2787,26 @@ export default function HomePage() {
     }
   }
 
+  async function handleToggleApprovalTimer(approval: PendingApproval): Promise<void> {
+    if (!activeTurnId) return;
+    const isPaused = readApprovalIsoField(approval.payload, 'pausedAt') !== null;
+    const action: 'pause' | 'resume' = isPaused ? 'resume' : 'pause';
+    setError('');
+    try {
+      await apiRequest<TurnStatusResponse>(`/api/channels/plugins/web/app/turns/${activeTurnId}/approval/timer`, {
+        method: 'POST',
+        body: {
+          approvalId: approval.id,
+          action,
+        },
+      });
+      // The server emits turn.approval.timer_paused / _resumed; the SSE
+      // stream re-syncs `pendingApproval`. No optimistic update needed.
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    }
+  }
+
   async function loadSessionHistory(
     sessionId: string,
     options: { resumeStream: boolean; resetEventLog: boolean; resetInspectPanel: boolean },
@@ -2957,6 +3007,33 @@ export default function HomePage() {
           });
         }
 
+        if (envelope.type === 'turn.approval.timer_paused' || envelope.type === 'turn.approval.timer_resumed') {
+          const requestId = typeof envelope.payload.requestId === 'string' ? envelope.payload.requestId : '';
+          if (requestId) {
+            setPendingApproval((current) => {
+              if (!current || current.id !== requestId) return current;
+              const nextPayload: Record<string, unknown> = { ...current.payload };
+              if (envelope.type === 'turn.approval.timer_paused') {
+                nextPayload.pausedAt =
+                  typeof envelope.payload.pausedAt === 'string' ? envelope.payload.pausedAt : null;
+                nextPayload.pausedRemainingMs =
+                  typeof envelope.payload.pausedRemainingMs === 'number'
+                    ? envelope.payload.pausedRemainingMs
+                    : null;
+                nextPayload.autoApproveAt = null;
+              } else {
+                nextPayload.autoApproveAt =
+                  typeof envelope.payload.autoApproveAt === 'string'
+                    ? envelope.payload.autoApproveAt
+                    : null;
+                nextPayload.pausedAt = null;
+                nextPayload.pausedRemainingMs = null;
+              }
+              return { ...current, payload: nextPayload };
+            });
+          }
+        }
+
         if (envelope.type === 'turn.completed' || envelope.type === 'turn.failed' || envelope.type === 'turn.cancelled') {
           if (envelope.type === 'turn.completed' && !sawNonReasoningAssistantDelta) {
             const completedContent = typeof envelope.payload.content === 'string' ? envelope.payload.content : '';
@@ -3097,6 +3174,8 @@ export default function HomePage() {
         body: {
           title: sessionConfigName.trim(),
           ...(backendConfig ? { backendConfig } : {}),
+          autoApprove: sessionConfigAutoApprove,
+          autoApproveTimeoutSeconds: sessionConfigAutoApproveTimeout,
         },
       });
       if (sessionConfigTargetProjectId) {
@@ -3162,6 +3241,8 @@ export default function HomePage() {
       setNewSessionExecutionMode(backendConfig.executionMode);
       setNewSessionDefaultModel(backendConfig.model);
       setNewSessionEffort(backendConfig.effort ?? '');
+      setNewSessionAutoApprove(false);
+      setNewSessionAutoApproveTimeout(10);
       void loadAvailableModels(resolvedBackend, { target: 'session', preferredModel: backendConfig.model });
     }
     setActionPanelMode(mode);
@@ -3178,6 +3259,8 @@ export default function HomePage() {
     setNewSessionExecutionMode(backendConfig.executionMode);
     setNewSessionDefaultModel(backendConfig.model);
     setNewSessionEffort(backendConfig.effort ?? '');
+    setNewSessionAutoApprove(false);
+    setNewSessionAutoApproveTimeout(10);
     void loadAvailableModels(resolvedBackend, { target: 'session', preferredModel: backendConfig.model });
     setActionPanelMode('createSession');
   }
@@ -3229,6 +3312,8 @@ export default function HomePage() {
     setSessionConfigDefaultModel(sessionBackendConfig.model);
     setSessionConfigExecutionMode(sessionBackendConfig.executionMode);
     setSessionConfigEffort(sessionBackendConfig.effort ?? '');
+    setSessionConfigAutoApprove(sessionRuntime.autoApprove);
+    setSessionConfigAutoApproveTimeout(sessionRuntime.autoApproveTimeoutSeconds);
     void loadAvailableModels(resolvedBackend, { target: 'sessionConfig', preferredModel: sessionBackendConfig.model });
     openActionPanel('sessionConfig');
   }
@@ -3926,6 +4011,30 @@ export default function HomePage() {
                     </select>
                   </label>
                   {renderEffortSelect(availableModels, newSessionDefaultModel, newSessionEffort, setNewSessionEffort)}
+                  <label className="inline-checkbox">
+                    <span>Auto-approve tool requests</span>
+                    <input
+                      type="checkbox"
+                      checked={newSessionAutoApprove}
+                      onChange={(event) => setNewSessionAutoApprove(event.target.checked)}
+                    />
+                  </label>
+                  <label>
+                    Auto-approve timeout (seconds)
+                    <input
+                      type="number"
+                      min={0}
+                      max={3600}
+                      step={1}
+                      value={newSessionAutoApproveTimeout}
+                      onChange={(event) => {
+                        const next = Number.parseInt(event.target.value, 10);
+                        setNewSessionAutoApproveTimeout(Number.isFinite(next) && next >= 0 ? next : 0);
+                      }}
+                      disabled={!newSessionAutoApprove}
+                    />
+                    <span className="sim-input-hint">0 approves immediately; otherwise auto-accepted after this delay.</span>
+                  </label>
                   <div className="sim-actions action-panel-actions-inline">
                     <button type="button" onClick={() => void handleCreateSessionFromPanel()} disabled={busy}>
                       Create
@@ -4087,6 +4196,30 @@ export default function HomePage() {
                     </select>
                   </label>
                   {renderEffortSelect(availableModels, sessionConfigDefaultModel, sessionConfigEffort, setSessionConfigEffort)}
+                  <label className="inline-checkbox">
+                    <span>Auto-approve tool requests</span>
+                    <input
+                      type="checkbox"
+                      checked={sessionConfigAutoApprove}
+                      onChange={(event) => setSessionConfigAutoApprove(event.target.checked)}
+                    />
+                  </label>
+                  <label>
+                    Auto-approve timeout (seconds)
+                    <input
+                      type="number"
+                      min={0}
+                      max={3600}
+                      step={1}
+                      value={sessionConfigAutoApproveTimeout}
+                      onChange={(event) => {
+                        const next = Number.parseInt(event.target.value, 10);
+                        setSessionConfigAutoApproveTimeout(Number.isFinite(next) && next >= 0 ? next : 0);
+                      }}
+                      disabled={!sessionConfigAutoApprove}
+                    />
+                    <span className="sim-input-hint">0 approves immediately; otherwise the request is auto-accepted after this delay.</span>
+                  </label>
                   <div className="sim-actions">
                     <button
                       type="button"
@@ -5038,6 +5171,13 @@ export default function HomePage() {
 
               {pendingApproval ? (
                 <article className="sim-approval">
+                  <ApprovalCountdownRing
+                    autoApproveAt={readApprovalIsoField(pendingApproval.payload, 'autoApproveAt')}
+                    pausedAt={readApprovalIsoField(pendingApproval.payload, 'pausedAt')}
+                    pausedRemainingMs={readApprovalNumberField(pendingApproval.payload, 'pausedRemainingMs')}
+                    onClick={() => void handleToggleApprovalTimer(pendingApproval)}
+                    disabled={busy}
+                  />
                   <h3>Approval Required</h3>
                   <div className="sim-approval-body">
                     {(() => {
@@ -6510,6 +6650,105 @@ function readApprovalFileChangePaths(payload: Record<string, unknown>): string[]
     }
   }
   return [];
+}
+
+function readApprovalIsoField(payload: Record<string, unknown>, key: string): string | null {
+  const value = payload[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function readApprovalNumberField(payload: Record<string, unknown>, key: string): number | null {
+  const value = payload[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+type ApprovalCountdownRingProps = {
+  autoApproveAt: string | null;
+  pausedAt: string | null;
+  pausedRemainingMs: number | null;
+  onClick: () => void;
+  disabled: boolean;
+};
+
+/**
+ * SVG ring at the top-right of the approval card. Pure visual: drives a
+ * per-second tick against `autoApproveAt` (or the frozen remaining time when
+ * paused). The server is the source of truth — clicking toggles pause/resume,
+ * and the next emitted event re-syncs the ring.
+ */
+function ApprovalCountdownRing(props: ApprovalCountdownRingProps): React.ReactElement | null {
+  const { autoApproveAt, pausedAt, pausedRemainingMs, onClick, disabled } = props;
+
+  // Tick state exists only to force re-renders; the actual remaining time is
+  // computed from `Date.now()` fresh each render, so the value can never go
+  // stale across pause/resume transitions.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!autoApproveAt || pausedAt) {
+      return;
+    }
+    const id = setInterval(() => setTick((t) => (t + 1) & 0xffff), 250);
+    return () => clearInterval(id);
+  }, [autoApproveAt, pausedAt]);
+
+  // The "window" against which we draw the ring's fill: reset whenever a new
+  // run-segment starts (publish, or resume). Held in a ref so every render
+  // sees the same scale even though it's set imperatively.
+  const totalMsRef = useRef<number | null>(null);
+  const segmentKey = pausedAt ?? autoApproveAt ?? '';
+  const lastSegmentKey = useRef<string>('');
+  if (segmentKey && segmentKey !== lastSegmentKey.current) {
+    lastSegmentKey.current = segmentKey;
+    if (pausedAt && typeof pausedRemainingMs === 'number') {
+      totalMsRef.current = pausedRemainingMs;
+    } else if (autoApproveAt) {
+      totalMsRef.current = Math.max(0, new Date(autoApproveAt).getTime() - Date.now());
+    }
+  }
+
+  let remainingMs: number;
+  if (pausedAt && typeof pausedRemainingMs === 'number') {
+    remainingMs = Math.max(0, pausedRemainingMs);
+  } else if (autoApproveAt) {
+    remainingMs = Math.max(0, new Date(autoApproveAt).getTime() - Date.now());
+  } else {
+    return null;
+  }
+  const totalMs = Math.max(1, totalMsRef.current ?? remainingMs);
+  const remainingSeconds = Math.ceil(remainingMs / 1000);
+  const progress = Math.max(0, Math.min(1, remainingMs / totalMs));
+
+  const radius = 16;
+  const circumference = 2 * Math.PI * radius;
+  const dashOffset = circumference * (1 - progress);
+
+  return (
+    <button
+      type="button"
+      className={`sim-approval-countdown${pausedAt ? ' is-paused' : ''}`}
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={pausedAt ? 'Resume auto-approve countdown' : 'Pause auto-approve countdown'}
+      title={pausedAt ? 'Paused — click to resume' : 'Click to pause auto-approve'}
+    >
+      <svg width="40" height="40" viewBox="0 0 40 40">
+        <circle cx="20" cy="20" r={radius} fill="none" stroke="currentColor" strokeOpacity="0.2" strokeWidth="3" />
+        <circle
+          cx="20"
+          cy="20"
+          r={radius}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="3"
+          strokeDasharray={circumference}
+          strokeDashoffset={dashOffset}
+          strokeLinecap="round"
+          transform="rotate(-90 20 20)"
+        />
+      </svg>
+      <span className="sim-approval-countdown-label">{remainingSeconds}</span>
+    </button>
+  );
 }
 
 function readApprovalFileChangeDiff(payload: Record<string, unknown>): string | null {

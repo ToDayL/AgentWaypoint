@@ -25,6 +25,7 @@ import {
   ForkSessionBodySchema,
   ProjectIdOnlyParamsSchema,
   ProjectIdParamsSchema,
+  ApprovalTimerActionSchema,
   ResolveTurnApprovalBodySchema,
   SessionIdParamsSchema,
   SkillsQuerySchema,
@@ -275,6 +276,20 @@ export class WebPluginAppController {
     const { id } = parseWithZod(TurnIdParamsSchema, params);
     const input = parseWithZod(ResolveTurnApprovalBodySchema, body);
     return this.webPlugin.resolveTurnApprovalForUser(user.id, id, input);
+  }
+
+  @Post('turns/:id/approval/timer')
+  async controlApprovalTimer(
+    @CurrentUserDecorator() user: CurrentUser,
+    @Param() params: unknown,
+    @Body() body: unknown,
+  ) {
+    const { id } = parseWithZod(TurnIdParamsSchema, params);
+    const input = parseWithZod(ApprovalTimerActionSchema, body) as {
+      approvalId: string;
+      action: 'pause' | 'resume';
+    };
+    return this.webPlugin.controlApprovalTimerForUser(user.id, id, input);
   }
 
   @Get('turns/:id/events')

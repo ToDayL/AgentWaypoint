@@ -46,6 +46,12 @@ export async function ensureBootstrap(options: BootstrapOptions = {}): Promise<B
   if (fs.existsSync(configPath)) {
     const config = readConfig(configPath);
     applyToEnv(config);
+    // `prisma db push` is idempotent — when the SQLite file already matches
+    // the schema this is a ~150ms no-op. Running it on every start picks up
+    // any schema changes a developer made without requiring them to remember
+    // to re-run the bootstrap.
+    await runPrismaPush(config.DATABASE_URL);
+    await backfillDefaultWorkspaceRoot(config.DEFAULT_WORKSPACE_ROOT);
     return { config, created: false };
   }
 
@@ -62,6 +68,7 @@ export async function ensureBootstrap(options: BootstrapOptions = {}): Promise<B
   applyToEnv(config);
   await runPrismaPush(config.DATABASE_URL);
   await createAdminUser(home);
+  await backfillDefaultWorkspaceRoot(config.DEFAULT_WORKSPACE_ROOT);
   return { config, created: true };
 }
 
@@ -237,6 +244,25 @@ function findInternalSymbol(target: object, description: string): symbol | null 
   return null;
 }
 
+
+/**
+ * Seed `User.defaultWorkspaceRoot` for any user where it's still null so the
+ * Config page shows the same path that new projects actually use. A null
+ * value means "no override" — once written, the user's own changes are
+ * preserved (we never overwrite a non-null value).
+ */
+async function backfillDefaultWorkspaceRoot(defaultWorkspaceRoot: string): Promise<void> {
+  const { PrismaClient } = await import('@prisma/client');
+  const prisma = new PrismaClient();
+  try {
+    await prisma.user.updateMany({
+      where: { defaultWorkspaceRoot: null },
+      data: { defaultWorkspaceRoot },
+    });
+  } finally {
+    await prisma.$disconnect();
+  }
+}
 
 async function runPrismaPush(databaseUrl: string): Promise<void> {
   const repoRoot = findRepoRoot();
