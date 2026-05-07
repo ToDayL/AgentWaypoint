@@ -1,6 +1,6 @@
 export const DEFAULT_CODEX_MODEL = 'gpt-5-codex';
 export const DEFAULT_CODEX_EXECUTION_MODE = 'safe-write';
-export type CodexExecutionMode = 'read-only' | 'safe-write' | 'yolo';
+export type CodexExecutionMode = 'read-only' | 'safe-write' | 'auto-review' | 'yolo';
 
 export type CodexDefaults = {
   model: string;
@@ -88,7 +88,12 @@ export function ensureCompleteCodexBackendConfig(input: unknown): CodexDefaults 
 
 function readCodexExecutionMode(record: Record<string, unknown>): CodexExecutionMode | null {
   const explicit = normalizeNullableString(typeof record.executionMode === 'string' ? record.executionMode : null);
-  if (explicit === 'read-only' || explicit === 'safe-write' || explicit === 'yolo') {
+  if (
+    explicit === 'read-only' ||
+    explicit === 'safe-write' ||
+    explicit === 'auto-review' ||
+    explicit === 'yolo'
+  ) {
     return explicit;
   }
   return null;

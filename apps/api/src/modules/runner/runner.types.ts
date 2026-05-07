@@ -196,6 +196,7 @@ export type RunnerStreamEvent = {
     | 'assistant.delta'
     | 'turn.approval.requested'
     | 'turn.approval.resolved'
+    | 'turn.approval.auto_review'
     | 'thread.token_usage.updated'
     | 'plan.updated'
     | 'reasoning.delta'

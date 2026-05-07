@@ -529,6 +529,17 @@ const EXECUTION_MODE_OPTIONS = [
   { value: 'yolo', label: 'yolo' },
 ];
 
+const CODEX_EXECUTION_MODE_OPTIONS = [
+  { value: 'read-only', label: 'read-only' },
+  { value: 'safe-write', label: 'safe-write' },
+  { value: 'auto-review', label: 'auto-review' },
+  { value: 'yolo', label: 'yolo' },
+];
+
+function getExecutionModeOptions(backend: string): Array<{ value: string; label: string }> {
+  return backend === 'codex' ? CODEX_EXECUTION_MODE_OPTIONS : EXECUTION_MODE_OPTIONS;
+}
+
 const ALL_PROJECT_BACKEND_OPTIONS = [
   { value: 'codex', label: 'codex' },
   { value: 'claude', label: 'claude' },
@@ -3988,7 +3999,7 @@ export default function HomePage() {
                   <label>
                     Execution Mode
                     <select value={newProjectExecutionMode} onChange={(event) => setNewProjectExecutionMode(event.target.value)}>
-                      {EXECUTION_MODE_OPTIONS.map((option) => (
+                      {getExecutionModeOptions(newProjectBackend).map((option) => (
                         <option key={`project-execution-mode-${option.value}`} value={option.value}>
                           {option.label}
                         </option>
@@ -4091,7 +4102,7 @@ export default function HomePage() {
                   <label>
                     Execution Mode
                     <select value={newSessionExecutionMode} onChange={(event) => setNewSessionExecutionMode(event.target.value)}>
-                      {EXECUTION_MODE_OPTIONS.map((option) => (
+                      {getExecutionModeOptions(newSessionBackend).map((option) => (
                         <option key={`session-execution-mode-${option.value}`} value={option.value}>
                           {option.label}
                         </option>
@@ -4215,7 +4226,7 @@ export default function HomePage() {
                   <label>
                     Execution Mode
                     <select value={projectConfigExecutionMode} onChange={(event) => setProjectConfigExecutionMode(event.target.value)}>
-                      {EXECUTION_MODE_OPTIONS.map((option) => (
+                      {getExecutionModeOptions(projectConfigBackend).map((option) => (
                         <option key={`project-config-execution-mode-${option.value}`} value={option.value}>
                           {option.label}
                         </option>
@@ -4276,7 +4287,7 @@ export default function HomePage() {
                   <label>
                     Execution Mode
                     <select value={sessionConfigExecutionMode} onChange={(event) => setSessionConfigExecutionMode(event.target.value)}>
-                      {EXECUTION_MODE_OPTIONS.map((option) => (
+                      {getExecutionModeOptions(sessionConfigBackend).map((option) => (
                         <option key={`session-config-execution-mode-${option.value}`} value={option.value}>
                           {option.label}
                         </option>

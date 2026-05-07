@@ -6,7 +6,7 @@ import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
 import { CreateSessionBody, ForkSessionBody, UpdateSessionBody } from './sessions.schemas';
 
 const ACTIVE_TURN_STATUSES = new Set(['queued', 'running', 'waiting_approval']);
-const EXECUTION_MODES = new Set(['read-only', 'safe-write', 'yolo']);
+const EXECUTION_MODES = new Set(['read-only', 'safe-write', 'auto-review', 'yolo']);
 
 type SessionRuntimeConfig = {
   backend: string;

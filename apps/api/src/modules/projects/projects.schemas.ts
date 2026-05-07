@@ -3,7 +3,7 @@ import { z } from 'zod';
 const BackendConfigSchema = z.record(z.unknown());
 const CodexBackendConfigSchema = z.object({
   model: z.string().trim().min(1).max(120),
-  executionMode: z.enum(['read-only', 'safe-write', 'yolo']),
+  executionMode: z.enum(['read-only', 'safe-write', 'auto-review', 'yolo']),
 });
 const ClaudeBackendConfigSchema = z.object({
   model: z.string().trim().min(1).max(120),

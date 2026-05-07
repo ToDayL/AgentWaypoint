@@ -201,7 +201,7 @@ export class CodexBackend {
       await worker.readyPromise;
 
       const workspaceCwd = input.cwd?.trim() || this.config.codexDefaultCwd;
-      const { model, sandbox, approvalPolicy, effort } = resolveCodexExecutionConfig(
+      const { model, sandbox, approvalPolicy, approvalsReviewer, effort } = resolveCodexExecutionConfig(
         input.backendConfig,
         this.config,
       );
@@ -217,6 +217,7 @@ export class CodexBackend {
         input: [{ type: 'text', text: input.content, text_elements: [] }],
         ...(model ? { model } : {}),
         ...(effort ? { effort } : {}),
+        ...(approvalsReviewer ? { approvalsReviewer } : {}),
       })) as Record<string, unknown>;
       turn.codexTurnId = readNestedString(turnStartResult, ['turn', 'id']);
 
@@ -226,6 +227,7 @@ export class CodexBackend {
         ...(model ? { model } : {}),
         ...(sandbox ? { sandbox } : {}),
         ...(approvalPolicy ? { approvalPolicy } : {}),
+        ...(approvalsReviewer ? { approvalsReviewer } : {}),
         ...(effort ? { effort } : {}),
       });
       await completionPromise;
@@ -672,6 +674,35 @@ export class CodexBackend {
       return;
     }
 
+    if (method === 'item/autoApprovalReview/started' || method === 'item/autoApprovalReview/completed') {
+      const threadId = readNestedString(params, ['threadId']);
+      const codexTurnId = readNestedString(params, ['turnId']);
+      if (!threadId) {
+        return;
+      }
+      const turn = this.findTurnByThread(threadId, codexTurnId);
+      if (!turn || turn.finalized) {
+        return;
+      }
+      const phase = method === 'item/autoApprovalReview/started' ? 'started' : 'completed';
+      const review = readOptionalObject(params.review) ?? {};
+      const action = readOptionalObject(params.action) ?? {};
+      await this.deps.appendTurnEvent(turn.turnId, 'turn.approval.auto_review', {
+        phase,
+        reviewId: readOptionalPayloadString(params.reviewId),
+        targetItemId: readOptionalPayloadString(params.targetItemId),
+        status: readOptionalPayloadString(review.status),
+        riskLevel: readOptionalPayloadString(review.riskLevel),
+        userAuthorization: readOptionalPayloadString(review.userAuthorization),
+        rationale: readOptionalPayloadString(review.rationale),
+        actionType: readOptionalPayloadString(action.type),
+        ...(phase === 'completed'
+          ? { decisionSource: readOptionalPayloadString(params.decisionSource) }
+          : {}),
+      });
+      return;
+    }
+
     if (method === 'item/started') {
       const threadId = readNestedString(params, ['threadId']);
       const codexTurnId = readNestedString(params, ['turnId']);
@@ -970,7 +1001,13 @@ export class CodexBackend {
 function resolveCodexExecutionConfig(
   backendConfig: Record<string, unknown> | null | undefined,
   defaults: CodexBackendConfig,
-): { model: string | null; sandbox: string | null; approvalPolicy: string; effort: string | null } {
+): {
+  model: string | null;
+  sandbox: string | null;
+  approvalPolicy: string;
+  approvalsReviewer: 'user' | 'auto_review' | null;
+  effort: string | null;
+} {
   const config = backendConfig ?? {};
   const model = readOptionalString(config.model) ?? defaults.codexDefaultModel;
   const executionMode = readOptionalString(config.executionMode) ?? DEFAULT_CODEX_EXECUTION_MODE;
@@ -978,23 +1015,31 @@ function resolveCodexExecutionConfig(
   const sandbox = modeDefaults.sandbox ?? defaults.codexSandboxMode;
   const approvalPolicy = modeDefaults.approvalPolicy ?? defaults.codexApprovalPolicy;
   const effort = readOptionalString(config.effort);
-  return { model, sandbox, approvalPolicy, effort };
+  return { model, sandbox, approvalPolicy, approvalsReviewer: modeDefaults.approvalsReviewer, effort };
 }
 
 function mapCodexExecutionModeToRuntimeConfig(executionMode: string | null): {
   sandbox: string | null;
   approvalPolicy: string | null;
+  approvalsReviewer: 'user' | 'auto_review' | null;
 } {
   if (executionMode === 'read-only') {
-    return { sandbox: 'read-only', approvalPolicy: 'on-request' };
+    return { sandbox: 'read-only', approvalPolicy: 'on-request', approvalsReviewer: null };
   }
   if (executionMode === 'safe-write') {
-    return { sandbox: 'workspace-write', approvalPolicy: 'on-request' };
+    return { sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalsReviewer: null };
+  }
+  if (executionMode === 'auto-review') {
+    return {
+      sandbox: 'workspace-write',
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'auto_review',
+    };
   }
   if (executionMode === 'yolo') {
-    return { sandbox: 'danger-full-access', approvalPolicy: 'never' };
+    return { sandbox: 'danger-full-access', approvalPolicy: 'never', approvalsReviewer: null };
   }
-  return { sandbox: null, approvalPolicy: null };
+  return { sandbox: null, approvalPolicy: null, approvalsReviewer: null };
 }
 
 function extractAssistantTextFromTurn(params: Record<string, unknown>): string | null {

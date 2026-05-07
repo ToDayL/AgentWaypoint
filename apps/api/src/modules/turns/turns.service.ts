@@ -18,6 +18,7 @@ export type RunnerEventType =
   | 'turn.approval.resolved'
   | 'turn.approval.timer_paused'
   | 'turn.approval.timer_resumed'
+  | 'turn.approval.auto_review'
   | 'thread.token_usage.updated'
   | 'plan.updated'
   | 'reasoning.delta'
@@ -1112,18 +1113,27 @@ function buildEffectiveRuntimeConfig(
   return JSON.parse(JSON.stringify(runtime)) as Prisma.InputJsonValue;
 }
 
-function normalizeExecutionMode(value: string): 'read-only' | 'safe-write' | 'yolo' | null {
+type ExecutionModeValue = 'read-only' | 'safe-write' | 'auto-review' | 'yolo';
+
+function normalizeExecutionMode(value: string): ExecutionModeValue | null {
   const normalized = value.trim();
-  if (normalized === 'read-only' || normalized === 'safe-write' || normalized === 'yolo') {
+  if (
+    normalized === 'read-only' ||
+    normalized === 'safe-write' ||
+    normalized === 'auto-review' ||
+    normalized === 'yolo'
+  ) {
     return normalized;
   }
   return null;
 }
 
-function deriveExecutionModeFromRuntime(payload: Record<string, unknown>): 'read-only' | 'safe-write' | 'yolo' | null {
+function deriveExecutionModeFromRuntime(payload: Record<string, unknown>): ExecutionModeValue | null {
   const sandbox = typeof payload.sandbox === 'string' ? payload.sandbox.trim() : '';
   const approvalPolicy = typeof payload.approvalPolicy === 'string' ? payload.approvalPolicy.trim() : '';
-  if (!sandbox && !approvalPolicy) {
+  const approvalsReviewer =
+    typeof payload.approvalsReviewer === 'string' ? payload.approvalsReviewer.trim() : '';
+  if (!sandbox && !approvalPolicy && !approvalsReviewer) {
     return null;
   }
   if (sandbox === 'read-only') {
@@ -1131,6 +1141,9 @@ function deriveExecutionModeFromRuntime(payload: Record<string, unknown>): 'read
   }
   if (sandbox === 'danger-full-access' || approvalPolicy === 'never') {
     return 'yolo';
+  }
+  if (approvalsReviewer === 'auto_review') {
+    return 'auto-review';
   }
   return 'safe-write';
 }

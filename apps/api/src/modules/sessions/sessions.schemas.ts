@@ -9,7 +9,7 @@ export const SessionIdParamsSchema = z.object({
 });
 
 const BackendConfigSchema = z.record(z.unknown());
-const ExecutionModeSchema = z.enum(['read-only', 'safe-write', 'yolo']);
+const ExecutionModeSchema = z.enum(['read-only', 'safe-write', 'auto-review', 'yolo']);
 
 export const CreateSessionBodySchema = z
   .object({
