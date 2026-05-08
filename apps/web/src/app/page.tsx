@@ -2,11 +2,14 @@
 
 import {
   ChangeEvent,
+  CompositionEvent as ReactCompositionEvent,
   CSSProperties,
   KeyboardEvent,
   memo,
   PointerEvent as ReactPointerEvent,
   SyntheticEvent,
+  UIEvent as ReactUIEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -568,6 +571,15 @@ const STREAM_EVENTS = [
 ];
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const CHAT_MARKDOWN_REMARK_PLUGINS = [remarkGfm, remarkBreaks];
+const TIMELINE_ESTIMATED_ROW_HEIGHT = 74;
+const TIMELINE_ROW_GAP = 4;
+const TIMELINE_OVERSCAN_PX = 600;
+const TIMELINE_BOTTOM_THRESHOLD_PX = 48;
+const TIMELINE_BATCH_FLUSH_MS = 80;
+const TIMELINE_BATCH_MAX_EVENTS = 500;
+const CHAT_BUBBLE_BATCH_FLUSH_MS = 50;
+const CHAT_BUBBLE_BATCH_MAX_CHUNKS = 200;
+const PROMPT_COMPOSITION_ENTER_SUPPRESS_MS = 80;
 const WORKSPACE_SUGGESTIONS_LIST_ID = 'workspace-path-suggestions';
 const LAST_PROJECT_STORAGE_KEY_PREFIX = 'agentwaypoint:last-project:';
 const LAST_SESSION_STORAGE_KEY_PREFIX = 'agentwaypoint:last-session:';
@@ -699,6 +711,9 @@ export default function HomePage() {
   const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
   const [skillSuggestionSuppressedKey, setSkillSuggestionSuppressedKey] = useState('');
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
+  const [timelineScrollTop, setTimelineScrollTop] = useState(0);
+  const [timelineViewportHeight, setTimelineViewportHeight] = useState(0);
+  const [timelineMeasureVersion, setTimelineMeasureVersion] = useState(0);
   const [inspectedTurnId, setInspectedTurnId] = useState('');
   const [turnEventsLoading, setTurnEventsLoading] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -749,6 +764,14 @@ export default function HomePage() {
   const turnStreamCursorRef = useRef<Record<string, number>>({});
   const sessionHistoryRequestRef = useRef(0);
   const turnPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timelineListRef = useRef<HTMLDivElement | null>(null);
+  const timelineRowHeightsRef = useRef<Record<string, number>>({});
+  const timelineStickToBottomRef = useRef(true);
+  const pendingTimelineEventsRef = useRef<StreamEnvelope[]>([]);
+  const timelineFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const systemTimelineEventCounterRef = useRef(0);
+  const pendingAssistantTextChunksRef = useRef<string[]>([]);
+  const assistantTextFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingTurnCreateAbortRef = useRef<AbortController | null>(null);
   const leftPaneRef = useRef<HTMLElement | null>(null);
   const leftPaneResizeStateRef = useRef<{ leftEdge: number } | null>(null);
@@ -768,6 +791,8 @@ export default function HomePage() {
   const suppressBottomAutoCollapseRef = useRef(false);
   const previousDisplayedMessageCountRef = useRef(0);
   const chatScrollTopRef = useRef(0);
+  const promptComposingRef = useRef(false);
+  const promptCompositionEndedAtRef = useRef(0);
   const wasConfigFullscreenActiveRef = useRef(false);
   const previewLoadSeqRef = useRef(0);
   const fileNodeLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -909,6 +934,190 @@ export default function HomePage() {
     }
     return displayedMessages.slice(hiddenMessageCount);
   }, [displayedMessages, hiddenMessageCount]);
+  const timelineVirtualView = useMemo(() => {
+    const measuredHeights = timelineRowHeightsRef.current;
+    const viewportHeight = Math.max(timelineViewportHeight, TIMELINE_ESTIMATED_ROW_HEIGHT);
+    const viewportStart = Math.max(0, timelineScrollTop - TIMELINE_OVERSCAN_PX);
+    const viewportEnd = timelineScrollTop + viewportHeight + TIMELINE_OVERSCAN_PX;
+    const rows: Array<{ event: TimelineEvent; top: number; height: number }> = [];
+    let nextTop = 0;
+
+    timelineEvents.forEach((event) => {
+      const height = Math.max(measuredHeights[event.id] ?? TIMELINE_ESTIMATED_ROW_HEIGHT, 1);
+      const top = nextTop;
+      const bottom = top + height;
+      if (bottom >= viewportStart && top <= viewportEnd) {
+        rows.push({ event, top, height });
+      }
+      nextTop = bottom + TIMELINE_ROW_GAP;
+    });
+
+    return {
+      rows,
+      totalHeight: timelineEvents.length > 0 ? Math.max(0, nextTop - TIMELINE_ROW_GAP) : 0,
+    };
+  }, [timelineEvents, timelineScrollTop, timelineViewportHeight, timelineMeasureVersion]);
+  const handleTimelineScroll = useCallback((event: ReactUIEvent<HTMLDivElement>) => {
+    const element = event.currentTarget;
+    const nextScrollTop = element.scrollTop;
+    timelineStickToBottomRef.current =
+      element.scrollHeight - element.clientHeight - nextScrollTop <= TIMELINE_BOTTOM_THRESHOLD_PX;
+    setTimelineScrollTop((current) => (Math.abs(current - nextScrollTop) < 1 ? current : nextScrollTop));
+  }, []);
+  const scrollTimelineToBottom = useCallback((): void => {
+    const element = timelineListRef.current;
+    if (!element) {
+      return;
+    }
+    const nextScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+    element.scrollTop = nextScrollTop;
+    timelineStickToBottomRef.current = true;
+    setTimelineViewportHeight((current) => {
+      const nextHeight = element.clientHeight;
+      return Math.abs(current - nextHeight) < 1 ? current : nextHeight;
+    });
+    setTimelineScrollTop((current) => (Math.abs(current - nextScrollTop) < 1 ? current : nextScrollTop));
+  }, []);
+  const measureTimelineRow = useCallback((eventId: string, element: HTMLDivElement | null): void => {
+    if (!element) {
+      return;
+    }
+    const nextHeight = Math.ceil(element.getBoundingClientRect().height);
+    if (!Number.isFinite(nextHeight) || nextHeight <= 0) {
+      return;
+    }
+    const previousHeight = timelineRowHeightsRef.current[eventId];
+    if (previousHeight !== undefined && Math.abs(previousHeight - nextHeight) <= 1) {
+      return;
+    }
+    timelineRowHeightsRef.current[eventId] = nextHeight;
+    setTimelineMeasureVersion((current) => current + 1);
+  }, []);
+  const clearPendingTimelineBatch = useCallback((): void => {
+    pendingTimelineEventsRef.current = [];
+    if (timelineFlushTimerRef.current) {
+      clearTimeout(timelineFlushTimerRef.current);
+      timelineFlushTimerRef.current = null;
+    }
+  }, []);
+  const flushPendingTimelineEvents = useCallback((): void => {
+    if (timelineFlushTimerRef.current) {
+      clearTimeout(timelineFlushTimerRef.current);
+      timelineFlushTimerRef.current = null;
+    }
+    const pendingEvents = pendingTimelineEventsRef.current;
+    if (pendingEvents.length === 0) {
+      return;
+    }
+    pendingTimelineEventsRef.current = [];
+    setTimelineEvents((current) =>
+      pendingEvents.reduce((nextEvents, envelope) => mergeTimelineEvent(nextEvents, envelope), current),
+    );
+  }, []);
+  const scheduleTimelineFlush = useCallback((): void => {
+    if (timelineFlushTimerRef.current) {
+      return;
+    }
+    timelineFlushTimerRef.current = setTimeout(flushPendingTimelineEvents, TIMELINE_BATCH_FLUSH_MS);
+  }, [flushPendingTimelineEvents]);
+  const queueTimelineEvent = useCallback(
+    (envelope: StreamEnvelope): void => {
+      pendingTimelineEventsRef.current.push(envelope);
+      if (pendingTimelineEventsRef.current.length >= TIMELINE_BATCH_MAX_EVENTS) {
+        flushPendingTimelineEvents();
+        return;
+      }
+      scheduleTimelineFlush();
+    },
+    [flushPendingTimelineEvents, scheduleTimelineFlush],
+  );
+  const replaceTimelineEvents = useCallback(
+    (events: TimelineEvent[]): void => {
+      clearPendingTimelineBatch();
+      setTimelineEvents(events);
+    },
+    [clearPendingTimelineBatch],
+  );
+  const appendSystemTimelineEvent = useCallback(
+    (title: string): void => {
+      flushPendingTimelineEvents();
+      const eventCounter = systemTimelineEventCounterRef.current + 1;
+      systemTimelineEventCounterRef.current = eventCounter;
+      setTimelineEvents((current) => [
+        ...current,
+        {
+          id: `system-${Date.now()}-${eventCounter}`,
+          kind: 'system',
+          title,
+          seqStart: -1,
+          seqEnd: -1,
+          createdAt: new Date().toISOString(),
+          details: [],
+        },
+      ]);
+    },
+    [flushPendingTimelineEvents],
+  );
+  const clearPendingAssistantTextBatch = useCallback((): void => {
+    pendingAssistantTextChunksRef.current = [];
+    if (assistantTextFlushTimerRef.current) {
+      clearTimeout(assistantTextFlushTimerRef.current);
+      assistantTextFlushTimerRef.current = null;
+    }
+  }, []);
+  const flushPendingAssistantText = useCallback((): void => {
+    if (assistantTextFlushTimerRef.current) {
+      clearTimeout(assistantTextFlushTimerRef.current);
+      assistantTextFlushTimerRef.current = null;
+    }
+    const pendingChunks = pendingAssistantTextChunksRef.current;
+    if (pendingChunks.length === 0) {
+      return;
+    }
+    pendingAssistantTextChunksRef.current = [];
+    const appendedText = pendingChunks.join('');
+    if (appendedText.length === 0) {
+      return;
+    }
+    setAssistantText((current) => current + appendedText);
+  }, []);
+  const scheduleAssistantTextFlush = useCallback((): void => {
+    if (assistantTextFlushTimerRef.current) {
+      return;
+    }
+    assistantTextFlushTimerRef.current = setTimeout(flushPendingAssistantText, CHAT_BUBBLE_BATCH_FLUSH_MS);
+  }, [flushPendingAssistantText]);
+  const queueAssistantTextDelta = useCallback(
+    (delta: string): void => {
+      if (delta.length === 0) {
+        return;
+      }
+      pendingAssistantTextChunksRef.current.push(delta);
+      if (pendingAssistantTextChunksRef.current.length >= CHAT_BUBBLE_BATCH_MAX_CHUNKS) {
+        flushPendingAssistantText();
+        return;
+      }
+      scheduleAssistantTextFlush();
+    },
+    [flushPendingAssistantText, scheduleAssistantTextFlush],
+  );
+  const replaceAssistantText = useCallback(
+    (text: string): void => {
+      clearPendingAssistantTextBatch();
+      setAssistantText(text);
+    },
+    [clearPendingAssistantTextBatch],
+  );
+  const appendCompletedAssistantText = useCallback(
+    (content: string): void => {
+      flushPendingAssistantText();
+      if (content.length === 0) {
+        return;
+      }
+      setAssistantText((current) => `${ensureBalancedThinkTags(current)}${content}`);
+    },
+    [flushPendingAssistantText],
+  );
   const isAdmin = currentUserRole === 'admin';
   const turnIdByMessageId = useMemo(() => {
     const map = new Map<string, string>();
@@ -1078,9 +1287,66 @@ export default function HomePage() {
   );
 
   useEffect(() => {
+    const element = timelineListRef.current;
+    if (!element) {
+      return undefined;
+    }
+
+    const updateTimelineViewport = (): void => {
+      setTimelineViewportHeight((current) => {
+        const nextHeight = element.clientHeight;
+        return Math.abs(current - nextHeight) < 1 ? current : nextHeight;
+      });
+      setTimelineScrollTop((current) => {
+        const nextScrollTop = element.scrollTop;
+        return Math.abs(current - nextScrollTop) < 1 ? current : nextScrollTop;
+      });
+    };
+
+    updateTimelineViewport();
+    const resizeObserver = new ResizeObserver(updateTimelineViewport);
+    resizeObserver.observe(element);
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [insightsTab, mobileInsightsOpen, rightSidebarMode]);
+
+  useEffect(() => {
+    timelineRowHeightsRef.current = {};
+    timelineStickToBottomRef.current = true;
+    setTimelineMeasureVersion((current) => current + 1);
+    const element = timelineListRef.current;
+    if (!element) {
+      setTimelineScrollTop(0);
+      return;
+    }
+    setTimelineViewportHeight(element.clientHeight);
+    requestAnimationFrame(scrollTimelineToBottom);
+  }, [inspectedTurnId, scrollTimelineToBottom]);
+
+  useEffect(() => {
+    if (insightsTab !== 'events' || !timelineStickToBottomRef.current) {
+      return undefined;
+    }
+    const frameId = requestAnimationFrame(scrollTimelineToBottom);
+    return () => {
+      cancelAnimationFrame(frameId);
+    };
+  }, [
+    insightsTab,
+    scrollTimelineToBottom,
+    timelineEvents.length,
+    timelineMeasureVersion,
+    timelineVirtualView.totalHeight,
+    turnEventsLoading,
+  ]);
+
+  useEffect(() => {
     return () => {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
+      clearPendingTimelineBatch();
+      clearPendingAssistantTextBatch();
       stopTurnStatusPolling();
       pendingTurnCreateAbortRef.current?.abort();
       pendingTurnCreateAbortRef.current = null;
@@ -1645,8 +1911,8 @@ export default function HomePage() {
       setSelectedSessionId('');
       setMessages([]);
       setTurns([]);
-      setTimelineEvents([]);
-      setAssistantText('');
+      replaceTimelineEvents([]);
+      replaceAssistantText('');
       setReasoningText('');
       setLatestPlan('');
       setToolOutput('');
@@ -2194,7 +2460,7 @@ export default function HomePage() {
         } else {
           setSelectedSessionId('');
           setMessages([]);
-          setAssistantText('');
+          replaceAssistantText('');
           setReasoningText('');
           setLatestPlan('');
           setToolOutput('');
@@ -2203,7 +2469,7 @@ export default function HomePage() {
           setResumedTurnHint('');
           setTurnStatus('idle');
           setPendingApproval(null);
-          setTimelineEvents([]);
+          replaceTimelineEvents([]);
           setStreamBubbleTurnId('');
           setStreamActive(false);
         }
@@ -2280,7 +2546,7 @@ export default function HomePage() {
       } else {
         setSelectedSessionId('');
         setMessages([]);
-        setAssistantText('');
+        replaceAssistantText('');
         setReasoningText('');
         setLatestPlan('');
         setToolOutput('');
@@ -2289,7 +2555,7 @@ export default function HomePage() {
         setResumedTurnHint('');
         setTurnStatus('idle');
         setPendingApproval(null);
-        setTimelineEvents([]);
+        replaceTimelineEvents([]);
         setStreamBubbleTurnId('');
         setStreamActive(false);
       }
@@ -2696,8 +2962,8 @@ export default function HomePage() {
         },
       ]);
       setPrompt('');
-      setTimelineEvents([]);
-      setAssistantText('');
+      replaceTimelineEvents([]);
+      replaceAssistantText('');
       setReasoningText('');
       setLatestPlan('');
       setToolOutput('');
@@ -2880,7 +3146,7 @@ export default function HomePage() {
       stopTurnStatusPolling();
       setMessages([]);
       setTurns([]);
-      setAssistantText('');
+      replaceAssistantText('');
       setReasoningText('');
       setLatestPlan('');
       setToolOutput('');
@@ -2896,7 +3162,7 @@ export default function HomePage() {
       inspectedTurnIdRef.current = '';
       setTurnEventsLoading(false);
       if (options.resetEventLog) {
-        setTimelineEvents([]);
+        replaceTimelineEvents([]);
       }
       return;
     }
@@ -2929,7 +3195,7 @@ export default function HomePage() {
         setStreamActive(false);
       }
       if (options.resetInspectPanel) {
-        setAssistantText('');
+        replaceAssistantText('');
         setReasoningText('');
         setLatestPlan('');
         setToolOutput('');
@@ -2939,7 +3205,7 @@ export default function HomePage() {
         inspectedTurnIdRef.current = nextInspectedTurnId;
       }
       if (options.resetEventLog) {
-        setTimelineEvents([]);
+        replaceTimelineEvents([]);
       }
       if (history.activeTurnId) {
         if (options.resetEventLog || options.resetInspectPanel) {
@@ -2950,10 +3216,10 @@ export default function HomePage() {
           streamSince = Math.max(streamSince, snapshot.latestSeq);
           sawNonReasoningAssistantDelta = snapshot.sawNonReasoningAssistantDelta;
           if (options.resetEventLog) {
-            setTimelineEvents(snapshot.timelineEvents);
+            replaceTimelineEvents(snapshot.timelineEvents);
           }
           if (options.resetInspectPanel) {
-            setAssistantText(snapshot.assistantText);
+            replaceAssistantText(snapshot.assistantText);
             setReasoningText(snapshot.reasoningText);
             setLatestPlan(snapshot.latestPlan);
             setToolOutput(snapshot.toolOutput);
@@ -3009,6 +3275,8 @@ export default function HomePage() {
     sessionId: string,
     options?: { since?: number; initialSawNonReasoningAssistantDelta?: boolean },
   ): void {
+    flushPendingTimelineEvents();
+    flushPendingAssistantText();
     eventSourceRef.current?.close();
     inspectedTurnIdRef.current = turnId;
     setInspectedTurnId(turnId);
@@ -3018,24 +3286,6 @@ export default function HomePage() {
     const source = new EventSource(streamUrl);
     eventSourceRef.current = source;
     let sawNonReasoningAssistantDelta = options?.initialSawNonReasoningAssistantDelta === true;
-
-    const appendTimelineEvent = (envelope: StreamEnvelope): void => {
-      setTimelineEvents((current) => mergeTimelineEvent(current, envelope));
-    };
-    const appendSystemTimelineEvent = (title: string): void => {
-      setTimelineEvents((current) => [
-        ...current,
-        {
-          id: `system-${Date.now()}-${current.length}`,
-          kind: 'system',
-          title,
-          seqStart: -1,
-          seqEnd: -1,
-          createdAt: new Date().toISOString(),
-          details: [],
-        },
-      ]);
-    };
 
     STREAM_EVENTS.forEach((eventType) => {
       source.addEventListener(eventType, (evt) => {
@@ -3052,7 +3302,7 @@ export default function HomePage() {
             inspectedTurnIdRef.current = envelope.turnId;
             setInspectedTurnId(envelope.turnId);
           }
-          appendTimelineEvent(envelope);
+          queueTimelineEvent(envelope);
         }
 
         if (envelope.type === 'assistant.delta') {
@@ -3062,7 +3312,7 @@ export default function HomePage() {
             if (!isReasoningDelta && delta.length > 0) {
               sawNonReasoningAssistantDelta = true;
             }
-            setAssistantText((current) => current + delta);
+            queueAssistantTextDelta(delta);
           }
         }
 
@@ -3143,11 +3393,11 @@ export default function HomePage() {
         }
 
         if (envelope.type === 'turn.completed' || envelope.type === 'turn.failed' || envelope.type === 'turn.cancelled') {
+          flushPendingTimelineEvents();
+          flushPendingAssistantText();
           if (envelope.type === 'turn.completed' && !sawNonReasoningAssistantDelta) {
             const completedContent = typeof envelope.payload.content === 'string' ? envelope.payload.content : '';
-            if (completedContent.length > 0) {
-              setAssistantText((current) => `${ensureBalancedThinkTags(current)}${completedContent}`);
-            }
+            appendCompletedAssistantText(completedContent);
           }
           setTurnStatus(envelope.type.replace('turn.', ''));
           setStreamActive(false);
@@ -3171,6 +3421,7 @@ export default function HomePage() {
       if (eventSourceRef.current !== source) {
         return;
       }
+      flushPendingAssistantText();
       appendSystemTimelineEvent('Stream disconnected');
       source.close();
       eventSourceRef.current = null;
@@ -3532,7 +3783,7 @@ export default function HomePage() {
     inspectedTurnIdRef.current = normalizedTurnId;
     setInspectedTurnId(normalizedTurnId);
     setTurnEventsLoading(true);
-    setTimelineEvents([]);
+    replaceTimelineEvents([]);
     setLatestDiffSummary('');
     openInsightsPanel('events');
 
@@ -3541,14 +3792,14 @@ export default function HomePage() {
       if (inspectedTurnIdRef.current !== normalizedTurnId) {
         return;
       }
-      setTimelineEvents(snapshot.timelineEvents);
+      replaceTimelineEvents(snapshot.timelineEvents);
       setLatestDiffSummary(snapshot.latestDiffSummary);
     } catch (requestError) {
       if (inspectedTurnIdRef.current !== normalizedTurnId) {
         return;
       }
       setError(extractMessage(requestError));
-      setTimelineEvents([]);
+      replaceTimelineEvents([]);
       setLatestDiffSummary('');
     } finally {
       if (inspectedTurnIdRef.current === normalizedTurnId) {
@@ -3694,6 +3945,17 @@ export default function HomePage() {
   }
 
   function handlePromptKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    const composing =
+      promptComposingRef.current ||
+      event.nativeEvent.isComposing ||
+      event.keyCode === 229 ||
+      (event.key === 'Enter' &&
+        promptCompositionEndedAtRef.current > 0 &&
+        Date.now() - promptCompositionEndedAtRef.current < PROMPT_COMPOSITION_ENTER_SUPPRESS_MS);
+    if (composing) {
+      return;
+    }
+
     if (skillSuggestionVisible && filteredSkillSuggestions.length > 0) {
       if (event.key === 'ArrowDown') {
         event.preventDefault();
@@ -3728,6 +3990,15 @@ export default function HomePage() {
       return;
     }
     void handleSendTurn();
+  }
+
+  function handlePromptCompositionStart(_event: ReactCompositionEvent<HTMLTextAreaElement>): void {
+    promptComposingRef.current = true;
+  }
+
+  function handlePromptCompositionEnd(_event: ReactCompositionEvent<HTMLTextAreaElement>): void {
+    promptComposingRef.current = false;
+    promptCompositionEndedAtRef.current = Date.now();
   }
 
   function handlePromptChange(event: ChangeEvent<HTMLTextAreaElement>): void {
@@ -5379,6 +5650,8 @@ export default function HomePage() {
                       onClick={handlePromptSelection}
                       onKeyUp={handlePromptSelection}
                       onKeyDown={handlePromptKeyDown}
+                      onCompositionStart={handlePromptCompositionStart}
+                      onCompositionEnd={handlePromptCompositionEnd}
                       placeholder="Send a message..."
                       rows={3}
                     />
@@ -5453,72 +5726,83 @@ export default function HomePage() {
                   {insightsTab === 'preview' ? previewPanelView : null}
                   {insightsTab === 'diff' ? diffPanelView : null}
                   {insightsTab === 'events' ? (
-                    <div className="timeline-list">
+                    <div className="timeline-list" ref={timelineListRef} onScroll={handleTimelineScroll}>
                       {SESSION_DEBUG_INFO_ENABLED && inspectedTurnId ? (
                         <p className="timeline-empty">Inspecting turn: {inspectedTurnId}</p>
                       ) : null}
                       {turnEventsLoading ? <p className="timeline-empty">Loading timeline...</p> : null}
                       {!turnEventsLoading && timelineEvents.length === 0 ? <p className="timeline-empty">No events yet.</p> : null}
-                      {timelineEvents.map((event) => (
-                        <article key={event.id} className="timeline-event">
-                          <header className="timeline-event-head">
-                            <span className="timeline-event-title">{event.title}</span>
-                            {event.status ? <span className="status-pill">{event.status}</span> : null}
-                            {event.kind === 'diff' ? (
-                              <button
-                                type="button"
-                                className="timeline-inline-button"
-                                onClick={() => setInsightsTab('diff')}
-                              >
-                                View Diff
-                              </button>
-                            ) : null}
-                            <span className="timeline-event-seq">
-                              {event.seqStart >= 0
-                                ? event.seqStart === event.seqEnd
-                                  ? `#${event.seqStart}`
-                                  : `#${event.seqStart}-#${event.seqEnd}`
-                                : 'system'}
-                            </span>
-                          </header>
-                          {event.details.length > 0 || (event.kind === 'diff' && Array.isArray(event.diffFiles) && event.diffFiles.length > 0) ? (
-                            <div className="timeline-event-details">
-                              {event.kind === 'diff' && Array.isArray(event.diffFiles) && event.diffFiles.length > 0
-                                ? (
-                                    <article className="timeline-diff-file">
-                                      <header className="timeline-diff-file-title">{event.diffFiles.join('\n')}</header>
-                                    </article>
-                                  )
-                                : event.details.map((detail, index) => {
-                                    const detailKey = `${event.id}-${index}`;
-                                    const normalizedDetail = typeof detail === 'string' ? detail : String(detail ?? '');
-                                    const isToolDetail = event.kind === 'tool';
-                                    const lineCount = normalizedDetail.length === 0 ? 0 : normalizedDetail.split('\n').length;
-                                    const canToggle = isToolDetail && lineCount > 5;
-                                    const expanded = expandedToolDetailKeys[detailKey] === true;
-                                    return (
-                                      <div key={detailKey} className="timeline-detail-box">
-                                        {canToggle ? (
-                                          <button
-                                            type="button"
-                                            className="icon-button timeline-detail-toggle"
-                                            onClick={() =>
-                                              setExpandedToolDetailKeys((current) => ({ ...current, [detailKey]: !expanded }))
-                                            }
-                                            title={expanded ? 'Collapse details' : 'Expand details'}
-                                            aria-label={expanded ? 'Collapse details' : 'Expand details'}
-                                          >
-                                            <ChevronDown className={expanded ? 'timeline-toggle-icon is-open' : 'timeline-toggle-icon'} />
-                                          </button>
-                                        ) : null}
-                                        <pre>{canToggle && !expanded ? tailLines(normalizedDetail, 5) : normalizedDetail}</pre>
-                                      </div>
-                                    );
-                                  })}
+                      {!turnEventsLoading && timelineEvents.length > 0 ? (
+                        <div className="timeline-virtual-spacer" style={{ height: `${timelineVirtualView.totalHeight}px` }}>
+                          {timelineVirtualView.rows.map(({ event, top }) => (
+                            <div
+                              key={event.id}
+                              ref={(element) => measureTimelineRow(event.id, element)}
+                              className="timeline-virtual-row"
+                              style={{ transform: `translateY(${top}px)` }}
+                            >
+                              <article className="timeline-event">
+                                <header className="timeline-event-head">
+                                  <span className="timeline-event-title">{event.title}</span>
+                                  {event.status ? <span className="status-pill">{event.status}</span> : null}
+                                  {event.kind === 'diff' ? (
+                                    <button
+                                      type="button"
+                                      className="timeline-inline-button"
+                                      onClick={() => setInsightsTab('diff')}
+                                    >
+                                      View Diff
+                                    </button>
+                                  ) : null}
+                                  <span className="timeline-event-seq">
+                                    {event.seqStart >= 0
+                                      ? event.seqStart === event.seqEnd
+                                        ? `#${event.seqStart}`
+                                        : `#${event.seqStart}-#${event.seqEnd}`
+                                      : 'system'}
+                                  </span>
+                                </header>
+                                {event.details.length > 0 || (event.kind === 'diff' && Array.isArray(event.diffFiles) && event.diffFiles.length > 0) ? (
+                                  <div className="timeline-event-details">
+                                    {event.kind === 'diff' && Array.isArray(event.diffFiles) && event.diffFiles.length > 0
+                                      ? (
+                                          <article className="timeline-diff-file">
+                                            <header className="timeline-diff-file-title">{event.diffFiles.join('\n')}</header>
+                                          </article>
+                                        )
+                                      : event.details.map((detail, index) => {
+                                          const detailKey = `${event.id}-${index}`;
+                                          const normalizedDetail = typeof detail === 'string' ? detail : String(detail ?? '');
+                                          const isToolDetail = event.kind === 'tool';
+                                          const lineCount = normalizedDetail.length === 0 ? 0 : normalizedDetail.split('\n').length;
+                                          const canToggle = isToolDetail && lineCount > 5;
+                                          const expanded = expandedToolDetailKeys[detailKey] === true;
+                                          return (
+                                            <div key={detailKey} className="timeline-detail-box">
+                                              {canToggle ? (
+                                                <button
+                                                  type="button"
+                                                  className="icon-button timeline-detail-toggle"
+                                                  onClick={() =>
+                                                    setExpandedToolDetailKeys((current) => ({ ...current, [detailKey]: !expanded }))
+                                                  }
+                                                  title={expanded ? 'Collapse details' : 'Expand details'}
+                                                  aria-label={expanded ? 'Collapse details' : 'Expand details'}
+                                                >
+                                                  <ChevronDown className={expanded ? 'timeline-toggle-icon is-open' : 'timeline-toggle-icon'} />
+                                                </button>
+                                              ) : null}
+                                              <pre>{canToggle && !expanded ? tailLines(normalizedDetail, 5) : normalizedDetail}</pre>
+                                            </div>
+                                          );
+                                        })}
+                                  </div>
+                                ) : null}
+                              </article>
                             </div>
-                          ) : null}
-                        </article>
-                      ))}
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
