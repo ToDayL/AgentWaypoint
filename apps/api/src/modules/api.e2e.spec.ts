@@ -1040,6 +1040,26 @@ describe('API e2e', () => {
     });
     expect(approvalResolvedResponse.statusCode).toBe(201);
 
+    const autoReviewResponse = await app.inject({
+      method: 'POST',
+      url: `/internal/runner/turns/${turnId}/events`,
+      payload: {
+        type: 'turn.approval.auto_review',
+        payload: {
+          phase: 'completed',
+          reviewId: 'review-e2e-1',
+          targetItemId: 'item-e2e-1',
+          status: 'approved',
+          riskLevel: 'low',
+          userAuthorization: 'required',
+          rationale: 'Command matches the pending approval.',
+          actionType: 'command_execution',
+          decisionSource: 'auto_review',
+        },
+      },
+    });
+    expect(autoReviewResponse.statusCode).toBe(201);
+
     const resolvedStatusResponse = await app.inject({
       method: 'GET',
       url: `/api/turns/${turnId}`,
@@ -1072,6 +1092,7 @@ describe('API e2e', () => {
     expect(streamResponse.statusCode).toBe(200);
     expect(streamResponse.payload).toContain('event: turn.approval.requested');
     expect(streamResponse.payload).toContain('event: turn.approval.resolved');
+    expect(streamResponse.payload).toContain('event: turn.approval.auto_review');
     expect(streamResponse.payload).toContain('event: turn.completed');
   });
 });

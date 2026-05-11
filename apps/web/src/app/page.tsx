@@ -556,6 +556,7 @@ const STREAM_EVENTS = [
   'assistant.delta',
   'turn.approval.requested',
   'turn.approval.resolved',
+  'turn.approval.auto_review',
   'turn.approval.timer_paused',
   'turn.approval.timer_resumed',
   'thread.token_usage.updated',
@@ -6326,6 +6327,43 @@ function formatApprovalKind(kind: string): string {
   return kind;
 }
 
+function readAutoReviewTextField(payload: Record<string, unknown>, key: string): string | null {
+  const value = payload[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function formatAutoReviewLabel(value: string): string {
+  const normalized = value.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return normalized ? `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}` : value;
+}
+
+function formatAutoReviewDetails(payload: Record<string, unknown>): string[] {
+  const details: string[] = [];
+  const fields: Array<[string, string]> = [
+    ['Action', 'actionType'],
+    ['Status', 'status'],
+    ['Risk', 'riskLevel'],
+    ['Authorization', 'userAuthorization'],
+    ['Decision source', 'decisionSource'],
+    ['Review ID', 'reviewId'],
+    ['Target item', 'targetItemId'],
+  ];
+
+  for (const [label, key] of fields) {
+    const value = readAutoReviewTextField(payload, key);
+    if (value) {
+      details.push(`${label}: ${formatAutoReviewLabel(value)}`);
+    }
+  }
+
+  const rationale = readAutoReviewTextField(payload, 'rationale');
+  if (rationale) {
+    details.push(`Rationale: ${rationale}`);
+  }
+
+  return details;
+}
+
 function normalizeHistoryEventItem(item: TurnEventHistoryItem, fallbackTurnId: string): StreamEnvelope | null {
   const seq = typeof item.seq === 'number' && Number.isFinite(item.seq) ? item.seq : null;
   if (seq === null) {
@@ -6624,6 +6662,26 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
         seqEnd: envelope.seq,
         createdAt: envelope.createdAt,
         details: [decision],
+      },
+    ];
+  }
+
+  if (envelope.type === 'turn.approval.auto_review') {
+    const phase = readAutoReviewTextField(envelope.payload, 'phase');
+    const phaseTitle = phase === 'started' ? 'Started' : phase === 'completed' ? 'Completed' : 'Updated';
+    const status: TimelineEvent['status'] | undefined =
+      phase === 'started' ? 'running' : phase === 'completed' ? 'completed' : undefined;
+    return [
+      ...current,
+      {
+        id: `approval-auto-review-${envelope.seq}`,
+        kind: 'approval',
+        title: `Auto Review ${phaseTitle}`,
+        seqStart: envelope.seq,
+        seqEnd: envelope.seq,
+        createdAt: envelope.createdAt,
+        details: formatAutoReviewDetails(envelope.payload),
+        status,
       },
     ];
   }

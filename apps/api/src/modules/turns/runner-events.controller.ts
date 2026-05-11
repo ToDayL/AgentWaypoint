@@ -13,6 +13,7 @@ const RunnerEventBodySchema = z.object({
     'assistant.delta',
     'turn.approval.requested',
     'turn.approval.resolved',
+    'turn.approval.auto_review',
     'plan.updated',
     'reasoning.delta',
     'diff.updated',

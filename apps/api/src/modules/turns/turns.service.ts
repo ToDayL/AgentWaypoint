@@ -529,6 +529,13 @@ export class TurnsService implements OnModuleInit {
         await this.approvalQueue.tryPublishNext(turnId);
         return;
       }
+      case 'turn.approval.auto_review': {
+        if (TERMINAL_STATUSES.includes(turn.status)) {
+          return;
+        }
+        await this.appendEvent(turnId, 'turn.approval.auto_review', this.normalizePayload(payload));
+        return;
+      }
       case 'plan.updated':
       case 'diff.updated':
       case 'tool.started':
