@@ -1,6 +1,6 @@
 # Claude Backend Implementation Design
 
-Last updated: 2026-03-23
+Last aligned with implementation: 2026-05-11
 
 ## 1. Purpose
 
@@ -10,9 +10,10 @@ This document describes the implemented Claude backend architecture in AgentWayp
 
 ### 2.1 Architecture
 
-- Web -> API (`/api/*`)
-- API -> Runner (`/runner/*`) via `HttpRunnerAdapter`
-- Runner routes by backend (`codex` / `claude` / `mock`)
+- Web -> API (`/api/*`, with main app flows under `/api/channels/plugins/web/app/*`)
+- API -> embedded runner through `InProcessRunnerAdapter` by default
+- `EmbeddedRunnerService` routes by backend (`codex` / `claude` / `mock`)
+- `HttpRunnerAdapter` remains available only when `RUNNER_MODE=http`
 - API persists turn/session state and streams SSE events to Web
 
 ### 2.2 Project and Turn Data Model
@@ -20,8 +21,8 @@ This document describes the implemented Claude backend architecture in AgentWayp
 - `Project` stores:
   - `backend`
   - `backendConfig`
-- Both `codex` and `claude` currently use:
-  - `{ model: string, executionMode: 'read-only' | 'safe-write' | 'yolo' }`
+- `claude` uses `{ model: string, executionMode: 'read-only' | 'safe-write' | 'yolo' }`.
+- `codex` uses `{ model: string, executionMode: 'read-only' | 'safe-write' | 'auto-review' | 'yolo', effort?: string }`.
 
 `Turn` stores backend-agnostic snapshots:
 - `backend`
@@ -59,7 +60,7 @@ Session thread identity has been generalized:
 
 ## 4. Runner Claude Backend (Implemented)
 
-File: `apps/runner/src/claude-backend.ts`
+File: `apps/api/src/modules/runner/embedded/claude-backend.ts`
 
 ### 4.1 Model and Command Discovery
 
@@ -152,9 +153,9 @@ Important SDK constraint observed in implementation:
 
 ### 8.1 Minimal backend-control env
 
-- `RUNNER_SUPPORTED_BACKENDS` controls enabled backends in runner
-- `RUNNER_AUTH_TOKEN` secures API -> runner calls
-- `RUNNER_PORT`, `RUNNER_HOST` basic runner network config
+- `RUNNER_SUPPORTED_BACKENDS` controls enabled embedded backends.
+- `RUNNER_MODE=embedded` is the default local mode.
+- `RUNNER_MODE=http`, `RUNNER_BASE_URL`, and `RUNNER_AUTH_TOKEN` apply only to external runner compatibility mode.
 
 Avoid adding behavior-specific env toggles for Claude runtime semantics.
 Project-level `backendConfig` must remain the source of truth.
@@ -169,6 +170,6 @@ Use repository runbook in `AGENTS.md`:
 
 ## 9. Remaining Gaps / Follow-ups
 
-- Add dedicated Claude runner route for provider-specific operational endpoints if needed (currently shared generic routes are used)
+- Add dedicated Claude operational API if provider-specific settings are needed; current routes are backend-agnostic.
 - Expand automated tests for large timeline/performance scenarios (many `reasoning.delta` events)
 - Revisit executionMode mapping if Claude SDK permission/sandbox behavior changes upstream

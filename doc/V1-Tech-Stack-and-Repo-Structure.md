@@ -1,154 +1,132 @@
-# AgentWaypoint v1 Tech Stack and Repo Structure
+# AgentWaypoint Tech Stack and Repo Structure
 
-## 1. Recommended v1 Stack
+Last aligned with implementation: 2026-05-11
 
-### 1.1 Core Languages
-- TypeScript for frontend and backend.
-- SQL (PostgreSQL) for persistent data.
+## 1. Active Stack
 
-### 1.6 Deployment
-- Recommended: hybrid runtime for MVP runner integration.
-- Local: `docker-compose` for `nginx + web + api + postgres + redis`.
-- Runtime split (current): `web` and `api` in containers, `codex-runner` on host.
-- Production options:
-  - Preferred for early versions: keep `codex-runner` as the host/system service and run `web/api` behind the reverse proxy.
-  - Optional later: scale from one host runner to a small runner pool behind the same API boundary.
+- Language: TypeScript.
+- Package manager: pnpm via Corepack.
+- Runtime: Node.js `>=22 <23`.
+- Web: Next.js App Router + React 19.
+- API: NestJS 11 + Fastify adapter.
+- Validation: Zod at API boundaries.
+- Database: SQLite through Prisma.
+- Streaming: Server-Sent Events.
+- Runner: embedded API service for Codex, Claude, and mock backends.
+- Channels: in-process channel gateway with web and Discord plugins.
+- Tests: Vitest for package tests and API e2e tests.
+- Formatting/linting: Prettier and ESLint.
 
-### 1.2 Frontend
-- Framework: Next.js (App Router) + React.
-- UI: Tailwind CSS + a small component library (shadcn/ui optional).
-- State/data: TanStack Query for server state.
-- Streaming: Server-Sent Events (SSE) client handling first.
+PostgreSQL, Redis, Docker Compose, nginx, and a separate `apps/runner` package are not part of the current implementation.
 
-### 1.3 Backend
-- Framework: NestJS with Fastify adapter.
-- API style: REST for CRUD + SSE endpoint for turn stream.
-- Validation: Zod (or class-validator) at API boundary.
-- Auth: JWT session tokens for MVP.
-
-### 1.4 Data and Infra
-- Database: PostgreSQL.
-- ORM: Prisma.
-- Cache/queue (optional in v1): Redis.
-- Observability: OpenTelemetry + structured logs (pino).
-
-### 1.5 Testing/Quality
-- Unit tests: Vitest.
-- API/integration tests: Supertest.
-- Lint/format: ESLint + Prettier.
-- Type checks in CI: `tsc --noEmit`.
-
-## 2. Monorepo Layout (v1)
+## 2. Runtime Layout
 
 ```text
 AgentWaypoint/
+  agent-waypoint               # host launcher wrapper
+  scripts/
+    agent-waypoint.mjs         # background process manager
+    dev-up.sh                  # isolated dev home wrapper
+    dev-status.sh
+    dev-down.sh
+    prod-up.sh
+    prod-status.sh
+    prod-down.sh
+    test-api-e2e.sh
   apps/
-    web/                      # Next.js frontend
-    api/                      # NestJS backend (BFF + runner adapter module)
+    api/
+      prisma/schema.prisma     # SQLite schema
+      src/
+        bootstrap/             # first-run config/admin bootstrap
+        modules/
+          auth/
+          projects/
+          sessions/
+          turns/
+          runner/
+          settings/
+          channels/
+          health/
+    web/
+      src/app/                 # Next.js UI and proxy route
   packages/
-    shared/                   # Shared TS types, event schemas, API contracts
-    config/                   # Shared lint/tsconfig/prettier configs
-  infra/
-    docker/                   # Dockerfiles, docker-compose for local dev
-    runner/                   # Host runner service configs (systemd/supervisor/env)
-    migrations/               # Optional raw SQL migrations (if needed)
-  doc/                        # PRD, architecture, integration docs
-  scripts/                    # Setup/dev scripts
-  .env.example
-  package.json
-  pnpm-workspace.yaml
-  README.md
+    shared/
+    config/
+  doc/
 ```
 
-## 3. Detailed Folder Design
+## 3. API Modules
 
-### 3.1 `apps/web`
-```text
-apps/web/
-  src/
-    app/                      # Next.js routes/pages/layout
-    components/               # Reusable UI components
-    features/
-      chat/                   # Chat UI, stream rendering
-      sessions/               # Session list, resume flows
-      projects/               # Project selector
-    lib/
-      api-client.ts           # REST client
-      sse-client.ts           # SSE stream handling
-      auth.ts                 # Token/session helpers
-    styles/
-  public/
-  next.config.ts
-```
+- `auth`: password login, session cookies, dev header fallback, guards.
+- `projects`: project CRUD and default workspace creation.
+- `sessions`: session CRUD, fork, compact, runtime metadata.
+- `turns`: turn lifecycle, event ingestion, approvals, SSE streaming.
+- `runner`: `RunnerAdapter` implementations for embedded, mock, and HTTP modes.
+- `settings`: user settings, Codex rate limits, admin user management.
+- `channels`: bot integrations, outbound queue, gateway service, web plugin, Discord plugin.
+- `health`: liveness endpoint.
 
-### 3.2 `apps/api`
-```text
-apps/api/
-  src/
-    main.ts
-    app.module.ts
-    modules/
-      auth/
-      projects/
-      sessions/
-      turns/
-      streams/                # SSE endpoint logic
-      codex-runner-adapter/   # Host runner integration module
-    common/
-      middleware/
-      guards/
-      interceptors/
-      logger/
-      errors/
-    prisma/
-      prisma.service.ts
-      schema.prisma
-  test/
-  nest-cli.json
-```
+## 4. Web Structure
 
-### 3.3 `packages/shared`
-```text
-packages/shared/
-  src/
-    api/                      # Request/response DTO and schemas
-    events/                   # Normalized event types for streaming
-    db/                       # Shared enums/constants
-  package.json
-```
+The main UI is currently implemented in `apps/web/src/app/page.tsx` with supporting global styles and proxy routes.
 
-## 4. Initial API Surface (v1)
-- `POST /api/auth/login`
+Web uses:
+
+- `/api/auth/*` for session bootstrap/login/logout/password change.
+- `/api/settings/*` for user/admin settings.
+- `/api/channels/integrations` for bot integrations.
+- `/api/channels/plugins/web/app/*` for primary project/session/turn/model/skill/filesystem workflows.
+
+## 5. Active API Surface
+
+Core user-facing groups:
+
+- `POST /api/auth/login/password`
 - `POST /api/auth/logout`
-- `GET /api/projects`
-- `POST /api/projects`
-- `GET /api/sessions?project_id=...`
-- `POST /api/sessions`
-- `GET /api/sessions/:id/messages`
+- `POST /api/auth/password/change`
+- `GET /api/auth/session`
+- `GET|POST|PATCH|DELETE /api/projects`
+- `GET|POST /api/projects/:projectId/sessions`
+- `GET|PATCH|DELETE /api/sessions/:id`
+- `POST /api/sessions/:id/fork`
+- `POST /api/sessions/:id/compact`
 - `POST /api/sessions/:id/turns`
-- `POST /api/turns/:id/cancel`
-- `GET /api/turns/:id/stream` (SSE)
+- `GET|POST /api/turns/:id/*`
+- `GET /api/models`
+- `GET /api/skills`
+- `GET|POST /api/fs/*`
+- `GET|POST /api/settings`
+- `GET|POST|PATCH|DELETE /api/channels/*`
+- `GET|POST|PATCH|DELETE /api/channels/plugins/web/app/*`
 
-## 5. Suggested Runtime Choices
-- Package manager: pnpm.
-- Node version: 22 LTS.
-- Local development:
-  - `web`: `https://localhost:3000`
-  - `api`: internal Docker service only (`api:4000` on the Compose network)
-  - `codex-runner`: host daemon (`http://127.0.0.1:4700`)
-  - `postgres`: internal Docker service (`postgres:5432`)
-  - `redis`: internal Docker service (`redis:6379`)
+See [Web-API-Runner-Contract-Inventory.md](./Web-API-Runner-Contract-Inventory.md) for details.
 
-## 6. Why This Setup for You
-- One language across frontend/backend reduces learning burden.
-- Clear module boundaries make it easier to grow gradually.
-- SSE keeps streaming implementation simple for MVP.
-- Monorepo keeps shared types/contracts in sync and avoids drift.
+## 6. Runtime Choices
 
-## 7. v1 Build Order (Practical)
-1. Initialize monorepo + lint/typecheck/test baseline.
-2. Build API auth + projects/sessions CRUD.
-3. Build web login + session list + basic chat page.
-4. Add host runner adapter + turn creation.
-5. Add SSE streaming + cancel.
-6. Add observability and error hardening.
+Default local ports:
+
+- API: `4000`
+- Web: `3000`
+
+Default data home:
+
+- production wrapper and direct start: `~/.agentwaypoint`
+- dev wrapper: `./.agentwaypoint-dev`
+
+Runner modes:
+
+- `RUNNER_MODE=embedded`: current default, in-process runner.
+- `RUNNER_MODE=mock`: deterministic simulated turns.
+- `RUNNER_MODE=http`: external runner-compatible service at `RUNNER_BASE_URL`.
+
+## 7. Build and Test
+
+```bash
+corepack pnpm install
+corepack pnpm build
+corepack pnpm --filter @agentwaypoint/api typecheck
+corepack pnpm --filter @agentwaypoint/web typecheck
+./scripts/test-api-e2e.sh
+```
+
+`./agent-waypoint start` builds the web app when `.next/BUILD_ID` is missing or older than tracked web/shared inputs.

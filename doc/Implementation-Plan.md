@@ -1,49 +1,85 @@
 # AgentWaypoint Implementation Plan
 
-Last updated: 2026-03-11
+Last aligned with implementation: 2026-05-11
 
-## 1. Phase 0: Foundation and Tooling
-1. Set up monorepo root files (`package.json`, `pnpm-workspace.yaml`, `.gitignore`, `.editorconfig`, `.env.example`).
-2. Pin runtime/tooling versions (Node 22, pnpm 10).
-3. Add shared config package for TypeScript/ESLint/Prettier.
-4. Add shared package for contracts and stream event types.
+## 1. Implemented Baseline
 
-## 2. Phase 1: App Bootstraps
-1. Bootstrap `apps/api` with NestJS + Fastify skeleton.
-2. Bootstrap `apps/web` with Next.js App Router skeleton.
-3. Add API health endpoint.
+- Monorepo with `apps/api`, `apps/web`, `packages/shared`, and `packages/config`.
+- Host launcher: `./agent-waypoint`.
+- Lightweight runtime:
+  - host API,
+  - host Web,
+  - SQLite,
+  - embedded runner.
+- First-run bootstrap:
+  - writes `AGENTWAYPOINT_HOME/config.json`,
+  - runs Prisma `db push`,
+  - creates admin user.
+- Auth:
+  - password login,
+  - server-side sessions,
+  - admin user management,
+  - dev `x-user-email` fallback.
+- Project/session/turn workflow:
+  - CRUD,
+  - history,
+  - streaming,
+  - cancel,
+  - steer,
+  - fork,
+  - compact.
+- Runner:
+  - Codex backend,
+  - Claude backend,
+  - mock backend,
+  - external HTTP compatibility mode.
+- Approvals:
+  - persisted approval queue,
+  - rich decision variants,
+  - auto-approve timers,
+  - pause/resume.
+- Web UI:
+  - app shell,
+  - explorer,
+  - file browser,
+  - chat,
+  - insights,
+  - settings/admin panels,
+  - Discord integration config.
+- Channels:
+  - in-process gateway,
+  - web plugin,
+  - Discord plugin,
+  - BotMessage dispatch queue.
 
-## 3. Phase 2: Local Development Environment
-1. Add Docker dev image and `docker-compose` stack.
-2. Add PostgreSQL and Redis services.
-3. Add proxy-aware container env for dependency install/runtime.
-4. Add Prisma schema and initial migration flow.
+## 2. Current Verification Gates
 
-## 4. Phase 3: MVP Backend
-1. Add auth module and token flow.
-2. Add projects/sessions CRUD endpoints.
-3. Add turn lifecycle endpoints (create/cancel/history).
-4. Add persistence wiring for messages/events.
+```bash
+corepack pnpm --filter @agentwaypoint/api typecheck
+corepack pnpm --filter @agentwaypoint/web typecheck
+./scripts/test-api-e2e.sh
+```
 
-## 5. Phase 4: MVP Frontend
-1. Add login/session management pages.
-2. Add project/session selector and history views.
-3. Add chat page and API client integration.
+The web package currently has no test files, but typecheck is active.
 
-## 6. Phase 5: Codex Integration and Streaming
-1. Add runner adapter module in API.
-2. Implement host `codex-runner` daemon process manager.
-3. Implement normalized event mapping.
-4. Implement SSE endpoint and reconnect behavior.
+## 3. Near-Term Work
 
-## 7. Phase 6: Hardening
-1. Add tests (unit/integration).
-2. Add lint/typecheck CI workflow.
-3. Add observability baseline (structured logs, metrics/tracing hooks).
+1. Add focused tests for Discord plugin routing, command handling, and integration lifecycle.
+2. Encrypt provider credentials instead of storing raw JSON token payloads.
+3. Split the large `apps/web/src/app/page.tsx` into feature components.
+4. Add CSRF/rate-limit protection to cookie-authenticated auth routes.
+5. Add queue retry/dead-letter behavior and admin retry UI for `BotMessage`.
+6. Decide whether externalized channel gateway mode is still needed.
 
-## 8. Immediate Next Work
-1. Stabilize and harden the approval flow:
-   - Add more edge-case coverage for rejected approvals, duplicate resolutions, and startup recovery while waiting on approval.
-2. Add CI for lint/typecheck/test with the required database service.
-3. Expand observability around runner/approval state transitions.
-4. Move beyond the simulation shell toward real auth/session UX.
+## 4. Medium-Term Work
+
+1. Service-account/API-key auth for non-human clients.
+2. WebAuthn/passkey support.
+3. Audit log model and UI.
+4. Better observability for turns, approvals, runner state, and channel delivery.
+5. CI workflow for typecheck/e2e gates.
+6. Broader web component and interaction tests.
+
+## 5. Superseded Historical Plan
+
+Earlier documents planned Docker Compose, PostgreSQL, Redis, and a separate host `codex-runner` daemon. Those are not part of the current implementation. Future moves back toward those components should be treated as new architecture work, not assumed baseline.

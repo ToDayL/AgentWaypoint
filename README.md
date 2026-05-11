@@ -9,6 +9,8 @@ Currently supported backends: `codex`, `claude`.
 - Project and session management for organized workspaces.
 - Multi-user support with role-based access.
 - Tooling insights for turn inspection, including events, diffs, and tool output.
+- Workspace file browser, file previews, and uploads.
+- Web and Discord channel plugins backed by an in-process channel gateway.
 - Embedded runner mode for a single bare-metal service stack.
 
 ## Quick Start
@@ -67,6 +69,8 @@ Compatibility wrappers are also available:
 
 ## Developer Docs
 - [Developer Guide](./doc/Developer-Guide.md)
+- [Architecture](./doc/Architecture-Initial.md)
+- [Web/API/Runner Contract Inventory](./doc/Web-API-Runner-Contract-Inventory.md)
 - [AGENTS runbook](./AGENTS.md)
 
 ## Screenshots

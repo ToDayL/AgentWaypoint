@@ -2,6 +2,7 @@
 
 - Source URL: https://developers.openai.com/codex/app-server/
 - Checked on: 2026-03-05
+- Last aligned with implementation: 2026-05-11
 - Purpose: Project-local reference for AgentWaypoint integration planning.
 
 ## 1. What It Is
@@ -80,14 +81,15 @@ Docs indicate generation commands to lock schema to your installed Codex version
 - Recommended: also send a `skill` input item so full instructions are injected directly.
 - `skills/list` supports scoped lookup by `cwds`, optional `forceReload`, and extra roots.
 
-## 13. AgentWaypoint Integration Guidance (Initial)
-- Start with `stdio` transport in host `codex-runner` daemon for lower complexity.
+## 13. AgentWaypoint Integration Guidance
+- Current implementation uses `stdio` transport from the embedded API runner (`apps/api/src/modules/runner/embedded/codex-backend.ts`).
+- There is no active host `codex-runner` daemon in this repository.
 - Normalize app-server notifications to frontend event model:
   - `item/started` -> tool/event timeline start
   - `item/*/delta` -> streaming UI updates
   - `item/completed` -> final authoritative event
-- Persist thread/turn/item IDs exactly as provided for resumability.
-- API should call runner over internal API; runner owns app-server process lifecycle.
+- Persist backend thread ids in `Session.backendThreadId` and turn/event state in API tables.
+- API calls the runner through the `RunnerAdapter`; default mode is embedded, while `RUNNER_MODE=http` remains a compatibility mode.
 - Implement reconnect and idempotent retry policy before enabling experimental WS transport.
 - Keep experimental APIs disabled by default in production until feature-specific validation is complete.
 

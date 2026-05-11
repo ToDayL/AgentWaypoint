@@ -1,6 +1,6 @@
 # Claude Agent SDK Documentation Research and Interface Inventory
 
-Last updated: 2026-03-23
+Last aligned with implementation: 2026-05-11
 
 ## 1. Scope and Outcome
 
@@ -51,6 +51,7 @@ Using a query stream, SDK exposes:
 Current implementation usage:
 - Model list: `settingSources: ['user']`
 - Slash command list: `settingSources: ['user', 'project', 'local']` with workspace `cwd`
+- Implementation path: `apps/api/src/modules/runner/embedded/claude-backend.ts`
 
 ## 3. TypeScript SDK (V2 Preview)
 
@@ -119,7 +120,7 @@ Current implementation computes context remaining via `/context` command output 
 ## 7. Practical Guidance for Runner Integrations
 
 - Use V1 `query()` as baseline unless V2 becomes stable and feature-complete.
-- Keep API layer backend-agnostic; parse provider payloads only in runner backend.
+- Keep API orchestration backend-agnostic; parse provider payloads only in embedded runner backend code.
 - Treat SDK message payloads strictly; do not infer undocumented fields.
 
 ## 8. Official Sources

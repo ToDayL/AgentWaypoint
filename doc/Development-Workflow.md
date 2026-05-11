@@ -1,12 +1,13 @@
 # AgentWaypoint Development Workflow
 
-Last verified: 2026-04-28
+Last verified: 2026-05-11
 
 This branch runs the lightweight stack directly on the host:
 - API: NestJS/Fastify
 - Web: Next.js
 - DB: SQLite in `AGENTWAYPOINT_HOME`
-- Runner: embedded in the API process
+- Runner: embedded in the API process by default (`codex`, `claude`, `mock`)
+- Channels: in-process web and Discord plugins
 
 ## Safety
 Do not use the live `~/.agentwaypoint` directory for development or automated tests. Use a temp or repo-local home:
@@ -73,3 +74,5 @@ The e2e script creates a temp home and SQLite database under `/tmp`, runs Prisma
 ## Notes
 - If web shows `API upstream unavailable`, check `./agent-waypoint logs api --home ./.agentwaypoint-dev`.
 - If Prisma client generation is missing, run `corepack pnpm --filter @agentwaypoint/api prisma:generate`.
+- The main web workflow calls `/api/channels/plugins/web/app/*`; direct `/api/projects`, `/api/sessions`, and `/api/turns` routes remain available for core API compatibility.
+- Do not use production wrappers during normal development; they default to `~/.agentwaypoint`.

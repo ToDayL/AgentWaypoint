@@ -1,6 +1,6 @@
 # Claude Backend Implementation Checklist
 
-Last updated: 2026-03-23
+Last aligned with implementation: 2026-05-11
 
 ## Core Delivery
 
@@ -17,7 +17,7 @@ Last updated: 2026-03-23
   - `backend=claude` requires `backendConfig.model + backendConfig.executionMode`
 
 - [x] 4. Runner claude backend skeleton + routing
-  - Route turns/thread endpoints by backend (`codex` / `claude` / `mock`)
+  - Route turns/thread operations inside the embedded runner by backend (`codex` / `claude` / `mock`)
 
 - [x] 5. Claude turn minimal loop
   - One turn uses one `query(...)`
@@ -47,7 +47,8 @@ Last updated: 2026-03-23
 
 - [x] 12. E2E and typecheck gates
   - `./scripts/test-api-e2e.sh`
-  - `corepack pnpm --filter @agentwaypoint/{api,runner,web} typecheck`
+  - `corepack pnpm --filter @agentwaypoint/api typecheck`
+  - `corepack pnpm --filter @agentwaypoint/web typecheck`
 
 ## Additional Implemented Items
 
@@ -86,3 +87,4 @@ Last updated: 2026-03-23
 
 - No documented TS V1 `deleteSession` API is currently used; close-thread is file-delete based.
 - Claude runtime semantics are configured per project via `backendConfig` (`model + executionMode`), not via many behavior env toggles.
+- The implementation lives in `apps/api/src/modules/runner/embedded/claude-backend.ts`; there is no active `@agentwaypoint/runner` package.

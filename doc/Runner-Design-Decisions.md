@@ -1,65 +1,108 @@
 # Runner Design Decisions
 
-Last updated: 2026-03-12
+Last aligned with implementation: 2026-05-11
 
-This document records the current and target design decisions for `apps/runner` and Codex app-server usage.
+This document records the runner model in the current repository.
 
-## 1. Identity Mapping
+## 1. Active Runtime Model
 
-- `sessionId` (AgentWaypoint) is the conversation container in our app.
-- `threadId` (Codex app-server) is the conversation container in Codex runtime.
-- Mapping rule: `1 sessionId -> 1 threadId`.
-- Mapping is persisted in API DB on `Session.codexThreadId`.
+The default runner is embedded inside the API process:
 
-## 2. Turn Start Flow
+- `RUNNER_MODE=embedded` returns `InProcessRunnerAdapter`.
+- `EmbeddedRunnerService` owns active turns and per-turn event buffers.
+- Backend implementations live under `apps/api/src/modules/runner/embedded/`.
+- Supported backend ids are `codex`, `claude`, and `mock`; `RUNNER_SUPPORTED_BACKENDS` can restrict the list.
 
-For each new turn:
+`RUNNER_MODE=http` still exists as a compatibility adapter for an external runner-compatible service, but it is not the default local runtime. There is no active `apps/runner` package in this repository.
 
-1. If session has no saved thread:
-   - call `thread/start`
-   - persist returned `threadId`
-2. If session already has saved thread:
-   - call `thread/resume` with saved `threadId`
-   - if resume fails, fallback to `thread/start` and persist new `threadId`
-3. call `turn/start`
+## 2. Identity Mapping
 
-## 3. Event Contract
+- `Session.id` is AgentWaypoint's conversation container.
+- `Session.backendThreadId` stores the backend-native thread/session id.
+- `Turn.id` is AgentWaypoint's unit of execution.
+- Runner events are keyed by AgentWaypoint `turnId`.
 
-- API opens a runner-owned SSE stream for each in-flight turn:
-  - `GET /runner/turns/:id/stream?since=N`
-- Runner buffers normalized turn events per `turnId` and replays them from the requested sequence:
-  - `turn.started` (payload includes `threadId`)
-  - `assistant.delta`
-  - `turn.completed`
-  - `turn.failed`
-  - `turn.cancelled`
-  - approval, tool, reasoning, diff, and plan events
-- API persists streamed events and uses `turn.started.payload.threadId` to persist or refresh the session-thread mapping.
+The old `Session.codexThreadId` field is no longer part of the active Prisma schema.
 
-## 4. Current Runtime Model
+## 3. Turn Start Flow
 
-- Current implementation uses a long-lived `codex app-server` worker process in `apps/runner`.
-- API turn requests reuse this worker; turns are isolated by `threadId`.
-- Runner is the host capability boundary:
-  - validates repo paths and allowed roots
-  - owns Codex process management
-  - exposes control routes plus per-turn status and stream routes
-- This removes per-turn process startup overhead while preserving session-thread continuity.
+For each turn:
 
-## 5. Target Runtime Model
+1. API reads `Session.meta.runtime`.
+2. API creates a `Message(role=user)` and `Turn(status=queued)`.
+3. API snapshots requested backend config and auto-approve settings onto the turn.
+4. API calls `runnerAdapter.startTurn({ turnId, sessionId, content, backend, backendConfig, threadId, cwd })`.
+5. API starts a runner event consumer for that turn.
+6. `turn.started` may include a backend `threadId`; API persists it to `Session.backendThreadId`.
 
-Scale from one long-lived worker to a small worker pool if needed.
+Only one active turn is allowed per session.
 
-- Granularity decision: manage app-server instances at runner worker level, not per project/session.
-- Start with one persistent worker, then scale to a small pool if needed.
-- Use sticky routing by `sessionId` to keep session locality on one worker.
+## 4. Event Contract
 
-Reasoning:
-- Per-session/per-project process ownership is too expensive at scale.
-- Thread context is already isolated by `threadId`.
-- Worker-level pooling improves latency and resource utilization.
+The runner emits normalized events:
 
-## 6. Protocol Clarification
+- `turn.started`
+- `assistant.delta`
+- `turn.approval.requested`
+- `turn.approval.resolved`
+- `turn.approval.auto_review`
+- `thread.token_usage.updated`
+- `plan.updated`
+- `reasoning.delta`
+- `diff.updated`
+- `tool.started`
+- `tool.output`
+- `tool.completed`
+- `turn.completed`
+- `turn.failed`
+- `turn.cancelled`
 
-- `turnId` passed to `sendCodexRequest(...)` is a local runner lookup key only.
-- `thread/start` request payload does not include `turnId`.
+API-internal approval queue events are also persisted/streamed:
+
+- `turn.approval.timer_paused`
+- `turn.approval.timer_resumed`
+
+API persists each event in the `Event` table, assigns its own per-turn `seq`, streams from persisted rows, and mirrors events into `BotMessage(kind=event)` for channel dispatch.
+
+## 5. Backend Config
+
+Project and session runtime config use backend-agnostic fields:
+
+- `backend`
+- `backendConfig.model`
+- `backendConfig.executionMode`
+- optional backend-specific extras such as Codex `effort`
+
+Codex execution mode mapping:
+
+- `read-only` -> `sandbox=read-only`, `approvalPolicy=on-request`
+- `safe-write` -> `sandbox=workspace-write`, `approvalPolicy=on-request`
+- `auto-review` -> `sandbox=workspace-write`, `approvalPolicy=on-request`, `approvalsReviewer=auto_review`
+- `yolo` -> `sandbox=danger-full-access`, `approvalPolicy=never`
+
+Claude execution mode mapping:
+
+- `read-only` -> `permissionMode=default`, sandbox enabled
+- `safe-write` -> `permissionMode=acceptEdits`, sandbox enabled
+- `yolo` -> `permissionMode=bypassPermissions`, sandbox disabled
+
+## 6. HTTP Runner Compatibility
+
+When `RUNNER_MODE=http`, API calls these external paths:
+
+- `GET /runner/health`
+- `GET /runner/models`
+- `GET /runner/skills`
+- `GET /runner/codex/rate-limits`
+- `GET /runner/fs/*`
+- `POST /runner/fs/*`
+- `POST /runner/turns/start`
+- `GET /runner/turns/:turnId/stream`
+- `POST /runner/turns/steer`
+- `POST /runner/turns/cancel`
+- `POST /runner/turns/approval`
+- `POST /runner/threads/fork`
+- `POST /runner/threads/close`
+- `POST /runner/threads/compact`
+
+`RUNNER_AUTH_TOKEN` is forwarded as bearer auth when set.
