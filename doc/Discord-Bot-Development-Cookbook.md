@@ -3,6 +3,8 @@
 This document is a source-grounded implementation reference for Discord plugin development.
 Every normative statement below comes from official Discord documentation pages.
 
+Implementation alignment: 2026-05-11. Current AgentWaypoint code uses `discord.js` Gateway mode in `apps/api/src/modules/channels/plugins/discord/discord.plugin.ts`; HTTP interactions mode is documented here for reference but is not the active implementation path.
+
 ## 1) Official Sources Used
 
 - Discord Developer Docs home: https://docs.discord.com/
@@ -259,15 +261,24 @@ Sources:
 
 ## 13) Implementation Checklist for Our Plugin (Doc-Derived)
 
-1. Create app and securely store `APPLICATION_ID`, `PUBLIC_KEY`, and bot token.
-2. Decide interaction ingress mode: Gateway or HTTP endpoint (not both simultaneously for interactions).
-3. If HTTP mode: implement PING/PONG and signature verification (`X-Signature-Ed25519`, `X-Signature-Timestamp`).
-4. Build install URL with required scopes (`bot`, `applications.commands` as needed) and permission bitfield.
-5. Register commands via HTTP API; set `integration_types`, `contexts`, and `default_member_permissions` explicitly.
-6. Implement response pipeline for 3-second initial ack requirement and 15-minute followup window.
-7. Implement send/edit/delete message operations using documented payload fields and limits.
-8. Implement mention safety via `allowed_mentions` defaults/overrides.
-9. Enable only required intents; request privileged intents when needed.
-10. Implement rate-limit handling using headers + retry-after and track invalid-request rate.
+Current implementation status:
+
+1. Gateway mode is active via `discord.js` `Client`.
+2. Bot token is stored in `BotIntegration.credentialsEncrypted.botToken`.
+3. Slash commands are registered for `/project`, `/session`, `/cancel`, and `/fs`.
+4. Required Gateway intents in code are `Guilds`, `GuildMessages`, `MessageContent`, and `DirectMessages`.
+5. Trigger controls are implemented through `pluginConfig.trigger`: `requireMention`, `allowedUsers`, `allowedGuilds`, `allowedChannels`, and `allowDM`.
+6. Message controls are implemented through `pluginConfig.message`: `sendStyle`, `allowEveryoneMention`, `ignoreBotMessages`, and `maxInboundLength`.
+7. Mention safety is implemented with `allowed_mentions`.
+8. Long messages are split to fit Discord message length limits.
+9. Approval requests are rendered with select menus when possible.
+10. HTTP proxy env support exists for Discord traffic.
+
+Not currently implemented:
+
+1. HTTP interactions endpoint with Ed25519 verification.
+2. OAuth install/auth wizard.
+3. Credential encryption beyond the JSON field name.
+4. Full rate-limit telemetry and invalid-request-rate monitoring.
 
 All checklist items above map directly to official docs cited in sections 3-12.

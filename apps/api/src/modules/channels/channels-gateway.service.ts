@@ -112,6 +112,8 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
     },
     resolveTurnApprovalForUser: async (userId, turnId, input) =>
       this.turnsService.resolveTurnApprovalForUser(userId, turnId, input),
+    controlApprovalTimerForUser: async (userId, turnId, input) =>
+      this.turnsService.controlApprovalTimerForUser(userId, turnId, input),
     updateIntegrationPluginConfigForUser: async (userId, integrationId, pluginConfig) => {
       await this.channelsService.updateIntegration(userId, integrationId, {
         pluginConfig,

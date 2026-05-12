@@ -17,6 +17,7 @@ import { CurrentUserDecorator } from '../auth/current-user.decorator';
 import { CurrentUser } from '../auth/auth.types';
 import {
   CreateTurnBodySchema,
+  ApprovalTimerActionSchema,
   ResolveTurnApprovalBodySchema,
   SessionIdParamsSchema,
   SteerTurnBodySchema,
@@ -84,6 +85,17 @@ export class TurnsController {
     const { id } = parseWithZod(TurnIdParamsSchema, params);
     const input = parseWithZod(ResolveTurnApprovalBodySchema, body);
     return this.turnsService.resolveTurnApprovalForUser(user.id, id, input);
+  }
+
+  @Post('/turns/:id/approval/timer')
+  async controlApprovalTimer(
+    @CurrentUserDecorator() user: CurrentUser,
+    @Param() params: unknown,
+    @Body() body: unknown,
+  ) {
+    const { id } = parseWithZod(TurnIdParamsSchema, params);
+    const input = parseWithZod(ApprovalTimerActionSchema, body);
+    return this.turnsService.controlApprovalTimerForUser(user.id, id, input);
   }
 
   @Get('/turns/:id')

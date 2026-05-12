@@ -1,136 +1,154 @@
-# AgentWaypoint Product Requirements Document (PRD)
+# AgentWaypoint Product Requirements Document
 
-## 1. Document Information
-- Product name: AgentWaypoint
-- Version: v0.1 (Initial)
-- Date: March 5, 2026
-- Author: Project team
-- Status: Draft
+Last aligned with implementation: 2026-05-11
 
-## 2. Background and Problem Statement
-Codex is powerful for coding workflows, but terminal-first interaction creates friction for users who prefer browser-based collaboration, fast context switching, and shareable sessions.
+## 1. Product Summary
 
-This project provides AgentWaypoint, a WebUI that connects to the Codex app server interface so users can:
-- Chat with Codex in a browser.
-- Start “vibe coding” sessions (interactive coding loops with streaming feedback).
-- Manage session context and artifacts in a more visual workflow.
+AgentWaypoint is a browser UI for backend-driven coding agents. It lets users run Codex or Claude coding sessions from a web app, inspect streaming work, manage workspaces, and connect selected channel providers such as Discord.
 
-## 3. Product Vision
-Build a reliable and fast web interface that makes Codex interactions accessible to developers and teams without losing the power of the underlying Codex app server.
+## 2. Current Product Status
 
-## 4. Goals and Non-Goals
+Status: working local-first implementation.
 
-### 4.1 Goals (MVP)
-- Provide a web chat interface connected to Codex app server.
-- Support streaming responses and tool/event updates in near real time.
-- Allow users to create/select projects (workspace context) and run coding interactions.
-- Preserve conversation/session history.
-- Provide basic auth and access control.
-- Provide observability for request latency and failures.
+Implemented runtime:
 
-### 4.2 Non-Goals (MVP)
+- Host API + Host Web.
+- SQLite persistence.
+- Embedded runner for Codex, Claude, and mock backends.
+- In-process channel gateway with web and Discord plugins.
+
+## 3. Goals
+
+- Provide a browser-first chat and coding workflow.
+- Support streaming responses and rich execution events.
+- Manage projects, sessions, workspace paths, and session history.
+- Preserve turn state, messages, events, approvals, and backend runtime metadata.
+- Support human approval flows for tool/file/permission requests.
+- Support local multi-user operation with admin-created accounts.
+- Provide channel integration foundations, currently validated with Discord.
+
+## 4. Non-Goals for Current Version
+
 - Full IDE replacement.
-- Real-time multi-user editing in same file.
-- Advanced enterprise RBAC, SSO, billing, and audit-grade compliance.
-- Mobile-native app.
+- Real-time collaborative editing.
+- Enterprise SSO/RBAC/billing.
+- Public self-service signup.
+- Mobile-native application.
+- Production-grade queue/metrics/audit/compliance system.
 
 ## 5. Target Users
-- Individual developers using Codex in daily coding tasks.
-- Small engineering teams that want shared, browser-first coding assistants.
-- Technical PMs or QA engineers needing lightweight coding help in a web UI.
+
+- Individual developers using Codex or Claude for coding work.
+- Small teams wanting a shared browser UI around local agent workflows.
+- Technical operators who want to inspect turns, approvals, events, diffs, and tool output.
 
 ## 6. Core User Stories
-1. As a user, I can sign in and create a coding session bound to a project workspace.
-2. As a user, I can send prompts and receive streaming responses from Codex.
-3. As a user, I can see intermediate tool events (e.g., command execution summaries).
-4. As a user, I can stop/cancel an in-progress generation.
-5. As a user, I can view previous sessions and continue them.
-6. As a user, I can inspect generated code snippets and copy/apply them.
-7. As an admin/operator, I can monitor service health and failure rates.
+
+1. As a user, I can sign in with email/password.
+2. As an admin, I can create and manage users.
+3. As a user, I can create a project bound to a workspace path.
+4. As a user, I can create sessions under a project.
+5. As a user, I can choose Codex or Claude backend defaults.
+6. As a user, I can send prompts and receive streaming responses.
+7. As a user, I can inspect events, diffs, reasoning, tool output, and file previews.
+8. As a user, I can approve, reject, or auto-approve tool requests.
+9. As a user, I can cancel or steer active turns.
+10. As a user, I can fork or compact a session.
+11. As a user, I can configure a Discord bot integration and interact from Discord.
 
 ## 7. Functional Requirements
 
-### 7.1 Authentication and User Management
-- Email/password or OAuth-based login (choose one for MVP).
-- Session/token-based auth for API calls.
-- Basic user profile and settings.
+### Authentication
 
-### 7.2 Project and Session Management
-- Create/list/select projects.
-- Create/list/select chat sessions under a project.
-- Persist session metadata (created_at, updated_at, status).
+- Password login.
+- Server-side session cookie.
+- Admin-created users.
+- User activation/deactivation.
+- Password change.
 
-### 7.3 Chat and Vibe Coding Interaction
-- Prompt submission endpoint.
-- Streaming output support (SSE or WebSocket).
-- Render assistant messages incrementally.
-- Show tool status/events (started/running/completed/failed).
-- Cancel running request.
+### Project and Session Management
 
-### 7.4 History and Persistence
-- Store user and assistant messages.
-- Store event timeline per turn.
-- Ability to resume old session.
+- Create/list/read/update/delete projects.
+- Create/list/read/update/delete sessions.
+- Store backend, backend config, workspace path, and session runtime metadata.
+- Prevent deletion when active turns exist.
 
-### 7.5 Error Handling
-- Friendly UI error messages for network/API errors.
-- Retry affordance for failed turns.
-- Backend error categories: validation, upstream timeout, internal.
+### Agent Interaction
 
-### 7.6 Admin/Observability (MVP-light)
-- Health endpoint.
-- Structured logs with request/session identifiers.
-- Basic metrics: request count, latency (p50/p95), error rate.
+- Start turn.
+- Stream turn events.
+- Cancel turn.
+- Steer queued/running turns when user setting enables steering.
+- Persist messages/events/turn metadata.
+- Fork and compact backend thread context.
+
+### Approvals
+
+- Persist approval requests.
+- Show one pending approval at a time.
+- Support rich decision variants.
+- Support auto-approve timeout and pause/resume.
+
+### Workspace Files
+
+- Suggest workspace directories.
+- Browse tree.
+- Read text files.
+- Stream binary file content.
+- Upload files.
+
+### Channels
+
+- Manage bot integrations.
+- Queue outbound channel messages.
+- Dispatch turn messages/events to web and Discord plugins.
+- Support Discord commands and inbound trigger rules.
 
 ## 8. Non-Functional Requirements
-- Availability target (MVP): 99.5% monthly.
-- Turn start latency target: < 1.5s (excluding model completion time).
-- Streaming update interval: user-visible token/event updates within ~500ms typical.
-- Security: HTTPS in production, encrypted secrets, input validation, output escaping.
-- Scalability: support at least 100 concurrent active sessions in v0.1.
-- Compatibility: latest Chrome/Edge/Firefox; responsive web layout.
 
-## 9. Success Metrics (MVP)
-- Activation: >= 60% of signed-up users complete first successful chat turn.
-- Engagement: >= 40% weekly active users run >= 3 turns/week.
-- Reliability: failed turn ratio < 3%.
-- Performance: p95 backend response start latency < 2.5s.
-- Satisfaction proxy: >= 70% “useful response” feedback on turns.
+Current practical targets:
 
-## 10. Assumptions and Constraints
-- Codex app server interface is available and stable enough for integration.
-- Workspace execution and permission model are controlled by backend service.
-- Initial deployment likely single region.
-- Application services (`web`, `api`) are deployed as Docker containers.
-- Team prefers shipping MVP quickly over broad feature depth.
+- Local-first operation without Docker, Redis, or Postgres.
+- Isolated data homes for dev/test.
+- SSE reconnect by event sequence cursor.
+- Typecheck clean for API and Web.
+- API e2e suite runnable without external infrastructure.
 
-## 11. Risks and Mitigations
-- Risk: Upstream Codex API/interface changes.
-  - Mitigation: Add adapter layer and versioned integration contract tests.
-- Risk: Streaming disconnects degrade UX.
-  - Mitigation: Reconnect strategy + turn state recovery endpoint.
-- Risk: Long-running tool actions time out.
-  - Mitigation: Async job tracking and cancel/retry controls.
-- Risk: Security of workspace operations.
-  - Mitigation: strict backend authorization and command policy controls.
+Production hardening targets not fully implemented:
 
-## 12. MVP Scope (Phase 1)
-- Auth (basic)
-- Project/session CRUD
-- Chat with streaming
-- Cancel turn
-- History persistence
-- Minimal observability
+- HTTPS-aware secure cookies.
+- CSRF and login rate limits.
+- Credential encryption.
+- Audit logging.
+- Metrics and alerting.
+- Queue retry/dead-letter operations.
 
-## 13. Future Scope (Phase 2+)
-- File tree/editor integration.
-- Multi-model routing and cost controls.
-- Team collaboration and shared sessions.
-- Prompt templates and reusable workflows.
-- Plugin/tool marketplace.
+## 9. Success Metrics
 
-## 14. Open Questions
-- Which auth method is preferred for MVP (OAuth vs local auth)?
-- Is session sharing required in MVP or phase 2?
-- What Codex app server event schema is guaranteed and versioned?
-- Should command execution previews be shown before apply/execute actions?
+Suggested metrics once telemetry exists:
+
+- First successful turn completion rate.
+- Failed turn ratio.
+- Approval resolution latency.
+- Runner stream failure rate.
+- Channel delivery success/failure rate.
+- Time from prompt submit to first streamed event.
+
+## 10. Risks
+
+- Upstream Codex app-server or Claude Agent SDK changes.
+- Security exposure from local workspace operations.
+- Discord token handling before credential encryption is added.
+- Large single-file Web UI slowing frontend iteration.
+- In-memory channel buffers/timers across process restarts.
+
+## 11. Future Scope
+
+- WebAuthn/passkeys.
+- Service accounts and API keys.
+- Dedicated audit log.
+- Componentized frontend.
+- Better observability.
+- Durable channel retry/dead-letter flows.
+- More provider plugins.
+- Optional external gateway mode if operationally justified.

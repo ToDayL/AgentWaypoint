@@ -8,6 +8,11 @@ export type StartTurnInput = {
   cwd?: string | null;
 };
 
+export type ModelEffortOption = {
+  value: string;
+  description: string;
+};
+
 export type AvailableModel = {
   id: string;
   backend: string;
@@ -16,6 +21,9 @@ export type AvailableModel = {
   description: string;
   hidden: boolean;
   isDefault: boolean;
+  /** Backend-native effort values supported by this model. Empty if the backend exposes no per-turn effort knob. */
+  supportedEfforts: ModelEffortOption[];
+  defaultEffort: string | null;
 };
 
 export type ModelListInput = {
@@ -188,6 +196,7 @@ export type RunnerStreamEvent = {
     | 'assistant.delta'
     | 'turn.approval.requested'
     | 'turn.approval.resolved'
+    | 'turn.approval.auto_review'
     | 'thread.token_usage.updated'
     | 'plan.updated'
     | 'reasoning.delta'

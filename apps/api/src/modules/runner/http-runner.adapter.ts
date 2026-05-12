@@ -252,6 +252,19 @@ export class HttpRunnerAdapter implements RunnerAdapter {
         description: typeof item.description === 'string' ? item.description : '',
         hidden: item.hidden === true,
         isDefault: item.isDefault === true,
+        supportedEfforts: Array.isArray((item as { supportedEfforts?: unknown }).supportedEfforts)
+          ? ((item as { supportedEfforts: unknown[] }).supportedEfforts.filter(
+              (entry): entry is { value: string; description?: string } =>
+                !!entry && typeof entry === 'object' && typeof (entry as { value?: unknown }).value === 'string',
+            ).map((entry) => ({
+              value: entry.value,
+              description: typeof entry.description === 'string' ? entry.description : '',
+            })))
+          : [],
+        defaultEffort:
+          typeof (item as { defaultEffort?: unknown }).defaultEffort === 'string'
+            ? ((item as { defaultEffort: string }).defaultEffort)
+            : null,
       }))
       .filter((item) => item.id.length > 0 && item.model.length > 0 && item.backend.length > 0);
   }

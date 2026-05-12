@@ -7,10 +7,11 @@ import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from '../app.module';
 import { HttpExceptionFilter } from '../common/filters/http-exception.filter';
-
-if (!process.env.DATABASE_URL) {
-  process.env.DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/agentwaypoint';
-}
+import {
+  restoreEnv,
+  setupSqliteTestDatabase,
+  type SqliteTestDatabase,
+} from '../test-utils/sqlite-test-database';
 
 const TEST_REPO_PATH = process.cwd();
 
@@ -452,14 +453,18 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
 describe.sequential('API e2e (http runner)', () => {
   let app: NestFastifyApplication;
   let runner: TestRunnerServer;
+  let testDatabase: SqliteTestDatabase | null = null;
   let apiBaseUrl = '';
 
+  const prevAgentWaypointHome = process.env.AGENTWAYPOINT_HOME;
+  const prevDatabaseUrl = process.env.DATABASE_URL;
   const prevRunnerMode = process.env.RUNNER_MODE;
   const prevRunnerBaseUrl = process.env.RUNNER_BASE_URL;
+  const prevRunnerAuthToken = process.env.RUNNER_AUTH_TOKEN;
+  const prevDefaultWorkspaceRoot = process.env.DEFAULT_WORKSPACE_ROOT;
 
   beforeAll(async () => {
-    const apiPort = 4100 + Math.floor(Math.random() * 800);
-    apiBaseUrl = `http://127.0.0.1:${apiPort}`;
+    testDatabase = await setupSqliteTestDatabase('agentwaypoint-api-http-e2e-');
     runner = await createTestRunnerServer();
 
     process.env.RUNNER_MODE = 'http';
@@ -468,7 +473,9 @@ describe.sequential('API e2e (http runner)', () => {
 
     app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter());
     app.useGlobalFilters(new HttpExceptionFilter());
-    await app.listen(apiPort, '127.0.0.1');
+    await app.listen(0, '127.0.0.1');
+    const address = app.getHttpServer().address() as AddressInfo;
+    apiBaseUrl = `http://127.0.0.1:${address.port}`;
   });
 
   afterAll(async () => {
@@ -478,8 +485,13 @@ describe.sequential('API e2e (http runner)', () => {
     if (app) {
       await app.close();
     }
-    process.env.RUNNER_MODE = prevRunnerMode;
-    process.env.RUNNER_BASE_URL = prevRunnerBaseUrl;
+    await testDatabase?.cleanup();
+    restoreEnv('AGENTWAYPOINT_HOME', prevAgentWaypointHome);
+    restoreEnv('DATABASE_URL', prevDatabaseUrl);
+    restoreEnv('RUNNER_MODE', prevRunnerMode);
+    restoreEnv('RUNNER_BASE_URL', prevRunnerBaseUrl);
+    restoreEnv('RUNNER_AUTH_TOKEN', prevRunnerAuthToken);
+    restoreEnv('DEFAULT_WORKSPACE_ROOT', prevDefaultWorkspaceRoot);
   });
 
   async function createClaudeProjectAndSession(

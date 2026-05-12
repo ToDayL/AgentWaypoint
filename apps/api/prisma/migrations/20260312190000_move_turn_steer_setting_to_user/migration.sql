@@ -1,4 +1,0 @@
-ALTER TABLE "User"
-ADD COLUMN "turnSteerEnabled" BOOLEAN NOT NULL DEFAULT false;
-
-DROP TABLE "AppConfig";

@@ -306,6 +306,8 @@ export class MockRunnerAdapter implements RunnerAdapter {
         description: 'Configured mock/default model',
         hidden: false,
         isDefault: true,
+        supportedEfforts: [],
+        defaultEffort: null,
       },
     ];
   }

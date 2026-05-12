@@ -2,11 +2,14 @@
 
 import {
   ChangeEvent,
+  CompositionEvent as ReactCompositionEvent,
   CSSProperties,
   KeyboardEvent,
   memo,
   PointerEvent as ReactPointerEvent,
   SyntheticEvent,
+  UIEvent as ReactUIEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -53,6 +56,7 @@ import CodeMirror from '@uiw/react-codemirror';
 import { Diff, Hunk, parseDiff } from 'react-diff-view';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 
 type Project = {
   id: string;
@@ -72,6 +76,11 @@ type Session = {
   updatedAt: string;
 };
 
+type ModelEffortOption = {
+  value: string;
+  description: string;
+};
+
 type AvailableModel = {
   id: string;
   backend: string;
@@ -80,6 +89,9 @@ type AvailableModel = {
   description: string;
   hidden: boolean;
   isDefault: boolean;
+  /** Backend-native effort enum values supported by this model. Empty when the model has no per-turn effort knob. */
+  supportedEfforts: ModelEffortOption[];
+  defaultEffort: string | null;
 };
 
 type ChatMessage = {
@@ -157,6 +169,17 @@ type TimelineEvent = {
   diffFiles?: string[];
   status?: 'running' | 'completed';
   toolKey?: string;
+};
+type TurnEventSnapshot = {
+  timelineEvents: TimelineEvent[];
+  latestDiffSummary: string;
+  latestPlan: string;
+  assistantText: string;
+  reasoningText: string;
+  toolOutput: string;
+  contextRemainingRatio: number | null;
+  latestSeq: number;
+  sawNonReasoningAssistantDelta: boolean;
 };
 type ParsedDiffFile = ReturnType<typeof parseDiff>[number];
 
@@ -260,6 +283,7 @@ const DEFAULT_CODEX_EXECUTION_MODE = 'safe-write';
 function buildCodexBackendConfig(input: {
   model: string;
   executionMode: string;
+  effort?: string | null;
 }): Record<string, string> | null {
   const config: Record<string, string> = {};
   if (input.model.trim()) {
@@ -268,17 +292,23 @@ function buildCodexBackendConfig(input: {
   if (input.executionMode.trim()) {
     config.executionMode = input.executionMode.trim();
   }
+  const effort = input.effort?.trim();
+  if (effort) {
+    config.effort = effort;
+  }
   return Object.keys(config).length > 0 ? config : null;
 }
 
 function readCodexBackendConfig(config: Record<string, unknown> | null | undefined): {
   model: string;
   executionMode: string;
+  effort: string | null;
 } {
   if (!config) {
     return {
       model: DEFAULT_CODEX_MODEL,
       executionMode: DEFAULT_CODEX_EXECUTION_MODE,
+      effort: null,
     };
   }
   return {
@@ -287,11 +317,47 @@ function readCodexBackendConfig(config: Record<string, unknown> | null | undefin
       typeof config.executionMode === 'string' && config.executionMode.trim()
         ? config.executionMode
         : DEFAULT_CODEX_EXECUTION_MODE,
+    effort:
+      typeof config.effort === 'string' && config.effort.trim().length > 0 ? config.effort.trim() : null,
   };
 }
 
 function resolveModelDefault(models: AvailableModel[]): string {
   return models.find((model) => model.isDefault)?.model ?? models[0]?.model ?? DEFAULT_CODEX_MODEL;
+}
+
+/**
+ * Render the per-model effort selector. Always renders the control so the
+ * panel layout doesn't shift when model metadata arrives later — only the
+ * options change in place. If the saved value isn't in the loaded options
+ * yet, it's shown as a fallback so the user's existing setting is visible
+ * during the network round-trip.
+ */
+function renderEffortSelect(
+  models: AvailableModel[],
+  selectedModel: string,
+  value: string,
+  onChange: (value: string) => void,
+): React.ReactElement {
+  const model = models.find((entry) => entry.model === selectedModel);
+  const efforts = model?.supportedEfforts ?? [];
+  const defaultLabel = model?.defaultEffort ? `Model default (${model.defaultEffort})` : 'Model default';
+  const hasSavedValueInOptions = value === '' || efforts.some((entry) => entry.value === value);
+  return (
+    <label>
+      Reasoning Effort
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="">{defaultLabel}</option>
+        {efforts.map((entry) => (
+          <option key={entry.value} value={entry.value}>
+            {entry.value}
+            {entry.description ? ` — ${entry.description}` : ''}
+          </option>
+        ))}
+        {!hasSavedValueInOptions ? <option value={value}>{value}</option> : null}
+      </select>
+    </label>
+  );
 }
 
 function normalizeSupportedBackends(input: unknown): string[] {
@@ -357,16 +423,18 @@ function readSessionRuntimeConfig(meta: Record<string, unknown> | null | undefin
   backend: string | null;
   cwd: string | null;
   backendConfig: Record<string, unknown> | null;
+  autoApprove: boolean;
+  autoApproveTimeoutSeconds: number;
 } {
   if (!meta || typeof meta !== 'object') {
-    return { backend: null, cwd: null, backendConfig: null };
+    return { backend: null, cwd: null, backendConfig: null, autoApprove: false, autoApproveTimeoutSeconds: 10 };
   }
   const runtime =
     meta.runtime && typeof meta.runtime === 'object' && !Array.isArray(meta.runtime)
       ? (meta.runtime as Record<string, unknown>)
       : null;
   if (!runtime) {
-    return { backend: null, cwd: null, backendConfig: null };
+    return { backend: null, cwd: null, backendConfig: null, autoApprove: false, autoApproveTimeoutSeconds: 10 };
   }
   const backend = typeof runtime.backend === 'string' && runtime.backend.trim() ? runtime.backend.trim() : null;
   const cwd = typeof runtime.cwd === 'string' && runtime.cwd.trim() ? runtime.cwd.trim() : null;
@@ -374,7 +442,14 @@ function readSessionRuntimeConfig(meta: Record<string, unknown> | null | undefin
     runtime.backendConfig && typeof runtime.backendConfig === 'object' && !Array.isArray(runtime.backendConfig)
       ? (runtime.backendConfig as Record<string, unknown>)
       : null;
-  return { backend, cwd, backendConfig };
+  const autoApprove = typeof runtime.autoApprove === 'boolean' ? runtime.autoApprove : false;
+  const autoApproveTimeoutSeconds =
+    typeof runtime.autoApproveTimeoutSeconds === 'number' &&
+    Number.isFinite(runtime.autoApproveTimeoutSeconds) &&
+    runtime.autoApproveTimeoutSeconds >= 0
+      ? Math.floor(runtime.autoApproveTimeoutSeconds)
+      : 10;
+  return { backend, cwd, backendConfig, autoApprove, autoApproveTimeoutSeconds };
 }
 
 type RateLimitWindow = {
@@ -457,6 +532,17 @@ const EXECUTION_MODE_OPTIONS = [
   { value: 'yolo', label: 'yolo' },
 ];
 
+const CODEX_EXECUTION_MODE_OPTIONS = [
+  { value: 'read-only', label: 'read-only' },
+  { value: 'safe-write', label: 'safe-write' },
+  { value: 'auto-review', label: 'auto-review' },
+  { value: 'yolo', label: 'yolo' },
+];
+
+function getExecutionModeOptions(backend: string): Array<{ value: string; label: string }> {
+  return backend === 'codex' ? CODEX_EXECUTION_MODE_OPTIONS : EXECUTION_MODE_OPTIONS;
+}
+
 const ALL_PROJECT_BACKEND_OPTIONS = [
   { value: 'codex', label: 'codex' },
   { value: 'claude', label: 'claude' },
@@ -470,6 +556,9 @@ const STREAM_EVENTS = [
   'assistant.delta',
   'turn.approval.requested',
   'turn.approval.resolved',
+  'turn.approval.auto_review',
+  'turn.approval.timer_paused',
+  'turn.approval.timer_resumed',
   'thread.token_usage.updated',
   'plan.updated',
   'reasoning.delta',
@@ -482,7 +571,16 @@ const STREAM_EVENTS = [
   'turn.cancelled',
 ];
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
-const CHAT_MARKDOWN_REMARK_PLUGINS = [remarkGfm];
+const CHAT_MARKDOWN_REMARK_PLUGINS = [remarkGfm, remarkBreaks];
+const TIMELINE_ESTIMATED_ROW_HEIGHT = 74;
+const TIMELINE_ROW_GAP = 4;
+const TIMELINE_OVERSCAN_PX = 600;
+const TIMELINE_BOTTOM_THRESHOLD_PX = 48;
+const TIMELINE_BATCH_FLUSH_MS = 80;
+const TIMELINE_BATCH_MAX_EVENTS = 500;
+const CHAT_BUBBLE_BATCH_FLUSH_MS = 50;
+const CHAT_BUBBLE_BATCH_MAX_CHUNKS = 200;
+const PROMPT_COMPOSITION_ENTER_SUPPRESS_MS = 80;
 const WORKSPACE_SUGGESTIONS_LIST_ID = 'workspace-path-suggestions';
 const LAST_PROJECT_STORAGE_KEY_PREFIX = 'agentwaypoint:last-project:';
 const LAST_SESSION_STORAGE_KEY_PREFIX = 'agentwaypoint:last-session:';
@@ -544,6 +642,7 @@ export default function HomePage() {
   const [sessionsByProject, setSessionsByProject] = useState<Record<string, Session[]>>({});
   const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>([]);
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
+  const [availableModelsByBackend, setAvailableModelsByBackend] = useState<Record<string, AvailableModel[]>>({});
   const [appSettings, setAppSettings] = useState<AppSettings>({
     turnSteerEnabled: false,
     defaultWorkspaceRoot: null,
@@ -574,37 +673,48 @@ export default function HomePage() {
   const [defaultWorkspaceRootInput, setDefaultWorkspaceRootInput] = useState('');
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
-  const [newProjectName, setNewProjectName] = useState('Simulation Workspace');
+  const [newProjectName, setNewProjectName] = useState('My Workspace');
   const [newProjectRepoPath, setNewProjectRepoPath] = useState('');
   const [newProjectBackend, setNewProjectBackend] = useState('codex');
   const [workspaceSuggestions, setWorkspaceSuggestions] = useState<string[]>([]);
   const [workspaceSuggestionBusy, setWorkspaceSuggestionBusy] = useState(false);
   const [newProjectDefaultModel, setNewProjectDefaultModel] = useState('');
   const [newProjectExecutionMode, setNewProjectExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
+  const [newProjectEffort, setNewProjectEffort] = useState('');
   const [projectConfigName, setProjectConfigName] = useState('');
   const [projectConfigRepoPath, setProjectConfigRepoPath] = useState('');
   const [projectConfigBackend, setProjectConfigBackend] = useState('codex');
   const [projectConfigDefaultModel, setProjectConfigDefaultModel] = useState(DEFAULT_CODEX_MODEL);
   const [projectConfigExecutionMode, setProjectConfigExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
+  const [projectConfigEffort, setProjectConfigEffort] = useState('');
   const [projectConfigTargetProjectId, setProjectConfigTargetProjectId] = useState('');
   const [sessionConfigName, setSessionConfigName] = useState('');
   const [sessionConfigBackend, setSessionConfigBackend] = useState('codex');
   const [sessionConfigWorkspacePath, setSessionConfigWorkspacePath] = useState('');
   const [sessionConfigDefaultModel, setSessionConfigDefaultModel] = useState(DEFAULT_CODEX_MODEL);
   const [sessionConfigExecutionMode, setSessionConfigExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
+  const [sessionConfigEffort, setSessionConfigEffort] = useState('');
+  const [sessionConfigAutoApprove, setSessionConfigAutoApprove] = useState(false);
+  const [sessionConfigAutoApproveTimeout, setSessionConfigAutoApproveTimeout] = useState(10);
   const [sessionConfigTargetProjectId, setSessionConfigTargetProjectId] = useState('');
   const [sessionConfigTargetSessionId, setSessionConfigTargetSessionId] = useState('');
-  const [newSessionTitle, setNewSessionTitle] = useState('First Simulation Session');
+  const [newSessionTitle, setNewSessionTitle] = useState('New Session');
   const [newSessionRepoPath, setNewSessionRepoPath] = useState('');
   const [newSessionBackend, setNewSessionBackend] = useState('codex');
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState(DEFAULT_CODEX_MODEL);
   const [newSessionExecutionMode, setNewSessionExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
+  const [newSessionEffort, setNewSessionEffort] = useState('');
+  const [newSessionAutoApprove, setNewSessionAutoApprove] = useState(false);
+  const [newSessionAutoApproveTimeout, setNewSessionAutoApproveTimeout] = useState(10);
   const [availableSkills, setAvailableSkills] = useState<SkillOption[]>([]);
   const [prompt, setPrompt] = useState('');
   const [promptCursor, setPromptCursor] = useState(0);
   const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
   const [skillSuggestionSuppressedKey, setSkillSuggestionSuppressedKey] = useState('');
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
+  const [timelineScrollTop, setTimelineScrollTop] = useState(0);
+  const [timelineViewportHeight, setTimelineViewportHeight] = useState(0);
+  const [timelineMeasureVersion, setTimelineMeasureVersion] = useState(0);
   const [inspectedTurnId, setInspectedTurnId] = useState('');
   const [turnEventsLoading, setTurnEventsLoading] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -652,7 +762,17 @@ export default function HomePage() {
   const [uploadingFiles, setUploadingFiles] = useState(false);
   const [uploadError, setUploadError] = useState('');
   const eventSourceRef = useRef<EventSource | null>(null);
+  const turnStreamCursorRef = useRef<Record<string, number>>({});
+  const sessionHistoryRequestRef = useRef(0);
   const turnPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timelineListRef = useRef<HTMLDivElement | null>(null);
+  const timelineRowHeightsRef = useRef<Record<string, number>>({});
+  const timelineStickToBottomRef = useRef(true);
+  const pendingTimelineEventsRef = useRef<StreamEnvelope[]>([]);
+  const timelineFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const systemTimelineEventCounterRef = useRef(0);
+  const pendingAssistantTextChunksRef = useRef<string[]>([]);
+  const assistantTextFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingTurnCreateAbortRef = useRef<AbortController | null>(null);
   const leftPaneRef = useRef<HTMLElement | null>(null);
   const leftPaneResizeStateRef = useRef<{ leftEdge: number } | null>(null);
@@ -672,6 +792,8 @@ export default function HomePage() {
   const suppressBottomAutoCollapseRef = useRef(false);
   const previousDisplayedMessageCountRef = useRef(0);
   const chatScrollTopRef = useRef(0);
+  const promptComposingRef = useRef(false);
+  const promptCompositionEndedAtRef = useRef(0);
   const wasConfigFullscreenActiveRef = useRef(false);
   const previewLoadSeqRef = useRef(0);
   const fileNodeLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -753,7 +875,12 @@ export default function HomePage() {
     const parts = normalized.split(/[\\/]/).filter((part) => part.length > 0);
     return parts[parts.length - 1] ?? normalized;
   }, [activeWorkspacePath]);
-  const commandSuggestionMode: CommandSuggestionMode = selectedProject?.backend === 'claude' ? 'claude-slash' : 'codex-skill';
+  const effectiveBackend =
+    readSessionRuntimeConfig(selectedSession?.meta ?? null).backend ??
+    (typeof selectedProject?.backend === 'string' && selectedProject.backend.trim()
+      ? selectedProject.backend.trim()
+      : null);
+  const commandSuggestionMode: CommandSuggestionMode = effectiveBackend === 'claude' ? 'claude-slash' : 'codex-skill';
   const commandSuggestionPrefix = commandSuggestionMode === 'claude-slash' ? '/' : '$';
   const activeSkillToken = useMemo(
     () => findSkillTokenContext(prompt, promptCursor, commandSuggestionMode),
@@ -808,6 +935,190 @@ export default function HomePage() {
     }
     return displayedMessages.slice(hiddenMessageCount);
   }, [displayedMessages, hiddenMessageCount]);
+  const timelineVirtualView = useMemo(() => {
+    const measuredHeights = timelineRowHeightsRef.current;
+    const viewportHeight = Math.max(timelineViewportHeight, TIMELINE_ESTIMATED_ROW_HEIGHT);
+    const viewportStart = Math.max(0, timelineScrollTop - TIMELINE_OVERSCAN_PX);
+    const viewportEnd = timelineScrollTop + viewportHeight + TIMELINE_OVERSCAN_PX;
+    const rows: Array<{ event: TimelineEvent; top: number; height: number }> = [];
+    let nextTop = 0;
+
+    timelineEvents.forEach((event) => {
+      const height = Math.max(measuredHeights[event.id] ?? TIMELINE_ESTIMATED_ROW_HEIGHT, 1);
+      const top = nextTop;
+      const bottom = top + height;
+      if (bottom >= viewportStart && top <= viewportEnd) {
+        rows.push({ event, top, height });
+      }
+      nextTop = bottom + TIMELINE_ROW_GAP;
+    });
+
+    return {
+      rows,
+      totalHeight: timelineEvents.length > 0 ? Math.max(0, nextTop - TIMELINE_ROW_GAP) : 0,
+    };
+  }, [timelineEvents, timelineScrollTop, timelineViewportHeight, timelineMeasureVersion]);
+  const handleTimelineScroll = useCallback((event: ReactUIEvent<HTMLDivElement>) => {
+    const element = event.currentTarget;
+    const nextScrollTop = element.scrollTop;
+    timelineStickToBottomRef.current =
+      element.scrollHeight - element.clientHeight - nextScrollTop <= TIMELINE_BOTTOM_THRESHOLD_PX;
+    setTimelineScrollTop((current) => (Math.abs(current - nextScrollTop) < 1 ? current : nextScrollTop));
+  }, []);
+  const scrollTimelineToBottom = useCallback((): void => {
+    const element = timelineListRef.current;
+    if (!element) {
+      return;
+    }
+    const nextScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+    element.scrollTop = nextScrollTop;
+    timelineStickToBottomRef.current = true;
+    setTimelineViewportHeight((current) => {
+      const nextHeight = element.clientHeight;
+      return Math.abs(current - nextHeight) < 1 ? current : nextHeight;
+    });
+    setTimelineScrollTop((current) => (Math.abs(current - nextScrollTop) < 1 ? current : nextScrollTop));
+  }, []);
+  const measureTimelineRow = useCallback((eventId: string, element: HTMLDivElement | null): void => {
+    if (!element) {
+      return;
+    }
+    const nextHeight = Math.ceil(element.getBoundingClientRect().height);
+    if (!Number.isFinite(nextHeight) || nextHeight <= 0) {
+      return;
+    }
+    const previousHeight = timelineRowHeightsRef.current[eventId];
+    if (previousHeight !== undefined && Math.abs(previousHeight - nextHeight) <= 1) {
+      return;
+    }
+    timelineRowHeightsRef.current[eventId] = nextHeight;
+    setTimelineMeasureVersion((current) => current + 1);
+  }, []);
+  const clearPendingTimelineBatch = useCallback((): void => {
+    pendingTimelineEventsRef.current = [];
+    if (timelineFlushTimerRef.current) {
+      clearTimeout(timelineFlushTimerRef.current);
+      timelineFlushTimerRef.current = null;
+    }
+  }, []);
+  const flushPendingTimelineEvents = useCallback((): void => {
+    if (timelineFlushTimerRef.current) {
+      clearTimeout(timelineFlushTimerRef.current);
+      timelineFlushTimerRef.current = null;
+    }
+    const pendingEvents = pendingTimelineEventsRef.current;
+    if (pendingEvents.length === 0) {
+      return;
+    }
+    pendingTimelineEventsRef.current = [];
+    setTimelineEvents((current) =>
+      pendingEvents.reduce((nextEvents, envelope) => mergeTimelineEvent(nextEvents, envelope), current),
+    );
+  }, []);
+  const scheduleTimelineFlush = useCallback((): void => {
+    if (timelineFlushTimerRef.current) {
+      return;
+    }
+    timelineFlushTimerRef.current = setTimeout(flushPendingTimelineEvents, TIMELINE_BATCH_FLUSH_MS);
+  }, [flushPendingTimelineEvents]);
+  const queueTimelineEvent = useCallback(
+    (envelope: StreamEnvelope): void => {
+      pendingTimelineEventsRef.current.push(envelope);
+      if (pendingTimelineEventsRef.current.length >= TIMELINE_BATCH_MAX_EVENTS) {
+        flushPendingTimelineEvents();
+        return;
+      }
+      scheduleTimelineFlush();
+    },
+    [flushPendingTimelineEvents, scheduleTimelineFlush],
+  );
+  const replaceTimelineEvents = useCallback(
+    (events: TimelineEvent[]): void => {
+      clearPendingTimelineBatch();
+      setTimelineEvents(events);
+    },
+    [clearPendingTimelineBatch],
+  );
+  const appendSystemTimelineEvent = useCallback(
+    (title: string): void => {
+      flushPendingTimelineEvents();
+      const eventCounter = systemTimelineEventCounterRef.current + 1;
+      systemTimelineEventCounterRef.current = eventCounter;
+      setTimelineEvents((current) => [
+        ...current,
+        {
+          id: `system-${Date.now()}-${eventCounter}`,
+          kind: 'system',
+          title,
+          seqStart: -1,
+          seqEnd: -1,
+          createdAt: new Date().toISOString(),
+          details: [],
+        },
+      ]);
+    },
+    [flushPendingTimelineEvents],
+  );
+  const clearPendingAssistantTextBatch = useCallback((): void => {
+    pendingAssistantTextChunksRef.current = [];
+    if (assistantTextFlushTimerRef.current) {
+      clearTimeout(assistantTextFlushTimerRef.current);
+      assistantTextFlushTimerRef.current = null;
+    }
+  }, []);
+  const flushPendingAssistantText = useCallback((): void => {
+    if (assistantTextFlushTimerRef.current) {
+      clearTimeout(assistantTextFlushTimerRef.current);
+      assistantTextFlushTimerRef.current = null;
+    }
+    const pendingChunks = pendingAssistantTextChunksRef.current;
+    if (pendingChunks.length === 0) {
+      return;
+    }
+    pendingAssistantTextChunksRef.current = [];
+    const appendedText = pendingChunks.join('');
+    if (appendedText.length === 0) {
+      return;
+    }
+    setAssistantText((current) => current + appendedText);
+  }, []);
+  const scheduleAssistantTextFlush = useCallback((): void => {
+    if (assistantTextFlushTimerRef.current) {
+      return;
+    }
+    assistantTextFlushTimerRef.current = setTimeout(flushPendingAssistantText, CHAT_BUBBLE_BATCH_FLUSH_MS);
+  }, [flushPendingAssistantText]);
+  const queueAssistantTextDelta = useCallback(
+    (delta: string): void => {
+      if (delta.length === 0) {
+        return;
+      }
+      pendingAssistantTextChunksRef.current.push(delta);
+      if (pendingAssistantTextChunksRef.current.length >= CHAT_BUBBLE_BATCH_MAX_CHUNKS) {
+        flushPendingAssistantText();
+        return;
+      }
+      scheduleAssistantTextFlush();
+    },
+    [flushPendingAssistantText, scheduleAssistantTextFlush],
+  );
+  const replaceAssistantText = useCallback(
+    (text: string): void => {
+      clearPendingAssistantTextBatch();
+      setAssistantText(text);
+    },
+    [clearPendingAssistantTextBatch],
+  );
+  const appendCompletedAssistantText = useCallback(
+    (content: string): void => {
+      flushPendingAssistantText();
+      if (content.length === 0) {
+        return;
+      }
+      setAssistantText((current) => `${ensureBalancedThinkTags(current)}${content}`);
+    },
+    [flushPendingAssistantText],
+  );
   const isAdmin = currentUserRole === 'admin';
   const turnIdByMessageId = useMemo(() => {
     const map = new Map<string, string>();
@@ -977,9 +1288,66 @@ export default function HomePage() {
   );
 
   useEffect(() => {
+    const element = timelineListRef.current;
+    if (!element) {
+      return undefined;
+    }
+
+    const updateTimelineViewport = (): void => {
+      setTimelineViewportHeight((current) => {
+        const nextHeight = element.clientHeight;
+        return Math.abs(current - nextHeight) < 1 ? current : nextHeight;
+      });
+      setTimelineScrollTop((current) => {
+        const nextScrollTop = element.scrollTop;
+        return Math.abs(current - nextScrollTop) < 1 ? current : nextScrollTop;
+      });
+    };
+
+    updateTimelineViewport();
+    const resizeObserver = new ResizeObserver(updateTimelineViewport);
+    resizeObserver.observe(element);
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [insightsTab, mobileInsightsOpen, rightSidebarMode]);
+
+  useEffect(() => {
+    timelineRowHeightsRef.current = {};
+    timelineStickToBottomRef.current = true;
+    setTimelineMeasureVersion((current) => current + 1);
+    const element = timelineListRef.current;
+    if (!element) {
+      setTimelineScrollTop(0);
+      return;
+    }
+    setTimelineViewportHeight(element.clientHeight);
+    requestAnimationFrame(scrollTimelineToBottom);
+  }, [inspectedTurnId, scrollTimelineToBottom]);
+
+  useEffect(() => {
+    if (insightsTab !== 'events' || !timelineStickToBottomRef.current) {
+      return undefined;
+    }
+    const frameId = requestAnimationFrame(scrollTimelineToBottom);
+    return () => {
+      cancelAnimationFrame(frameId);
+    };
+  }, [
+    insightsTab,
+    scrollTimelineToBottom,
+    timelineEvents.length,
+    timelineMeasureVersion,
+    timelineVirtualView.totalHeight,
+    turnEventsLoading,
+  ]);
+
+  useEffect(() => {
     return () => {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
+      clearPendingTimelineBatch();
+      clearPendingAssistantTextBatch();
       stopTurnStatusPolling();
       pendingTurnCreateAbortRef.current?.abort();
       pendingTurnCreateAbortRef.current = null;
@@ -1209,9 +1577,12 @@ export default function HomePage() {
     }
 
     const controller = new AbortController();
-    const backend = typeof selectedProject?.backend === 'string' && selectedProject.backend.trim()
-      ? selectedProject.backend.trim()
-      : 'codex';
+    const sessionBackend = readSessionRuntimeConfig(selectedSession?.meta ?? null).backend;
+    const projectBackend =
+      typeof selectedProject?.backend === 'string' && selectedProject.backend.trim()
+        ? selectedProject.backend.trim()
+        : null;
+    const backend = sessionBackend ?? projectBackend ?? 'codex';
     const query = new URLSearchParams({
       cwd: activeWorkspacePath,
       backend,
@@ -1250,7 +1621,7 @@ export default function HomePage() {
     return () => {
       controller.abort();
     };
-  }, [mounted, authenticated, activeWorkspacePath, selectedProject?.backend]);
+  }, [mounted, authenticated, activeWorkspacePath, selectedProject?.backend, selectedSession?.meta]);
 
   useEffect(() => {
     setSkillSuggestionIndex(0);
@@ -1541,8 +1912,8 @@ export default function HomePage() {
       setSelectedSessionId('');
       setMessages([]);
       setTurns([]);
-      setTimelineEvents([]);
-      setAssistantText('');
+      replaceTimelineEvents([]);
+      replaceAssistantText('');
       setReasoningText('');
       setLatestPlan('');
       setToolOutput('');
@@ -1944,6 +2315,14 @@ export default function HomePage() {
     backend = 'codex',
     options?: { target?: 'new' | 'config' | 'session' | 'sessionConfig' | 'both'; preferredModel?: string | null },
   ): Promise<void> {
+    // Show whatever was cached for this backend immediately so the panel
+    // never appears with empty model/effort selectors during the network
+    // round-trip. The fresh response below replaces the cache.
+    const cacheKey = backend.trim().toLowerCase() || 'codex';
+    const cached = availableModelsByBackend[cacheKey];
+    if (cached && cached.length > 0) {
+      setAvailableModels(cached);
+    }
     try {
       const query = new URLSearchParams();
       if (backend.trim()) {
@@ -1959,6 +2338,7 @@ export default function HomePage() {
       );
       const models = response.data ?? [];
       setAvailableModels(models);
+      setAvailableModelsByBackend((current) => ({ ...current, [cacheKey]: models }));
       const modelDefault = resolveModelDefault(models);
       const target = options?.target ?? 'both';
       const preferredModel =
@@ -1994,8 +2374,7 @@ export default function HomePage() {
       <main className="sim-shell">
         <section className="sim-panel">
           <header className="sim-header">
-            <p className="sim-kicker">AgentWaypoint Simulation</p>
-            <h1>Web Interface MVP</h1>
+            <h1>AgentWaypoint</h1>
             <p className="sim-subtitle">Loading…</p>
           </header>
         </section>
@@ -2082,7 +2461,7 @@ export default function HomePage() {
         } else {
           setSelectedSessionId('');
           setMessages([]);
-          setAssistantText('');
+          replaceAssistantText('');
           setReasoningText('');
           setLatestPlan('');
           setToolOutput('');
@@ -2091,7 +2470,7 @@ export default function HomePage() {
           setResumedTurnHint('');
           setTurnStatus('idle');
           setPendingApproval(null);
-          setTimelineEvents([]);
+          replaceTimelineEvents([]);
           setStreamBubbleTurnId('');
           setStreamActive(false);
         }
@@ -2168,7 +2547,7 @@ export default function HomePage() {
       } else {
         setSelectedSessionId('');
         setMessages([]);
-        setAssistantText('');
+        replaceAssistantText('');
         setReasoningText('');
         setLatestPlan('');
         setToolOutput('');
@@ -2177,7 +2556,7 @@ export default function HomePage() {
         setResumedTurnHint('');
         setTurnStatus('idle');
         setPendingApproval(null);
-        setTimelineEvents([]);
+        replaceTimelineEvents([]);
         setStreamBubbleTurnId('');
         setStreamActive(false);
       }
@@ -2363,6 +2742,7 @@ export default function HomePage() {
       const backendConfig = buildCodexBackendConfig({
         model: newProjectDefaultModel,
         executionMode: newProjectExecutionMode,
+        effort: newProjectEffort,
       });
       const created = await apiRequest<Project>('/api/channels/plugins/web/app/projects', {
         method: 'POST',
@@ -2396,6 +2776,7 @@ export default function HomePage() {
       const backendConfig = buildCodexBackendConfig({
         model: newSessionDefaultModel,
         executionMode: newSessionExecutionMode,
+        effort: newSessionEffort,
       });
       const created = await apiRequest<Session>(`/api/channels/plugins/web/app/projects/${selectedProjectId}/sessions`, {
         method: 'POST',
@@ -2404,6 +2785,8 @@ export default function HomePage() {
           backend: newSessionBackend,
           ...(backendConfig ? { backendConfig } : {}),
           ...(newSessionRepoPath.trim() ? { repoPath: newSessionRepoPath.trim() } : {}),
+          autoApprove: newSessionAutoApprove,
+          autoApproveTimeoutSeconds: newSessionAutoApproveTimeout,
         },
       });
       await loadSessions(selectedProjectId);
@@ -2580,8 +2963,8 @@ export default function HomePage() {
         },
       ]);
       setPrompt('');
-      setTimelineEvents([]);
-      setAssistantText('');
+      replaceTimelineEvents([]);
+      replaceAssistantText('');
       setReasoningText('');
       setLatestPlan('');
       setToolOutput('');
@@ -2695,17 +3078,76 @@ export default function HomePage() {
     }
   }
 
+  async function handleToggleApprovalTimer(approval: PendingApproval): Promise<void> {
+    if (!activeTurnId) return;
+    const isPaused = readApprovalIsoField(approval.payload, 'pausedAt') !== null;
+    const action: 'pause' | 'resume' = isPaused ? 'resume' : 'pause';
+    setError('');
+    try {
+      await apiRequest<TurnStatusResponse>(`/api/channels/plugins/web/app/turns/${activeTurnId}/approval/timer`, {
+        method: 'POST',
+        body: {
+          approvalId: approval.id,
+          action,
+        },
+      });
+      // The server emits turn.approval.timer_paused / _resumed; the SSE
+      // stream re-syncs `pendingApproval`. No optimistic update needed.
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    }
+  }
+
+  function rememberTurnStreamCursor(turnId: string, seq: number): void {
+    const normalizedTurnId = turnId.trim();
+    if (!normalizedTurnId || !Number.isFinite(seq)) {
+      return;
+    }
+    const current = turnStreamCursorRef.current[normalizedTurnId] ?? 0;
+    if (seq > current) {
+      turnStreamCursorRef.current[normalizedTurnId] = seq;
+    }
+  }
+
+  function getTurnStreamCursor(turnId: string): number {
+    const normalizedTurnId = turnId.trim();
+    if (!normalizedTurnId) {
+      return 0;
+    }
+    return Math.max(turnStreamCursorRef.current[normalizedTurnId] ?? 0, 0);
+  }
+
+  async function fetchTurnEventSnapshot(turnId: string): Promise<TurnEventSnapshot> {
+    const normalizedTurnId = turnId.trim();
+    const events = await apiRequest<TurnEventHistoryItem[]>(
+      `/api/channels/plugins/web/app/turns/${normalizedTurnId}/events?${new URLSearchParams({ since: '0' }).toString()}`,
+      {
+        method: 'GET',
+      },
+    );
+    const normalizedEvents = events
+      .map((event) => normalizeHistoryEventItem(event, normalizedTurnId))
+      .filter((event): event is StreamEnvelope => event !== null);
+    const snapshot = buildTurnEventSnapshot(normalizedEvents);
+    rememberTurnStreamCursor(normalizedTurnId, snapshot.latestSeq);
+    return snapshot;
+  }
+
   async function loadSessionHistory(
     sessionId: string,
     options: { resumeStream: boolean; resetEventLog: boolean; resetInspectPanel: boolean },
   ): Promise<void> {
+    const requestId = sessionHistoryRequestRef.current + 1;
+    sessionHistoryRequestRef.current = requestId;
+    const isCurrentRequest = (): boolean => sessionHistoryRequestRef.current === requestId;
+
     if (!sessionId) {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
       stopTurnStatusPolling();
       setMessages([]);
       setTurns([]);
-      setAssistantText('');
+      replaceAssistantText('');
       setReasoningText('');
       setLatestPlan('');
       setToolOutput('');
@@ -2721,7 +3163,7 @@ export default function HomePage() {
       inspectedTurnIdRef.current = '';
       setTurnEventsLoading(false);
       if (options.resetEventLog) {
-        setTimelineEvents([]);
+        replaceTimelineEvents([]);
       }
       return;
     }
@@ -2734,6 +3176,9 @@ export default function HomePage() {
       const history = await apiRequest<SessionHistory>(`/api/channels/plugins/web/app/sessions/${sessionId}/history`, {
         method: 'GET',
       });
+      if (!isCurrentRequest()) {
+        return;
+      }
       setMessages(history.messages);
       setTurns(history.turns);
       setTurnStatus(history.activeTurnStatus ?? 'idle');
@@ -2741,6 +3186,8 @@ export default function HomePage() {
       setContextRemainingRatio(latestTurn?.contextRemainingRatio ?? null);
       setActiveTurnId(history.activeTurnId ?? '');
       setPendingApproval(null);
+      let streamSince = history.activeTurnId ? getTurnStreamCursor(history.activeTurnId) : 0;
+      let sawNonReasoningAssistantDelta = false;
       if (history.activeTurnId) {
         setStreamBubbleTurnId(history.activeTurnId);
         setStreamActive(true);
@@ -2749,7 +3196,7 @@ export default function HomePage() {
         setStreamActive(false);
       }
       if (options.resetInspectPanel) {
-        setAssistantText('');
+        replaceAssistantText('');
         setReasoningText('');
         setLatestPlan('');
         setToolOutput('');
@@ -2759,26 +3206,63 @@ export default function HomePage() {
         inspectedTurnIdRef.current = nextInspectedTurnId;
       }
       if (options.resetEventLog) {
-        setTimelineEvents([]);
+        replaceTimelineEvents([]);
       }
       if (history.activeTurnId) {
-        await syncTurnState(history.activeTurnId);
+        if (options.resetEventLog || options.resetInspectPanel) {
+          const snapshot = await fetchTurnEventSnapshot(history.activeTurnId);
+          if (!isCurrentRequest()) {
+            return;
+          }
+          streamSince = Math.max(streamSince, snapshot.latestSeq);
+          sawNonReasoningAssistantDelta = snapshot.sawNonReasoningAssistantDelta;
+          if (options.resetEventLog) {
+            replaceTimelineEvents(snapshot.timelineEvents);
+          }
+          if (options.resetInspectPanel) {
+            replaceAssistantText(snapshot.assistantText);
+            setReasoningText(snapshot.reasoningText);
+            setLatestPlan(snapshot.latestPlan);
+            setToolOutput(snapshot.toolOutput);
+            setLatestDiffSummary(snapshot.latestDiffSummary);
+          }
+          if (snapshot.contextRemainingRatio !== null) {
+            setContextRemainingRatio(snapshot.contextRemainingRatio);
+          }
+        }
+        const currentTurnState = await fetchTurnState(history.activeTurnId);
+        if (!isCurrentRequest()) {
+          return;
+        }
+        applyTurnState(currentTurnState);
       }
       if (options.resumeStream && history.activeTurnId) {
         setResumedTurnHint(`Resumed in-flight turn: ${history.activeTurnId}`);
-        openStream(history.activeTurnId, sessionId);
+        openStream(history.activeTurnId, sessionId, {
+          since: streamSince,
+          initialSawNonReasoningAssistantDelta: sawNonReasoningAssistantDelta,
+        });
       } else {
         setResumedTurnHint('');
       }
     } catch (requestError) {
-      setError(extractMessage(requestError));
+      if (isCurrentRequest()) {
+        setError(extractMessage(requestError));
+      }
     }
   }
 
   async function syncTurnState(turnId: string): Promise<void> {
-    const status = await apiRequest<TurnStatusResponse>(`/api/channels/plugins/web/app/turns/${turnId}`, {
+    applyTurnState(await fetchTurnState(turnId));
+  }
+
+  async function fetchTurnState(turnId: string): Promise<TurnStatusResponse> {
+    return apiRequest<TurnStatusResponse>(`/api/channels/plugins/web/app/turns/${turnId}`, {
       method: 'GET',
     });
+  }
+
+  function applyTurnState(status: TurnStatusResponse): void {
     setTurnStatus(status.status);
     setContextRemainingRatio((current) => status.contextRemainingRatio ?? current);
     setPendingApproval(status.pendingApproval);
@@ -2787,37 +3271,31 @@ export default function HomePage() {
     }
   }
 
-  function openStream(turnId: string, sessionId: string): void {
+  function openStream(
+    turnId: string,
+    sessionId: string,
+    options?: { since?: number; initialSawNonReasoningAssistantDelta?: boolean },
+  ): void {
+    flushPendingTimelineEvents();
+    flushPendingAssistantText();
     eventSourceRef.current?.close();
     inspectedTurnIdRef.current = turnId;
     setInspectedTurnId(turnId);
-    const streamUrl = `/api/channels/plugins/web/app/turns/${turnId}/stream`;
+    const since = Math.max(options?.since ?? getTurnStreamCursor(turnId), 0);
+    const query = since > 0 ? `?${new URLSearchParams({ since: String(since) }).toString()}` : '';
+    const streamUrl = `/api/channels/plugins/web/app/turns/${turnId}/stream${query}`;
     const source = new EventSource(streamUrl);
     eventSourceRef.current = source;
-    let sawNonReasoningAssistantDelta = false;
-
-    const appendTimelineEvent = (envelope: StreamEnvelope): void => {
-      setTimelineEvents((current) => mergeTimelineEvent(current, envelope));
-    };
-    const appendSystemTimelineEvent = (title: string): void => {
-      setTimelineEvents((current) => [
-        ...current,
-        {
-          id: `system-${Date.now()}-${current.length}`,
-          kind: 'system',
-          title,
-          seqStart: -1,
-          seqEnd: -1,
-          createdAt: new Date().toISOString(),
-          details: [],
-        },
-      ]);
-    };
+    let sawNonReasoningAssistantDelta = options?.initialSawNonReasoningAssistantDelta === true;
 
     STREAM_EVENTS.forEach((eventType) => {
       source.addEventListener(eventType, (evt) => {
+        if (eventSourceRef.current !== source) {
+          return;
+        }
         const message = evt as MessageEvent<string>;
         const envelope = JSON.parse(message.data) as StreamEnvelope;
+        rememberTurnStreamCursor(envelope.turnId, envelope.seq);
         const selectedTurnId = inspectedTurnIdRef.current.trim();
         const shouldUpdateInspectPanel = !selectedTurnId || selectedTurnId === envelope.turnId;
         if (shouldUpdateInspectPanel) {
@@ -2825,7 +3303,7 @@ export default function HomePage() {
             inspectedTurnIdRef.current = envelope.turnId;
             setInspectedTurnId(envelope.turnId);
           }
-          appendTimelineEvent(envelope);
+          queueTimelineEvent(envelope);
         }
 
         if (envelope.type === 'assistant.delta') {
@@ -2835,7 +3313,7 @@ export default function HomePage() {
             if (!isReasoningDelta && delta.length > 0) {
               sawNonReasoningAssistantDelta = true;
             }
-            setAssistantText((current) => current + delta);
+            queueAssistantTextDelta(delta);
           }
         }
 
@@ -2876,15 +3354,8 @@ export default function HomePage() {
         }
 
         if (envelope.type === 'turn.approval.requested') {
-          setTurnStatus('waiting_approval');
-          setPendingApproval({
-            id: String(envelope.payload.requestId ?? ''),
-            kind: typeof envelope.payload.kind === 'string' ? envelope.payload.kind : 'approval',
-            status: 'pending',
-            decision: null,
-            createdAt: envelope.createdAt,
-            resolvedAt: null,
-            payload: envelope.payload,
+          void syncTurnState(turnId).catch(() => {
+            // Keep current UI state on transient sync failure.
           });
         }
 
@@ -2895,25 +3366,52 @@ export default function HomePage() {
           });
         }
 
+        if (envelope.type === 'turn.approval.timer_paused' || envelope.type === 'turn.approval.timer_resumed') {
+          const requestId = typeof envelope.payload.requestId === 'string' ? envelope.payload.requestId : '';
+          if (requestId) {
+            setPendingApproval((current) => {
+              if (!current || current.id !== requestId) return current;
+              const nextPayload: Record<string, unknown> = { ...current.payload };
+              if (envelope.type === 'turn.approval.timer_paused') {
+                nextPayload.pausedAt =
+                  typeof envelope.payload.pausedAt === 'string' ? envelope.payload.pausedAt : null;
+                nextPayload.pausedRemainingMs =
+                  typeof envelope.payload.pausedRemainingMs === 'number'
+                    ? envelope.payload.pausedRemainingMs
+                    : null;
+                nextPayload.autoApproveAt = null;
+              } else {
+                nextPayload.autoApproveAt =
+                  typeof envelope.payload.autoApproveAt === 'string'
+                    ? envelope.payload.autoApproveAt
+                    : null;
+                nextPayload.pausedAt = null;
+                nextPayload.pausedRemainingMs = null;
+              }
+              return { ...current, payload: nextPayload };
+            });
+          }
+        }
+
         if (envelope.type === 'turn.completed' || envelope.type === 'turn.failed' || envelope.type === 'turn.cancelled') {
+          flushPendingTimelineEvents();
+          flushPendingAssistantText();
           if (envelope.type === 'turn.completed' && !sawNonReasoningAssistantDelta) {
             const completedContent = typeof envelope.payload.content === 'string' ? envelope.payload.content : '';
-            if (completedContent.length > 0) {
-              setAssistantText((current) => `${ensureBalancedThinkTags(current)}${completedContent}`);
-            }
+            appendCompletedAssistantText(completedContent);
           }
           setTurnStatus(envelope.type.replace('turn.', ''));
           setStreamActive(false);
           setResumedTurnHint('');
           setPendingApproval(null);
           stopTurnStatusPolling();
-            if (sessionId) {
-              void loadSessionHistory(sessionId, {
-                resumeStream: false,
-                resetEventLog: false,
-                resetInspectPanel: false,
-              });
-            }
+          if (sessionId) {
+            void loadSessionHistory(sessionId, {
+              resumeStream: false,
+              resetEventLog: false,
+              resetInspectPanel: false,
+            });
+          }
           source.close();
           eventSourceRef.current = null;
         }
@@ -2921,6 +3419,10 @@ export default function HomePage() {
     });
 
     source.onerror = () => {
+      if (eventSourceRef.current !== source) {
+        return;
+      }
+      flushPendingAssistantText();
       appendSystemTimelineEvent('Stream disconnected');
       source.close();
       eventSourceRef.current = null;
@@ -2998,6 +3500,7 @@ export default function HomePage() {
       const backendConfig = buildCodexBackendConfig({
         model: projectConfigDefaultModel,
         executionMode: projectConfigExecutionMode,
+        effort: projectConfigEffort,
       });
       const updated = await apiRequest<Project>(`/api/channels/plugins/web/app/projects/${projectConfigTargetProjectId}`, {
         method: 'PATCH',
@@ -3027,12 +3530,15 @@ export default function HomePage() {
       const backendConfig = buildCodexBackendConfig({
         model: sessionConfigDefaultModel,
         executionMode: sessionConfigExecutionMode,
+        effort: sessionConfigEffort,
       });
       await apiRequest<Session>(`/api/channels/plugins/web/app/sessions/${sessionConfigTargetSessionId}`, {
         method: 'PATCH',
         body: {
           title: sessionConfigName.trim(),
           ...(backendConfig ? { backendConfig } : {}),
+          autoApprove: sessionConfigAutoApprove,
+          autoApproveTimeoutSeconds: sessionConfigAutoApproveTimeout,
         },
       });
       if (sessionConfigTargetProjectId) {
@@ -3085,17 +3591,21 @@ export default function HomePage() {
     if (mode === 'createProject') {
       setNewProjectBackend(fallbackProjectBackend);
       setNewProjectExecutionMode(DEFAULT_CODEX_EXECUTION_MODE);
+      setNewProjectEffort('');
       void loadAvailableModels(fallbackProjectBackend, { target: 'new' });
     }
     if (mode === 'createSession' && selectedProject) {
       const backendConfig = readCodexBackendConfig(selectedProject.backendConfig);
       const backend = selectedProject.backend?.trim() || fallbackProjectBackend;
       const resolvedBackend = supportedBackends.includes(backend) ? backend : fallbackProjectBackend;
-      setNewSessionTitle('First Simulation Session');
+      setNewSessionTitle('New Session');
       setNewSessionRepoPath(selectedProject.repoPath ?? '');
       setNewSessionBackend(resolvedBackend);
       setNewSessionExecutionMode(backendConfig.executionMode);
       setNewSessionDefaultModel(backendConfig.model);
+      setNewSessionEffort(backendConfig.effort ?? '');
+      setNewSessionAutoApprove(false);
+      setNewSessionAutoApproveTimeout(10);
       void loadAvailableModels(resolvedBackend, { target: 'session', preferredModel: backendConfig.model });
     }
     setActionPanelMode(mode);
@@ -3106,11 +3616,14 @@ export default function HomePage() {
     const backend = project.backend?.trim() || fallbackProjectBackend;
     const resolvedBackend = supportedBackends.includes(backend) ? backend : fallbackProjectBackend;
     setSelectedProjectId(project.id);
-    setNewSessionTitle('First Simulation Session');
+    setNewSessionTitle('New Session');
     setNewSessionRepoPath(project.repoPath ?? '');
     setNewSessionBackend(resolvedBackend);
     setNewSessionExecutionMode(backendConfig.executionMode);
     setNewSessionDefaultModel(backendConfig.model);
+    setNewSessionEffort(backendConfig.effort ?? '');
+    setNewSessionAutoApprove(false);
+    setNewSessionAutoApproveTimeout(10);
     void loadAvailableModels(resolvedBackend, { target: 'session', preferredModel: backendConfig.model });
     setActionPanelMode('createSession');
   }
@@ -3144,6 +3657,7 @@ export default function HomePage() {
     setProjectConfigBackend(resolvedBackend);
     setProjectConfigDefaultModel(backendConfig.model);
     setProjectConfigExecutionMode(backendConfig.executionMode);
+    setProjectConfigEffort(backendConfig.effort ?? '');
     void loadAvailableModels(resolvedBackend, { target: 'config', preferredModel: backendConfig.model });
     openActionPanel('projectConfig');
   }
@@ -3160,6 +3674,9 @@ export default function HomePage() {
     setSessionConfigWorkspacePath(sessionRuntime.cwd ?? project.repoPath ?? '');
     setSessionConfigDefaultModel(sessionBackendConfig.model);
     setSessionConfigExecutionMode(sessionBackendConfig.executionMode);
+    setSessionConfigEffort(sessionBackendConfig.effort ?? '');
+    setSessionConfigAutoApprove(sessionRuntime.autoApprove);
+    setSessionConfigAutoApproveTimeout(sessionRuntime.autoApproveTimeoutSeconds);
     void loadAvailableModels(resolvedBackend, { target: 'sessionConfig', preferredModel: sessionBackendConfig.model });
     openActionPanel('sessionConfig');
   }
@@ -3267,35 +3784,23 @@ export default function HomePage() {
     inspectedTurnIdRef.current = normalizedTurnId;
     setInspectedTurnId(normalizedTurnId);
     setTurnEventsLoading(true);
-    setTimelineEvents([]);
+    replaceTimelineEvents([]);
     setLatestDiffSummary('');
     openInsightsPanel('events');
 
     try {
-      const events = await apiRequest<TurnEventHistoryItem[]>(
-        `/api/channels/plugins/web/app/turns/${normalizedTurnId}/events?${new URLSearchParams({ since: '0' }).toString()}`,
-        {
-          method: 'GET',
-        },
-      );
+      const snapshot = await fetchTurnEventSnapshot(normalizedTurnId);
       if (inspectedTurnIdRef.current !== normalizedTurnId) {
         return;
       }
-      const normalizedEvents = events
-        .map((event) => normalizeHistoryEventItem(event, normalizedTurnId))
-        .filter((event): event is StreamEnvelope => event !== null);
-      const timeline = buildTimelineFromEvents(normalizedEvents);
-      if (inspectedTurnIdRef.current !== normalizedTurnId) {
-        return;
-      }
-      setTimelineEvents(timeline.timelineEvents);
-      setLatestDiffSummary(timeline.latestDiffSummary);
+      replaceTimelineEvents(snapshot.timelineEvents);
+      setLatestDiffSummary(snapshot.latestDiffSummary);
     } catch (requestError) {
       if (inspectedTurnIdRef.current !== normalizedTurnId) {
         return;
       }
       setError(extractMessage(requestError));
-      setTimelineEvents([]);
+      replaceTimelineEvents([]);
       setLatestDiffSummary('');
     } finally {
       if (inspectedTurnIdRef.current === normalizedTurnId) {
@@ -3441,6 +3946,17 @@ export default function HomePage() {
   }
 
   function handlePromptKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    const composing =
+      promptComposingRef.current ||
+      event.nativeEvent.isComposing ||
+      event.keyCode === 229 ||
+      (event.key === 'Enter' &&
+        promptCompositionEndedAtRef.current > 0 &&
+        Date.now() - promptCompositionEndedAtRef.current < PROMPT_COMPOSITION_ENTER_SUPPRESS_MS);
+    if (composing) {
+      return;
+    }
+
     if (skillSuggestionVisible && filteredSkillSuggestions.length > 0) {
       if (event.key === 'ArrowDown') {
         event.preventDefault();
@@ -3475,6 +3991,15 @@ export default function HomePage() {
       return;
     }
     void handleSendTurn();
+  }
+
+  function handlePromptCompositionStart(_event: ReactCompositionEvent<HTMLTextAreaElement>): void {
+    promptComposingRef.current = true;
+  }
+
+  function handlePromptCompositionEnd(_event: ReactCompositionEvent<HTMLTextAreaElement>): void {
+    promptComposingRef.current = false;
+    promptCompositionEndedAtRef.current = Date.now();
   }
 
   function handlePromptChange(event: ChangeEvent<HTMLTextAreaElement>): void {
@@ -3746,13 +4271,14 @@ export default function HomePage() {
                   <label>
                     Execution Mode
                     <select value={newProjectExecutionMode} onChange={(event) => setNewProjectExecutionMode(event.target.value)}>
-                      {EXECUTION_MODE_OPTIONS.map((option) => (
+                      {getExecutionModeOptions(newProjectBackend).map((option) => (
                         <option key={`project-execution-mode-${option.value}`} value={option.value}>
                           {option.label}
                         </option>
                       ))}
                     </select>
                   </label>
+                  {renderEffortSelect(availableModels, newProjectDefaultModel, newProjectEffort, setNewProjectEffort)}
                   <div className="sim-actions action-panel-actions-inline">
                     <button type="button" onClick={() => void handleCreateProjectFromPanel()} disabled={busy}>
                       Create
@@ -3848,12 +4374,37 @@ export default function HomePage() {
                   <label>
                     Execution Mode
                     <select value={newSessionExecutionMode} onChange={(event) => setNewSessionExecutionMode(event.target.value)}>
-                      {EXECUTION_MODE_OPTIONS.map((option) => (
+                      {getExecutionModeOptions(newSessionBackend).map((option) => (
                         <option key={`session-execution-mode-${option.value}`} value={option.value}>
                           {option.label}
                         </option>
                       ))}
                     </select>
+                  </label>
+                  {renderEffortSelect(availableModels, newSessionDefaultModel, newSessionEffort, setNewSessionEffort)}
+                  <label className="inline-checkbox">
+                    <span>Auto-approve tool requests</span>
+                    <input
+                      type="checkbox"
+                      checked={newSessionAutoApprove}
+                      onChange={(event) => setNewSessionAutoApprove(event.target.checked)}
+                    />
+                  </label>
+                  <label>
+                    Auto-approve timeout (seconds)
+                    <input
+                      type="number"
+                      min={0}
+                      max={3600}
+                      step={1}
+                      value={newSessionAutoApproveTimeout}
+                      onChange={(event) => {
+                        const next = Number.parseInt(event.target.value, 10);
+                        setNewSessionAutoApproveTimeout(Number.isFinite(next) && next >= 0 ? next : 0);
+                      }}
+                      disabled={!newSessionAutoApprove}
+                    />
+                    <span className="sim-input-hint">0 approves immediately; otherwise auto-accepted after this delay.</span>
                   </label>
                   <div className="sim-actions action-panel-actions-inline">
                     <button type="button" onClick={() => void handleCreateSessionFromPanel()} disabled={busy}>
@@ -3947,13 +4498,14 @@ export default function HomePage() {
                   <label>
                     Execution Mode
                     <select value={projectConfigExecutionMode} onChange={(event) => setProjectConfigExecutionMode(event.target.value)}>
-                      {EXECUTION_MODE_OPTIONS.map((option) => (
+                      {getExecutionModeOptions(projectConfigBackend).map((option) => (
                         <option key={`project-config-execution-mode-${option.value}`} value={option.value}>
                           {option.label}
                         </option>
                       ))}
                     </select>
                   </label>
+                  {renderEffortSelect(availableModels, projectConfigDefaultModel, projectConfigEffort, setProjectConfigEffort)}
                   <div className="sim-actions">
                     <button
                       type="button"
@@ -4007,12 +4559,37 @@ export default function HomePage() {
                   <label>
                     Execution Mode
                     <select value={sessionConfigExecutionMode} onChange={(event) => setSessionConfigExecutionMode(event.target.value)}>
-                      {EXECUTION_MODE_OPTIONS.map((option) => (
+                      {getExecutionModeOptions(sessionConfigBackend).map((option) => (
                         <option key={`session-config-execution-mode-${option.value}`} value={option.value}>
                           {option.label}
                         </option>
                       ))}
                     </select>
+                  </label>
+                  {renderEffortSelect(availableModels, sessionConfigDefaultModel, sessionConfigEffort, setSessionConfigEffort)}
+                  <label className="inline-checkbox">
+                    <span>Auto-approve tool requests</span>
+                    <input
+                      type="checkbox"
+                      checked={sessionConfigAutoApprove}
+                      onChange={(event) => setSessionConfigAutoApprove(event.target.checked)}
+                    />
+                  </label>
+                  <label>
+                    Auto-approve timeout (seconds)
+                    <input
+                      type="number"
+                      min={0}
+                      max={3600}
+                      step={1}
+                      value={sessionConfigAutoApproveTimeout}
+                      onChange={(event) => {
+                        const next = Number.parseInt(event.target.value, 10);
+                        setSessionConfigAutoApproveTimeout(Number.isFinite(next) && next >= 0 ? next : 0);
+                      }}
+                      disabled={!sessionConfigAutoApprove}
+                    />
+                    <span className="sim-input-hint">0 approves immediately; otherwise the request is auto-accepted after this delay.</span>
                   </label>
                   <div className="sim-actions">
                     <button
@@ -4965,12 +5542,22 @@ export default function HomePage() {
 
               {pendingApproval ? (
                 <article className="sim-approval">
+                  <ApprovalCountdownRing
+                    autoApproveAt={readApprovalIsoField(pendingApproval.payload, 'autoApproveAt')}
+                    pausedAt={readApprovalIsoField(pendingApproval.payload, 'pausedAt')}
+                    pausedRemainingMs={readApprovalNumberField(pendingApproval.payload, 'pausedRemainingMs')}
+                    onClick={() => void handleToggleApprovalTimer(pendingApproval)}
+                    disabled={busy}
+                  />
                   <h3>Approval Required</h3>
                   <div className="sim-approval-body">
                     {(() => {
                       const reason = readApprovalTextField(pendingApproval.payload, 'reason');
-                      const command = readApprovalCommand(pendingApproval.payload);
-                      const cwd = readApprovalTextField(pendingApproval.payload, 'cwd');
+                      const isFileChange = pendingApproval.kind === 'file_change';
+                      const filePaths = isFileChange ? readApprovalFileChangePaths(pendingApproval.payload) : [];
+                      const fileDiff = isFileChange ? readApprovalFileChangeDiff(pendingApproval.payload) : null;
+                      const command = !isFileChange ? readApprovalCommand(pendingApproval.payload) : null;
+                      const cwd = !isFileChange ? readApprovalTextField(pendingApproval.payload, 'cwd') : null;
                       return (
                         <>
                           <p>
@@ -4979,17 +5566,40 @@ export default function HomePage() {
                           <p className="sim-approval-meta">
                             Purpose: {reason ?? 'Not provided by runtime'}
                           </p>
-                          {command ? (
-                            <pre className="sim-approval-command">{command}</pre>
+                          {isFileChange ? (
+                            <>
+                              {filePaths.length > 0 ? (
+                                <p className="sim-approval-meta sim-approval-meta-cwd">
+                                  {filePaths.length === 1 ? 'File:' : 'Files:'}{' '}
+                                  {filePaths.map((p, i) => (
+                                    <span key={p}>
+                                      {i > 0 ? ', ' : ''}
+                                      <code>{p}</code>
+                                    </span>
+                                  ))}
+                                </p>
+                              ) : (
+                                <p className="sim-approval-meta">File: Not provided by runtime</p>
+                              )}
+                              {fileDiff ? (
+                                <pre className="sim-approval-command">{fileDiff}</pre>
+                              ) : null}
+                            </>
                           ) : (
-                            <p className="sim-approval-meta">Command: Not provided by runtime</p>
-                          )}
-                          {cwd ? (
-                            <p className="sim-approval-meta sim-approval-meta-cwd">
-                              CWD: <code>{cwd}</code>
-                            </p>
-                          ) : (
-                            <p className="sim-approval-meta">CWD: Not provided by runtime</p>
+                            <>
+                              {command ? (
+                                <pre className="sim-approval-command">{command}</pre>
+                              ) : (
+                                <p className="sim-approval-meta">Command: Not provided by runtime</p>
+                              )}
+                              {cwd ? (
+                                <p className="sim-approval-meta sim-approval-meta-cwd">
+                                  CWD: <code>{cwd}</code>
+                                </p>
+                              ) : (
+                                <p className="sim-approval-meta">CWD: Not provided by runtime</p>
+                              )}
+                            </>
                           )}
                         </>
                       );
@@ -5041,6 +5651,8 @@ export default function HomePage() {
                       onClick={handlePromptSelection}
                       onKeyUp={handlePromptSelection}
                       onKeyDown={handlePromptKeyDown}
+                      onCompositionStart={handlePromptCompositionStart}
+                      onCompositionEnd={handlePromptCompositionEnd}
                       placeholder="Send a message..."
                       rows={3}
                     />
@@ -5115,72 +5727,83 @@ export default function HomePage() {
                   {insightsTab === 'preview' ? previewPanelView : null}
                   {insightsTab === 'diff' ? diffPanelView : null}
                   {insightsTab === 'events' ? (
-                    <div className="timeline-list">
+                    <div className="timeline-list" ref={timelineListRef} onScroll={handleTimelineScroll}>
                       {SESSION_DEBUG_INFO_ENABLED && inspectedTurnId ? (
                         <p className="timeline-empty">Inspecting turn: {inspectedTurnId}</p>
                       ) : null}
                       {turnEventsLoading ? <p className="timeline-empty">Loading timeline...</p> : null}
                       {!turnEventsLoading && timelineEvents.length === 0 ? <p className="timeline-empty">No events yet.</p> : null}
-                      {timelineEvents.map((event) => (
-                        <article key={event.id} className="timeline-event">
-                          <header className="timeline-event-head">
-                            <span className="timeline-event-title">{event.title}</span>
-                            {event.status ? <span className="status-pill">{event.status}</span> : null}
-                            {event.kind === 'diff' ? (
-                              <button
-                                type="button"
-                                className="timeline-inline-button"
-                                onClick={() => setInsightsTab('diff')}
-                              >
-                                View Diff
-                              </button>
-                            ) : null}
-                            <span className="timeline-event-seq">
-                              {event.seqStart >= 0
-                                ? event.seqStart === event.seqEnd
-                                  ? `#${event.seqStart}`
-                                  : `#${event.seqStart}-#${event.seqEnd}`
-                                : 'system'}
-                            </span>
-                          </header>
-                          {event.details.length > 0 || (event.kind === 'diff' && Array.isArray(event.diffFiles) && event.diffFiles.length > 0) ? (
-                            <div className="timeline-event-details">
-                              {event.kind === 'diff' && Array.isArray(event.diffFiles) && event.diffFiles.length > 0
-                                ? (
-                                    <article className="timeline-diff-file">
-                                      <header className="timeline-diff-file-title">{event.diffFiles.join('\n')}</header>
-                                    </article>
-                                  )
-                                : event.details.map((detail, index) => {
-                                    const detailKey = `${event.id}-${index}`;
-                                    const normalizedDetail = typeof detail === 'string' ? detail : String(detail ?? '');
-                                    const isToolDetail = event.kind === 'tool';
-                                    const lineCount = normalizedDetail.length === 0 ? 0 : normalizedDetail.split('\n').length;
-                                    const canToggle = isToolDetail && lineCount > 5;
-                                    const expanded = expandedToolDetailKeys[detailKey] === true;
-                                    return (
-                                      <div key={detailKey} className="timeline-detail-box">
-                                        {canToggle ? (
-                                          <button
-                                            type="button"
-                                            className="icon-button timeline-detail-toggle"
-                                            onClick={() =>
-                                              setExpandedToolDetailKeys((current) => ({ ...current, [detailKey]: !expanded }))
-                                            }
-                                            title={expanded ? 'Collapse details' : 'Expand details'}
-                                            aria-label={expanded ? 'Collapse details' : 'Expand details'}
-                                          >
-                                            <ChevronDown className={expanded ? 'timeline-toggle-icon is-open' : 'timeline-toggle-icon'} />
-                                          </button>
-                                        ) : null}
-                                        <pre>{canToggle && !expanded ? tailLines(normalizedDetail, 5) : normalizedDetail}</pre>
-                                      </div>
-                                    );
-                                  })}
+                      {!turnEventsLoading && timelineEvents.length > 0 ? (
+                        <div className="timeline-virtual-spacer" style={{ height: `${timelineVirtualView.totalHeight}px` }}>
+                          {timelineVirtualView.rows.map(({ event, top }) => (
+                            <div
+                              key={event.id}
+                              ref={(element) => measureTimelineRow(event.id, element)}
+                              className="timeline-virtual-row"
+                              style={{ transform: `translateY(${top}px)` }}
+                            >
+                              <article className="timeline-event">
+                                <header className="timeline-event-head">
+                                  <span className="timeline-event-title">{event.title}</span>
+                                  {event.status ? <span className="status-pill">{event.status}</span> : null}
+                                  {event.kind === 'diff' ? (
+                                    <button
+                                      type="button"
+                                      className="timeline-inline-button"
+                                      onClick={() => setInsightsTab('diff')}
+                                    >
+                                      View Diff
+                                    </button>
+                                  ) : null}
+                                  <span className="timeline-event-seq">
+                                    {event.seqStart >= 0
+                                      ? event.seqStart === event.seqEnd
+                                        ? `#${event.seqStart}`
+                                        : `#${event.seqStart}-#${event.seqEnd}`
+                                      : 'system'}
+                                  </span>
+                                </header>
+                                {event.details.length > 0 || (event.kind === 'diff' && Array.isArray(event.diffFiles) && event.diffFiles.length > 0) ? (
+                                  <div className="timeline-event-details">
+                                    {event.kind === 'diff' && Array.isArray(event.diffFiles) && event.diffFiles.length > 0
+                                      ? (
+                                          <article className="timeline-diff-file">
+                                            <header className="timeline-diff-file-title">{event.diffFiles.join('\n')}</header>
+                                          </article>
+                                        )
+                                      : event.details.map((detail, index) => {
+                                          const detailKey = `${event.id}-${index}`;
+                                          const normalizedDetail = typeof detail === 'string' ? detail : String(detail ?? '');
+                                          const isToolDetail = event.kind === 'tool';
+                                          const lineCount = normalizedDetail.length === 0 ? 0 : normalizedDetail.split('\n').length;
+                                          const canToggle = isToolDetail && lineCount > 5;
+                                          const expanded = expandedToolDetailKeys[detailKey] === true;
+                                          return (
+                                            <div key={detailKey} className="timeline-detail-box">
+                                              {canToggle ? (
+                                                <button
+                                                  type="button"
+                                                  className="icon-button timeline-detail-toggle"
+                                                  onClick={() =>
+                                                    setExpandedToolDetailKeys((current) => ({ ...current, [detailKey]: !expanded }))
+                                                  }
+                                                  title={expanded ? 'Collapse details' : 'Expand details'}
+                                                  aria-label={expanded ? 'Collapse details' : 'Expand details'}
+                                                >
+                                                  <ChevronDown className={expanded ? 'timeline-toggle-icon is-open' : 'timeline-toggle-icon'} />
+                                                </button>
+                                              ) : null}
+                                              <pre>{canToggle && !expanded ? tailLines(normalizedDetail, 5) : normalizedDetail}</pre>
+                                            </div>
+                                          );
+                                        })}
+                                  </div>
+                                ) : null}
+                              </article>
                             </div>
-                          ) : null}
-                        </article>
-                      ))}
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
@@ -5704,6 +6327,43 @@ function formatApprovalKind(kind: string): string {
   return kind;
 }
 
+function readAutoReviewTextField(payload: Record<string, unknown>, key: string): string | null {
+  const value = payload[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function formatAutoReviewLabel(value: string): string {
+  const normalized = value.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return normalized ? `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}` : value;
+}
+
+function formatAutoReviewDetails(payload: Record<string, unknown>): string[] {
+  const details: string[] = [];
+  const fields: Array<[string, string]> = [
+    ['Action', 'actionType'],
+    ['Status', 'status'],
+    ['Risk', 'riskLevel'],
+    ['Authorization', 'userAuthorization'],
+    ['Decision source', 'decisionSource'],
+    ['Review ID', 'reviewId'],
+    ['Target item', 'targetItemId'],
+  ];
+
+  for (const [label, key] of fields) {
+    const value = readAutoReviewTextField(payload, key);
+    if (value) {
+      details.push(`${label}: ${formatAutoReviewLabel(value)}`);
+    }
+  }
+
+  const rationale = readAutoReviewTextField(payload, 'rationale');
+  if (rationale) {
+    details.push(`Rationale: ${rationale}`);
+  }
+
+  return details;
+}
+
 function normalizeHistoryEventItem(item: TurnEventHistoryItem, fallbackTurnId: string): StreamEnvelope | null {
   const seq = typeof item.seq === 'number' && Number.isFinite(item.seq) ? item.seq : null;
   if (seq === null) {
@@ -5725,22 +6385,74 @@ function normalizeHistoryEventItem(item: TurnEventHistoryItem, fallbackTurnId: s
   };
 }
 
-function buildTimelineFromEvents(events: StreamEnvelope[]): { timelineEvents: TimelineEvent[]; latestDiffSummary: string } {
+function buildTurnEventSnapshot(events: StreamEnvelope[]): TurnEventSnapshot {
   let timelineEvents: TimelineEvent[] = [];
   let latestDiffSummary = '';
+  let latestPlan = '';
+  let assistantText = '';
+  let reasoningText = '';
+  let toolOutput = '';
+  let contextRemainingRatio: number | null = null;
+  let latestSeq = 0;
+  let sawNonReasoningAssistantDelta = false;
   const sortedEvents = [...events].sort((a, b) => a.seq - b.seq);
   sortedEvents.forEach((event) => {
+    latestSeq = Math.max(latestSeq, event.seq);
     timelineEvents = mergeTimelineEvent(timelineEvents, event);
+    if (event.type === 'assistant.delta') {
+      const delta = event.payload.text;
+      if (typeof delta === 'string') {
+        const isReasoningDelta = event.payload.isReasoning === true;
+        if (!isReasoningDelta && delta.length > 0) {
+          sawNonReasoningAssistantDelta = true;
+        }
+        assistantText += delta;
+      }
+    }
+    if (event.type === 'reasoning.delta') {
+      const delta = event.payload.delta;
+      if (typeof delta === 'string') {
+        reasoningText += delta;
+      }
+    }
+    if (event.type === 'plan.updated') {
+      latestPlan = formatPlanPayload(event.payload);
+    }
+    if (event.type === 'thread.token_usage.updated') {
+      const ratio = resolveRemainingContextRatio(event.payload);
+      if (ratio !== null) {
+        contextRemainingRatio = ratio;
+      }
+    }
+    if (event.type === 'tool.output') {
+      const delta = event.payload.text;
+      if (typeof delta === 'string') {
+        toolOutput += delta;
+      }
+    }
     if (event.type === 'diff.updated') {
       const formatted = formatDiffPayload(event.payload);
       if (formatted) {
         latestDiffSummary = formatted;
       }
     }
+    if (event.type === 'turn.completed' && !sawNonReasoningAssistantDelta) {
+      const completedContent = typeof event.payload.content === 'string' ? event.payload.content : '';
+      if (completedContent.length > 0) {
+        assistantText = `${ensureBalancedThinkTags(assistantText)}${completedContent}`;
+      }
+    }
   });
   return {
     timelineEvents,
     latestDiffSummary,
+    latestPlan,
+    assistantText,
+    reasoningText,
+    toolOutput,
+    contextRemainingRatio,
+    latestSeq,
+    sawNonReasoningAssistantDelta,
   };
 }
 
@@ -5950,6 +6662,26 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
         seqEnd: envelope.seq,
         createdAt: envelope.createdAt,
         details: [decision],
+      },
+    ];
+  }
+
+  if (envelope.type === 'turn.approval.auto_review') {
+    const phase = readAutoReviewTextField(envelope.payload, 'phase');
+    const phaseTitle = phase === 'started' ? 'Started' : phase === 'completed' ? 'Completed' : 'Updated';
+    const status: TimelineEvent['status'] | undefined =
+      phase === 'started' ? 'running' : phase === 'completed' ? 'completed' : undefined;
+    return [
+      ...current,
+      {
+        id: `approval-auto-review-${envelope.seq}`,
+        kind: 'approval',
+        title: `Auto Review ${phaseTitle}`,
+        seqStart: envelope.seq,
+        seqEnd: envelope.seq,
+        createdAt: envelope.createdAt,
+        details: formatAutoReviewDetails(envelope.payload),
+        status,
       },
     ];
   }
@@ -6375,13 +7107,163 @@ function readApprovalCommand(payload: Record<string, unknown>): string | null {
   return null;
 }
 
-function readApprovalTextField(payload: Record<string, unknown>, key: 'reason' | 'cwd'): string | null {
+function readApprovalTextField(payload: Record<string, unknown>, key: 'reason' | 'cwd' | 'path' | 'diff'): string | null {
   const value = payload[key];
   if (typeof value !== 'string') {
     return null;
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function readApprovalFileChangePaths(payload: Record<string, unknown>): string[] {
+  const direct = readApprovalTextField(payload, 'path');
+  if (direct) return [direct];
+  const changes = payload.changes;
+  if (changes && typeof changes === 'object' && !Array.isArray(changes)) {
+    return Object.keys(changes as Record<string, unknown>);
+  }
+  if (Array.isArray(changes)) {
+    const paths: string[] = [];
+    for (const entry of changes) {
+      if (typeof entry === 'string' && entry.trim().length > 0) {
+        paths.push(entry.trim());
+      } else if (entry && typeof entry === 'object' && typeof (entry as Record<string, unknown>).path === 'string') {
+        const p = (entry as Record<string, unknown>).path as string;
+        if (p.trim().length > 0) paths.push(p.trim());
+      }
+    }
+    if (paths.length > 0) return paths;
+  }
+  const item = payload.item;
+  if (item && typeof item === 'object' && !Array.isArray(item)) {
+    const itemPath = (item as Record<string, unknown>).path;
+    if (typeof itemPath === 'string' && itemPath.trim().length > 0) {
+      return [itemPath.trim()];
+    }
+  }
+  return [];
+}
+
+function readApprovalIsoField(payload: Record<string, unknown>, key: string): string | null {
+  const value = payload[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function readApprovalNumberField(payload: Record<string, unknown>, key: string): number | null {
+  const value = payload[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+type ApprovalCountdownRingProps = {
+  autoApproveAt: string | null;
+  pausedAt: string | null;
+  pausedRemainingMs: number | null;
+  onClick: () => void;
+  disabled: boolean;
+};
+
+/**
+ * SVG ring at the top-right of the approval card. Pure visual: drives a
+ * per-second tick against `autoApproveAt` (or the frozen remaining time when
+ * paused). The server is the source of truth — clicking toggles pause/resume,
+ * and the next emitted event re-syncs the ring.
+ */
+function ApprovalCountdownRing(props: ApprovalCountdownRingProps): React.ReactElement | null {
+  const { autoApproveAt, pausedAt, pausedRemainingMs, onClick, disabled } = props;
+
+  // Tick state exists only to force re-renders; the actual remaining time is
+  // computed from `Date.now()` fresh each render, so the value can never go
+  // stale across pause/resume transitions.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!autoApproveAt || pausedAt) {
+      return;
+    }
+    const id = setInterval(() => setTick((t) => (t + 1) & 0xffff), 250);
+    return () => clearInterval(id);
+  }, [autoApproveAt, pausedAt]);
+
+  // The "window" against which we draw the ring's fill: reset whenever a new
+  // run-segment starts (publish, or resume). Held in a ref so every render
+  // sees the same scale even though it's set imperatively.
+  const totalMsRef = useRef<number | null>(null);
+  const segmentKey = pausedAt ?? autoApproveAt ?? '';
+  const lastSegmentKey = useRef<string>('');
+  if (segmentKey && segmentKey !== lastSegmentKey.current) {
+    lastSegmentKey.current = segmentKey;
+    if (pausedAt && typeof pausedRemainingMs === 'number') {
+      totalMsRef.current = pausedRemainingMs;
+    } else if (autoApproveAt) {
+      totalMsRef.current = Math.max(0, new Date(autoApproveAt).getTime() - Date.now());
+    }
+  }
+
+  let remainingMs: number;
+  if (pausedAt && typeof pausedRemainingMs === 'number') {
+    remainingMs = Math.max(0, pausedRemainingMs);
+  } else if (autoApproveAt) {
+    remainingMs = Math.max(0, new Date(autoApproveAt).getTime() - Date.now());
+  } else {
+    return null;
+  }
+  const totalMs = Math.max(1, totalMsRef.current ?? remainingMs);
+  const remainingSeconds = Math.ceil(remainingMs / 1000);
+  const progress = Math.max(0, Math.min(1, remainingMs / totalMs));
+
+  const radius = 16;
+  const circumference = 2 * Math.PI * radius;
+  const dashOffset = circumference * (1 - progress);
+
+  return (
+    <button
+      type="button"
+      className={`sim-approval-countdown${pausedAt ? ' is-paused' : ''}`}
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={pausedAt ? 'Resume auto-approve countdown' : 'Pause auto-approve countdown'}
+      title={pausedAt ? 'Paused — click to resume' : 'Click to pause auto-approve'}
+    >
+      <svg width="40" height="40" viewBox="0 0 40 40">
+        <circle cx="20" cy="20" r={radius} fill="none" stroke="currentColor" strokeOpacity="0.2" strokeWidth="3" />
+        <circle
+          cx="20"
+          cy="20"
+          r={radius}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="3"
+          strokeDasharray={circumference}
+          strokeDashoffset={dashOffset}
+          strokeLinecap="round"
+          transform="rotate(-90 20 20)"
+        />
+      </svg>
+      <span className="sim-approval-countdown-label">{remainingSeconds}</span>
+    </button>
+  );
+}
+
+function readApprovalFileChangeDiff(payload: Record<string, unknown>): string | null {
+  const direct = readApprovalTextField(payload, 'diff');
+  if (direct) return direct;
+  const changes = payload.changes;
+  if (changes && typeof changes === 'object' && !Array.isArray(changes)) {
+    const parts: string[] = [];
+    for (const [path, change] of Object.entries(changes as Record<string, unknown>)) {
+      if (!change || typeof change !== 'object') continue;
+      const rec = change as Record<string, unknown>;
+      const diffText =
+        (typeof rec.diff === 'string' && rec.diff) ||
+        (typeof rec.unifiedDiff === 'string' && rec.unifiedDiff) ||
+        null;
+      if (diffText) {
+        parts.push(`--- ${path}\n${diffText}`);
+      }
+    }
+    if (parts.length > 0) return parts.join('\n\n');
+  }
+  return null;
 }
 
 function formatPlanPayload(payload: Record<string, unknown>): string {

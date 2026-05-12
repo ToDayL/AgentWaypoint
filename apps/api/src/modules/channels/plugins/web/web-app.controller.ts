@@ -25,6 +25,7 @@ import {
   ForkSessionBodySchema,
   ProjectIdOnlyParamsSchema,
   ProjectIdParamsSchema,
+  ApprovalTimerActionSchema,
   ResolveTurnApprovalBodySchema,
   SessionIdParamsSchema,
   SkillsQuerySchema,
@@ -277,11 +278,29 @@ export class WebPluginAppController {
     return this.webPlugin.resolveTurnApprovalForUser(user.id, id, input);
   }
 
+  @Post('turns/:id/approval/timer')
+  async controlApprovalTimer(
+    @CurrentUserDecorator() user: CurrentUser,
+    @Param() params: unknown,
+    @Body() body: unknown,
+  ) {
+    const { id } = parseWithZod(TurnIdParamsSchema, params);
+    const input = parseWithZod(ApprovalTimerActionSchema, body) as {
+      approvalId: string;
+      action: 'pause' | 'resume';
+    };
+    return this.webPlugin.controlApprovalTimerForUser(user.id, id, input);
+  }
+
   @Get('turns/:id/events')
   async getTurnEvents(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown, @Query() query: unknown) {
     const { id } = parseWithZod(TurnIdParamsSchema, params);
     const queryInput = parseWithZod(StreamTurnQuerySchema, query);
-    return this.webPlugin.getEventsForTurn(user.id, id, queryInput.since ?? 0);
+    const turn = await this.webPlugin.getTurnForUser(user.id, id);
+    const cursor = queryInput.since ?? 0;
+    const persistedEvents = await this.webPlugin.getEventsForTurn(user.id, id, cursor);
+    const dispatchedEvents = this.webPlugin.getDispatchedEventsForSessionTurn(turn.sessionId, id, cursor);
+    return mergeBySeq(persistedEvents, dispatchedEvents);
   }
 
   @Get('turns/:id/stream')

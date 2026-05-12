@@ -1,10 +1,12 @@
 export const DEFAULT_CODEX_MODEL = 'gpt-5-codex';
 export const DEFAULT_CODEX_EXECUTION_MODE = 'safe-write';
-export type CodexExecutionMode = 'read-only' | 'safe-write' | 'yolo';
+export type CodexExecutionMode = 'read-only' | 'safe-write' | 'auto-review' | 'yolo';
 
 export type CodexDefaults = {
   model: string;
   executionMode: CodexExecutionMode;
+  /** Codex-native reasoning effort enum (low|medium|high|xhigh). null = use model default. */
+  effort: string | null;
 };
 
 type ProjectLikeWithBackendConfig = {
@@ -16,6 +18,7 @@ export function buildCodexBackendConfig(input: CodexDefaults): Record<string, st
   return {
     model: input.model,
     executionMode: input.executionMode,
+    ...(input.effort ? { effort: input.effort } : {}),
   };
 }
 
@@ -28,6 +31,7 @@ export function resolveProjectCodexDefaults(project: ProjectLikeWithBackendConfi
   return {
     model: fromConfig.model,
     executionMode: fromConfig.executionMode,
+    effort: fromConfig.effort,
   };
 }
 
@@ -50,9 +54,11 @@ export function readCodexBackendConfig(input: unknown): CodexDefaults | null {
   if (!model || !executionMode) {
     return null;
   }
+  const effort = normalizeNullableString(typeof record.effort === 'string' ? record.effort : null);
   return {
     model,
     executionMode,
+    effort,
   };
 }
 
@@ -60,6 +66,7 @@ function codexDefaultsFromFallback(): CodexDefaults {
   return {
     model: DEFAULT_CODEX_MODEL,
     executionMode: DEFAULT_CODEX_EXECUTION_MODE,
+    effort: null,
   };
 }
 
@@ -81,7 +88,12 @@ export function ensureCompleteCodexBackendConfig(input: unknown): CodexDefaults 
 
 function readCodexExecutionMode(record: Record<string, unknown>): CodexExecutionMode | null {
   const explicit = normalizeNullableString(typeof record.executionMode === 'string' ? record.executionMode : null);
-  if (explicit === 'read-only' || explicit === 'safe-write' || explicit === 'yolo') {
+  if (
+    explicit === 'read-only' ||
+    explicit === 'safe-write' ||
+    explicit === 'auto-review' ||
+    explicit === 'yolo'
+  ) {
     return explicit;
   }
   return null;

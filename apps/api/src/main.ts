@@ -3,9 +3,12 @@ import multipart from '@fastify/multipart';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
+import { ensureBootstrap } from './bootstrap/local-bootstrap';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 
 async function bootstrap(): Promise<void> {
+  await ensureBootstrap();
+
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
     new FastifyAdapter({ logger: true }),
@@ -18,7 +21,7 @@ async function bootstrap(): Promise<void> {
   });
   app.useGlobalFilters(new HttpExceptionFilter());
 
-  const port = Number(process.env.PORT ?? 4000);
+  const port = Number(process.env.API_PORT ?? process.env.PORT ?? 4000);
   await app.listen(port, '0.0.0.0');
 }
 

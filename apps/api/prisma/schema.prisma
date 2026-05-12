@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -102,7 +102,7 @@ model Turn {
   effectiveRuntimeConfig Json?
   failureCode            String?
   failureMessage         String?
-  contextRemainingRatio  Decimal?       @db.Decimal(5, 4)
+  contextRemainingRatio  Float?
   contextRemainingTokens Int?
   contextWindowTokens    Int?
   contextUpdatedAt       DateTime?
@@ -117,16 +117,20 @@ model Turn {
 }
 
 model TurnApproval {
-  id         String    @id @default(cuid())
-  turnId     String
-  requestId  String
-  kind       String
-  status     String
-  payload    Json
-  decision   String?
-  createdAt  DateTime  @default(now())
-  resolvedAt DateTime?
-  turn       Turn      @relation(fields: [turnId], references: [id], onDelete: Cascade)
+  id                String    @id @default(cuid())
+  turnId            String
+  requestId         String
+  kind              String
+  status            String
+  payload           Json
+  decision          String?
+  createdAt         DateTime  @default(now())
+  resolvedAt        DateTime?
+  publishedAt       DateTime?
+  autoApproveAt     DateTime?
+  pausedAt          DateTime?
+  pausedRemainingMs Int?
+  turn              Turn      @relation(fields: [turnId], references: [id], onDelete: Cascade)
 
   @@unique([turnId, requestId])
   @@index([turnId, status, createdAt])

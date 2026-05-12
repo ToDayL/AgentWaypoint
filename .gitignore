@@ -37,12 +37,9 @@ pnpm-debug.log*
 *.pid.lock
 uploads/
 
-# Local TLS assets for nginx reverse proxy
-infra/docker/nginx/certs/*
-!infra/docker/nginx/certs/.gitkeep
-
 # Local agent artifacts (repo root only)
+/.agentwaypoint-dev/
 /.agents/
-/.codex/
+/.codex
 /.claude/
 /schemas/

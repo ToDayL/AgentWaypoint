@@ -1,61 +1,78 @@
 # AgentWaypoint Development Workflow
 
-Last verified: 2026-03-07
+Last verified: 2026-05-11
 
-This project currently runs in split mode:
-- Container: `nginx + web + api + postgres + redis`
-- Host: `codex-runner`
+This branch runs the lightweight stack directly on the host:
+- API: NestJS/Fastify
+- Web: Next.js
+- DB: SQLite in `AGENTWAYPOINT_HOME`
+- Runner: embedded in the API process by default (`codex`, `claude`, `mock`)
+- Channels: in-process web and Discord plugins
+
+## Safety
+Do not use the live `~/.agentwaypoint` directory for development or automated tests. Use a temp or repo-local home:
+```bash
+AGENTWAYPOINT_DEV_HOME=./.agentwaypoint-dev
+```
+
+Do not use ports `4242` or `3443` for tests.
 
 ## Fast Path
 Use orchestration scripts from repo root:
-- Start all dev services: `pnpm dev:up`
+- Start dev services: `pnpm dev:up`
 - Check status: `pnpm dev:status`
-- Stop all dev services: `pnpm dev:down`
-- Clean stop (remove volumes/orphans): `CLEAN_VOLUMES=1 pnpm dev:down`
+- Stop dev services: `pnpm dev:down`
 
-## 1. Clean Reset
-Use this when debugging startup/runtime drift or verifying from scratch.
+The dev scripts default to `./.agentwaypoint-dev` unless `AGENTWAYPOINT_DEV_HOME` is already set.
 
-1. Stop and remove containers, network, and volumes:
-   - `docker compose -f infra/docker/docker-compose.yml down -v --remove-orphans`
-2. Remove web cache:
-   - `rm -rf apps/web/.next`
+## Clean Reset
+Stop services and remove the dev data directory:
+```bash
+pnpm dev:down
+rm -rf ./.agentwaypoint-dev apps/web/.next
+```
 
-## 2. Start Container Services
-1. Start nginx/web/api/postgres/redis:
-   - `docker compose -f infra/docker/docker-compose.yml up --build -d`
+## Start
+```bash
+pnpm dev:up
+```
 
-## 3. Start Host Runner
-1. Start runner daemon:
-   - `./scripts/dev-runner-host.sh`
-2. Containerized API reaches the host runner through `host.docker.internal`:
-   - default `API_RUNNER_MODE=http`
-   - default `API_RUNNER_BASE_URL=http://host.docker.internal:4700`
-3. Initialize DB schema from the API container (after clean DB reset):
-   - `docker compose -f infra/docker/docker-compose.yml exec -T api sh -lc "pnpm --filter @agentwaypoint/api prisma:migrate:dev"`
-4. Choose runner backend:
-   - `RUNNER_BACKEND=codex` for real Codex app-server integration (default)
-   - `RUNNER_BACKEND=mock` for local echo fallback
+On first run, bootstrap prompts for admin credentials and ports. Use non-reserved ports such as API `4000` and Web `3000`.
+The launcher rebuilds the web app when the existing `.next` build is missing or stale. To force a rebuild, run:
+```bash
+./agent-waypoint restart --home ./.agentwaypoint-dev --rebuild
+```
 
-## 4. Verify
-1. API health:
-   - `docker compose -f infra/docker/docker-compose.yml exec -T api sh -lc "node -e \"fetch('http://127.0.0.1:4000/api/health').then(async r=>console.log(await r.text()))\""`
-   - Expected: `{"status":"ok"}`
-2. Runner health:
-   - `curl http://127.0.0.1:4700/runner/health`
-   - Expected: `{"status":"ok","activeTurnCount":0}`
-3. Open web:
-   - `https://localhost:3000`
-4. Verify web proxy -> API (from web container):
-   - `docker compose -f infra/docker/docker-compose.yml exec -T web sh -lc "node -e \"fetch('http://localhost:3000/api/projects',{headers:{'x-user-email':'demo@example.com'}}).then(async r=>{console.log(r.status);console.log(await r.text());})\""`
-   - Expected: status `200` and JSON array (for a fresh DB: `[]`)
+## Verify
+Status:
+```bash
+pnpm dev:status
+```
 
-## 5. Stop
-1. Stop containers:
-   - `docker compose -f infra/docker/docker-compose.yml down`
-2. Stop host runner:
-   - terminate `./scripts/dev-runner-host.sh`
+API health:
+```bash
+curl http://127.0.0.1:4000/api/health
+```
+
+Open web:
+```text
+http://localhost:3000
+```
+
+## Stop
+```bash
+pnpm dev:down
+```
+
+## Tests
+```bash
+./scripts/test-api-e2e.sh
+```
+
+The e2e script creates a temp home and SQLite database under `/tmp`, runs Prisma generate, and executes the API specs on host.
 
 ## Notes
-- If web shows `API upstream unavailable`, check the `api` container logs and the in-container health check in step 4.1.
-- If API returns Prisma `table does not exist`, run migration command in step 3.4.
+- If web shows `API upstream unavailable`, check `./agent-waypoint logs api --home ./.agentwaypoint-dev`.
+- If Prisma client generation is missing, run `corepack pnpm --filter @agentwaypoint/api prisma:generate`.
+- The main web workflow calls `/api/channels/plugins/web/app/*`; direct `/api/projects`, `/api/sessions`, and `/api/turns` routes remain available for core API compatibility.
+- Do not use production wrappers during normal development; they default to `~/.agentwaypoint`.

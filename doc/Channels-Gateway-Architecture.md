@@ -1,62 +1,91 @@
-# Channels Gateway Architecture (Current)
+# Channels Gateway Architecture
+
+Last aligned with implementation: 2026-05-11
 
 ```mermaid
 flowchart TB
-  subgraph Client["Client Layer"]
+  subgraph Client["Client / Provider Layer"]
     FE["Web Frontend"]
+    DC["Discord Gateway"]
   end
 
-  subgraph API["API Process (In-Process Gateway Core)"]
-    WPC["Web Plugin App Controller\n/api/channels/plugins/web/app/*"]
-    GW["ChannelsGatewayService\n(dispatch loop + plugin context)"]
-    WP["WebPluginPlugin\n(bindAllSessions=true)"]
-    CS["ChannelsService\n(bindings + queue ops)"]
+  subgraph API["API Process"]
+    WAC["WebPluginAppController\n/api/channels/plugins/web/app/*"]
+    CC["ChannelsController\n/api/channels/*"]
+    GW["ChannelsGatewayService\nplugin lifecycle + dispatch loop"]
+    WP["WebPlugin\nbindAllSessions=true"]
+    DP["DiscordPlugin\ndiscord.js client + slash commands"]
+    CS["ChannelsService\nintegrations + queue ops"]
     T["TurnsService"]
-    S["SessionsService / ProjectsService"]
-    R["RunnerAdapter\n(http/mock)"]
-    Q[("BotMessage Queue\nPostgres")]
-    E[("Event Store\nPostgres")]
+    S["ProjectsService / SessionsService"]
+    R["RunnerAdapter\nembedded/mock/http"]
+    Q[("BotMessage Queue\nSQLite")]
+    E[("Event Store\nSQLite")]
+    BI[("BotIntegration\nSQLite")]
   end
 
-  FE -->|"HTTP API + SSE"| WPC
-  WPC --> WP
-  WP -->|"PluginContext methods"| GW
+  FE -->|"HTTP API + SSE"| WAC
+  FE -->|"integration management"| CC
+  DC -->|"messages, commands, interactions"| DP
+
+  WAC --> WP
+  WP --> GW
+  DP --> GW
   GW --> S
   GW --> T
   GW --> R
   GW --> CS
+  CS --> Q
+  CS --> BI
+  T --> E
+  T --> Q
 
-  %% Inbound
-  FE -->|"create turn"| WPC
-  WPC -->|"createTurnForSession"| WP
-  WP --> GW
-  GW --> T
-  T --> R
-
-  %% Runner events
-  R -->|"runner events"| T
-  T -->|"appendEvent"| E
-  T -->|"enqueue kind=event / turn_message"| Q
-
-  %% Outbound dispatcher
   GW -->|"pull queued messages"| CS
-  CS --> Q
-  GW -->|"resolve session bindings\n(integrationId + guid/channel/thread)"| CS
   GW -->|"sendMessage(message, dispatchContext)"| WP
-  WP -->|"capture dispatched events\n(per-session latest-turn buffer)"| WP
-  GW -->|"mark sent/failed"| CS
-  CS --> Q
-
-  %% SSE source (new)
-  WPC -->|"turn stream reads dispatched buffer"| WP
+  GW -->|"sendMessage(message, dispatchContext)"| DP
+  WP -->|"per-session dispatched event buffer"| WP
 ```
 
-## Notes
-- Web plugin no longer reads turn SSE directly from `Event` table; stream is fed by gateway-dispatched messages captured by web plugin.
-- Dispatch routing is binding-driven (session bindings + plugin `bindAllSessions` policy), not identifier parsing.
-- Dispatch context includes structured trigger metadata:
-  - `triggerProvider`
-  - `triggerIntegrationId`
-  - `isTriggeredByYou`
-  - binding target fields (`integrationId`, `guid`, `channel`, `thread`)
+## Current Model
 
+- The channel gateway runs inside the API process.
+- Plugins are Nest providers booted by `ChannelsGatewayService`.
+- Implemented plugins:
+  - `WebPlugin`
+  - `DiscordPlugin`
+- `BotMessage` is the active outbound queue table.
+- Runner events are persisted to `Event` and mirrored to `BotMessage(kind=event)`.
+- Dispatch routing is binding-driven:
+  - Web plugin binds all sessions.
+  - Discord bindings live in `BotIntegration.pluginConfig`.
+- No `/api/channels/gateway/*` externalized HTTP controller is implemented.
+
+## Web Plugin Flow
+
+- Web UI calls `/api/channels/plugins/web/app/*`.
+- Controller delegates to `WebPlugin`.
+- `WebPlugin` delegates through `ChannelPluginContext`.
+- The context calls core services for projects, sessions, turns, models, skills, filesystem, and event streams.
+- Web SSE merges persisted DB events with the web plugin's latest-turn in-memory dispatch buffer.
+
+## Discord Plugin Flow
+
+- Discord integrations are stored as `BotIntegration(provider="discord")`.
+- Credentials/config come from `credentialsEncrypted` and `pluginConfig`.
+- The plugin uses `discord.js` Gateway mode.
+- Supported commands include:
+  - `/project`
+  - `/session`
+  - `/cancel`
+  - `/fs`
+- Inbound Discord messages can create turns after trigger/user/guild/channel policy checks.
+- Outbound turn messages/events are dispatched back to Discord through `BotMessage`.
+- Approval requests use Discord select menus where possible.
+
+## Known Limits
+
+- Plugin runtime state is in-memory.
+- Queue retry/backoff is basic compared with the larger future gateway design.
+- Dedicated binding tables are not implemented.
+- Externalized gateway M2M auth is not implemented.
+- Credentials are stored as JSON payloads; envelope encryption is a future hardening task.

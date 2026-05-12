@@ -1337,6 +1337,7 @@ button:disabled {
 }
 
 .sim-approval {
+  position: relative;
   margin-top: 0.8rem;
   border: 1px solid #6d5328;
   border-radius: 0;
@@ -1349,6 +1350,44 @@ button:disabled {
   max-height: 50vh;
   flex: 0 0 auto;
   overflow: hidden;
+}
+
+.sim-approval-countdown {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  color: #f1c870;
+  border-radius: 50%;
+}
+.sim-approval-countdown:hover:not(:disabled) {
+  color: #ffe49a;
+}
+.sim-approval-countdown:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.sim-approval-countdown.is-paused {
+  color: #c0a060;
+}
+.sim-approval-countdown svg {
+  position: absolute;
+  inset: 0;
+}
+.sim-approval-countdown-label {
+  position: relative;
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .sim-approval-body {
@@ -1705,10 +1744,11 @@ button:disabled {
 }
 
 .timeline-list {
-  display: grid;
-  gap: 0.15rem;
+  position: relative;
+  display: block;
+  flex: 1 1 auto;
   max-height: none;
-  height: auto;
+  height: 100%;
   min-height: 0;
   min-width: 0;
   overflow: auto;
@@ -1718,6 +1758,21 @@ button:disabled {
   align-content: start;
   text-size-adjust: 100%;
   -webkit-text-size-adjust: 100%;
+}
+
+.timeline-virtual-spacer {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+}
+
+.timeline-virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  min-width: 0;
+  will-change: transform;
 }
 
 .timeline-empty {

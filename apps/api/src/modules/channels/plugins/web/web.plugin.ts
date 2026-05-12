@@ -157,6 +157,14 @@ export class WebPlugin implements ChannelPlugin {
     return this.requireContext().resolveTurnApprovalForUser(userId, turnId, input);
   }
 
+  async controlApprovalTimerForUser(
+    userId: string,
+    turnId: string,
+    input: { approvalId: string; action: 'pause' | 'resume' },
+  ): Promise<unknown> {
+    return this.requireContext().controlApprovalTimerForUser(userId, turnId, input);
+  }
+
   async listModels(input: { backend?: string | null }): Promise<AvailableModel[]> {
     return this.requireContext().listModels(input);
   }

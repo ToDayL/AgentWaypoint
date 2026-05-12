@@ -8,10 +8,11 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import { AppModule } from '../app.module';
 import { HttpExceptionFilter } from '../common/filters/http-exception.filter';
 import { PrismaService } from './prisma/prisma.service';
-
-if (!process.env.DATABASE_URL) {
-  process.env.DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/agentwaypoint';
-}
+import {
+  restoreEnv,
+  setupSqliteTestDatabase,
+  type SqliteTestDatabase,
+} from '../test-utils/sqlite-test-database';
 
 const TEST_REPO_PATH = process.cwd();
 
@@ -26,11 +27,15 @@ async function sleep(ms: number): Promise<void> {
 describe('API e2e', () => {
   let app: NestFastifyApplication;
   let prisma: PrismaService;
+  let testDatabase: SqliteTestDatabase | null = null;
+  const prevAgentWaypointHome = process.env.AGENTWAYPOINT_HOME;
+  const prevDatabaseUrl = process.env.DATABASE_URL;
   const prevRunnerMode = process.env.RUNNER_MODE;
   const prevRunnerBaseUrl = process.env.RUNNER_BASE_URL;
   const prevDefaultWorkspaceRoot = process.env.DEFAULT_WORKSPACE_ROOT;
 
   beforeAll(async () => {
+    testDatabase = await setupSqliteTestDatabase('agentwaypoint-api-e2e-');
     process.env.RUNNER_MODE = 'mock';
     delete process.env.RUNNER_BASE_URL;
 
@@ -41,11 +46,21 @@ describe('API e2e', () => {
     prisma = app.get(PrismaService);
   });
 
+  function testWorkspacePath(name: string): string {
+    if (!testDatabase) {
+      throw new Error('test database is not initialized');
+    }
+    return path.join(testDatabase.defaultWorkspaceRoot, name);
+  }
+
   afterAll(async () => {
     await app.close();
-    process.env.RUNNER_MODE = prevRunnerMode;
-    process.env.RUNNER_BASE_URL = prevRunnerBaseUrl;
-    process.env.DEFAULT_WORKSPACE_ROOT = prevDefaultWorkspaceRoot;
+    await testDatabase?.cleanup();
+    restoreEnv('AGENTWAYPOINT_HOME', prevAgentWaypointHome);
+    restoreEnv('DATABASE_URL', prevDatabaseUrl);
+    restoreEnv('RUNNER_MODE', prevRunnerMode);
+    restoreEnv('RUNNER_BASE_URL', prevRunnerBaseUrl);
+    restoreEnv('DEFAULT_WORKSPACE_ROOT', prevDefaultWorkspaceRoot);
   });
 
   it('returns 401 when x-user-email header is missing', async () => {
@@ -71,7 +86,7 @@ describe('API e2e', () => {
       headers: { 'x-user-email': email },
       payload: {
         name: 'E2E Project',
-        repoPath: '/workspace/e2e',
+        repoPath: testWorkspacePath('e2e'),
         backend: 'codex',
         backendConfig: {
           model: 'gpt-5-codex',
@@ -1025,6 +1040,26 @@ describe('API e2e', () => {
     });
     expect(approvalResolvedResponse.statusCode).toBe(201);
 
+    const autoReviewResponse = await app.inject({
+      method: 'POST',
+      url: `/internal/runner/turns/${turnId}/events`,
+      payload: {
+        type: 'turn.approval.auto_review',
+        payload: {
+          phase: 'completed',
+          reviewId: 'review-e2e-1',
+          targetItemId: 'item-e2e-1',
+          status: 'approved',
+          riskLevel: 'low',
+          userAuthorization: 'required',
+          rationale: 'Command matches the pending approval.',
+          actionType: 'command_execution',
+          decisionSource: 'auto_review',
+        },
+      },
+    });
+    expect(autoReviewResponse.statusCode).toBe(201);
+
     const resolvedStatusResponse = await app.inject({
       method: 'GET',
       url: `/api/turns/${turnId}`,
@@ -1057,6 +1092,7 @@ describe('API e2e', () => {
     expect(streamResponse.statusCode).toBe(200);
     expect(streamResponse.payload).toContain('event: turn.approval.requested');
     expect(streamResponse.payload).toContain('event: turn.approval.resolved');
+    expect(streamResponse.payload).toContain('event: turn.approval.auto_review');
     expect(streamResponse.payload).toContain('event: turn.completed');
   });
 });

@@ -9,7 +9,7 @@ export const SessionIdParamsSchema = z.object({
 });
 
 const BackendConfigSchema = z.record(z.unknown());
-const ExecutionModeSchema = z.enum(['read-only', 'safe-write', 'yolo']);
+const ExecutionModeSchema = z.enum(['read-only', 'safe-write', 'auto-review', 'yolo']);
 
 export const CreateSessionBodySchema = z
   .object({
@@ -17,6 +17,8 @@ export const CreateSessionBodySchema = z
     backend: z.string().trim().min(1).max(40).optional(),
     repoPath: z.string().trim().min(1).max(512).optional(),
     backendConfig: BackendConfigSchema.optional(),
+    autoApprove: z.boolean().optional(),
+    autoApproveTimeoutSeconds: z.number().int().min(0).max(3600).optional(),
   })
   .superRefine((input, ctx) => {
     if (typeof input.backendConfig === 'undefined') {
@@ -43,6 +45,8 @@ export const UpdateSessionBodySchema = z
   .object({
     title: z.string().trim().min(1).max(200).optional(),
     backendConfig: BackendConfigSchema.optional(),
+    autoApprove: z.boolean().optional(),
+    autoApproveTimeoutSeconds: z.number().int().min(0).max(3600).optional(),
   })
   .strict()
   .superRefine((input, ctx) => {

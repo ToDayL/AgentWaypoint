@@ -6,13 +6,18 @@ import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
 import { CreateSessionBody, ForkSessionBody, UpdateSessionBody } from './sessions.schemas';
 
 const ACTIVE_TURN_STATUSES = new Set(['queued', 'running', 'waiting_approval']);
-const EXECUTION_MODES = new Set(['read-only', 'safe-write', 'yolo']);
+const EXECUTION_MODES = new Set(['read-only', 'safe-write', 'auto-review', 'yolo']);
 
 type SessionRuntimeConfig = {
   backend: string;
   cwd: string | null;
   backendConfig: Record<string, unknown>;
+  autoApprove: boolean;
+  autoApproveTimeoutSeconds: number;
 };
+
+const DEFAULT_AUTO_APPROVE = false;
+const DEFAULT_AUTO_APPROVE_TIMEOUT_SECONDS = 10;
 
 type SessionRuntimeMeta = {
   runtime: SessionRuntimeConfig;
@@ -186,12 +191,21 @@ export class SessionsService {
       override: input.backendConfig,
     });
 
+    const nextAutoApprove =
+      typeof input.autoApprove === 'boolean' ? input.autoApprove : runtime.autoApprove;
+    const nextAutoApproveTimeoutSeconds =
+      typeof input.autoApproveTimeoutSeconds === 'number'
+        ? input.autoApproveTimeoutSeconds
+        : runtime.autoApproveTimeoutSeconds;
+
     const nextMeta = {
       ...rootMeta,
       runtime: {
         backend: runtime.backend,
         cwd: runtime.cwd,
         backendConfig: runtimeBackendConfig,
+        autoApprove: nextAutoApprove,
+        autoApproveTimeoutSeconds: nextAutoApproveTimeoutSeconds,
       },
       override: {
         ...currentOverride,
@@ -478,11 +492,19 @@ function buildSessionRuntimeMeta(
     override.backendConfig = backendConfigOverride;
   }
 
+  const autoApprove = typeof input.autoApprove === 'boolean' ? input.autoApprove : DEFAULT_AUTO_APPROVE;
+  const autoApproveTimeoutSeconds =
+    typeof input.autoApproveTimeoutSeconds === 'number'
+      ? input.autoApproveTimeoutSeconds
+      : DEFAULT_AUTO_APPROVE_TIMEOUT_SECONDS;
+
   return {
     runtime: {
       backend: runtimeBackend,
       cwd: runtimeCwd,
       backendConfig: runtimeBackendConfig,
+      autoApprove,
+      autoApproveTimeoutSeconds,
     },
     override,
   };
@@ -545,8 +567,22 @@ function readSessionRuntimeForExecution(meta: unknown): SessionRuntimeConfig {
     backend,
     cwd,
     backendConfig: normalizedBackendConfig,
+    autoApprove: typeof runtimeRecord.autoApprove === 'boolean' ? runtimeRecord.autoApprove : DEFAULT_AUTO_APPROVE,
+    autoApproveTimeoutSeconds:
+      typeof runtimeRecord.autoApproveTimeoutSeconds === 'number' &&
+      Number.isFinite(runtimeRecord.autoApproveTimeoutSeconds) &&
+      runtimeRecord.autoApproveTimeoutSeconds >= 0
+        ? Math.floor(runtimeRecord.autoApproveTimeoutSeconds)
+        : DEFAULT_AUTO_APPROVE_TIMEOUT_SECONDS,
   };
 }
+
+export {
+  readSessionRuntimeForExecution,
+  DEFAULT_AUTO_APPROVE,
+  DEFAULT_AUTO_APPROVE_TIMEOUT_SECONDS,
+};
+export type { SessionRuntimeConfig };
 
 function toPrismaJson(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;

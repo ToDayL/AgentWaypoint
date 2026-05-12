@@ -14,6 +14,7 @@ import {
   UpdateSessionBodySchema,
 } from '../../../sessions/sessions.schemas';
 import {
+  ApprovalTimerActionSchema,
   CreateTurnBodySchema,
   ResolveTurnApprovalBodySchema,
   StreamTurnQuerySchema,
@@ -56,5 +57,6 @@ export {
   CreateTurnBodySchema,
   SteerTurnBodySchema,
   ResolveTurnApprovalBodySchema,
+  ApprovalTimerActionSchema,
   StreamTurnQuerySchema,
 };

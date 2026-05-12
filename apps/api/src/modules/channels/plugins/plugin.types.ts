@@ -88,6 +88,11 @@ export interface ChannelPluginContext {
   cancelTurnForUser(userId: string, turnId: string): Promise<unknown>;
   steerTurnForUser(userId: string, turnId: string, input: SteerTurnBody): Promise<unknown>;
   resolveTurnApprovalForUser(userId: string, turnId: string, input: ResolveTurnApprovalBody): Promise<unknown>;
+  controlApprovalTimerForUser(
+    userId: string,
+    turnId: string,
+    input: { approvalId: string; action: 'pause' | 'resume' },
+  ): Promise<unknown>;
   updateIntegrationPluginConfigForUser(
     userId: string,
     integrationId: string,
