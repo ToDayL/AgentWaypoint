@@ -1,7 +1,7 @@
 /**
  * Standalone bootstrap entrypoint invoked by the agent-waypoint CLI before
  * starting the API. Runs interactive prompts, writes config.json, materializes
- * the SQLite schema with `prisma db push`, and inserts the admin user.
+ * the SQLite schema with Prisma Migrate, and inserts the admin user.
  */
 import { ensureBootstrap } from './local-bootstrap';
 

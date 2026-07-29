@@ -9,6 +9,7 @@ const CONFIG_FILENAME = 'config.json';
 const DB_FILENAME = 'agentwaypoint.db';
 const DEFAULT_API_PORT = '4000';
 const DEFAULT_WEB_PORT = '3000';
+const BASELINE_MIGRATION_NAME = '20260713000000_initial_schema';
 
 export type AgentWaypointConfig = {
   AGENTWAYPOINT_HOME: string;
@@ -46,11 +47,7 @@ export async function ensureBootstrap(options: BootstrapOptions = {}): Promise<B
   if (fs.existsSync(configPath)) {
     const config = readConfig(configPath);
     applyToEnv(config);
-    // `prisma db push` is idempotent — when the SQLite file already matches
-    // the schema this is a ~150ms no-op. Running it on every start picks up
-    // any schema changes a developer made without requiring them to remember
-    // to re-run the bootstrap.
-    await runPrismaPush(config.DATABASE_URL);
+    await runPrismaMigrations(config.DATABASE_URL);
     await backfillDefaultWorkspaceRoot(config.DEFAULT_WORKSPACE_ROOT);
     return { config, created: false };
   }
@@ -66,7 +63,7 @@ export async function ensureBootstrap(options: BootstrapOptions = {}): Promise<B
 
   const config = await runInteractiveBootstrap(home);
   applyToEnv(config);
-  await runPrismaPush(config.DATABASE_URL);
+  await runPrismaMigrations(config.DATABASE_URL);
   await createAdminUser(home);
   await backfillDefaultWorkspaceRoot(config.DEFAULT_WORKSPACE_ROOT);
   return { config, created: true };
@@ -264,23 +261,75 @@ async function backfillDefaultWorkspaceRoot(defaultWorkspaceRoot: string): Promi
   }
 }
 
-async function runPrismaPush(databaseUrl: string): Promise<void> {
+async function runPrismaMigrations(databaseUrl: string): Promise<void> {
   const repoRoot = findRepoRoot();
   const prismaSchema = path.join(repoRoot, 'apps/api/prisma/schema.prisma');
   if (!fs.existsSync(prismaSchema)) {
     throw new Error(`Cannot find Prisma schema at ${prismaSchema}`);
   }
+
+  const result = runPrismaCommand(repoRoot, databaseUrl, ['migrate', 'deploy']);
+  if (result.status === 0) {
+    writePrismaOutput(result);
+    return;
+  }
+
+  const output = `${result.stdout}\n${result.stderr}`;
+  if (!output.includes('P3005')) {
+    writePrismaOutput(result);
+    throw new Error(`prisma migrate deploy failed with status ${result.status}`);
+  }
+
+  process.stderr.write(
+    `[agent-waypoint] Existing database has no Prisma migration history; ` +
+      `baselining ${BASELINE_MIGRATION_NAME}.\n`,
+  );
+  const baseline = runPrismaCommand(repoRoot, databaseUrl, ['migrate', 'resolve', '--applied', BASELINE_MIGRATION_NAME]);
+  writePrismaOutput(baseline);
+  if (baseline.status !== 0) {
+    throw new Error(`prisma migrate resolve failed with status ${baseline.status}`);
+  }
+
+  const retry = runPrismaCommand(repoRoot, databaseUrl, ['migrate', 'deploy']);
+  writePrismaOutput(retry);
+  if (retry.status !== 0) {
+    throw new Error(`prisma migrate deploy failed with status ${retry.status}`);
+  }
+}
+
+type PrismaCommandResult = {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+};
+
+function runPrismaCommand(repoRoot: string, databaseUrl: string, args: string[]): PrismaCommandResult {
   const result = spawnSync(
     'pnpm',
-    ['--filter', '@agentwaypoint/api', 'exec', 'prisma', 'db', 'push', '--skip-generate'],
+    ['--filter', '@agentwaypoint/api', 'exec', 'prisma', ...args],
     {
       cwd: repoRoot,
-      stdio: 'inherit',
+      encoding: 'utf8',
       env: { ...process.env, DATABASE_URL: databaseUrl },
+      maxBuffer: 10 * 1024 * 1024,
     },
   );
-  if (result.status !== 0) {
-    throw new Error(`prisma db push failed with status ${result.status}`);
+  if (result.error) {
+    throw result.error;
+  }
+  return {
+    status: result.status,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+  };
+}
+
+function writePrismaOutput(result: PrismaCommandResult): void {
+  if (result.stdout) {
+    process.stdout.write(result.stdout);
+  }
+  if (result.stderr) {
+    process.stderr.write(result.stderr);
   }
 }
 

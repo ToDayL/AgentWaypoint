@@ -8,11 +8,7 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import { AppModule } from '../app.module';
 import { HttpExceptionFilter } from '../common/filters/http-exception.filter';
 import { PrismaService } from './prisma/prisma.service';
-import {
-  restoreEnv,
-  setupSqliteTestDatabase,
-  type SqliteTestDatabase,
-} from '../test-utils/sqlite-test-database';
+import { restoreEnv, setupSqliteTestDatabase, type SqliteTestDatabase } from '../test-utils/sqlite-test-database';
 
 const TEST_REPO_PATH = process.cwd();
 
@@ -100,7 +96,7 @@ describe('API e2e', () => {
     expect(project.backend).toBe('codex');
     expect(project.backendConfig).toMatchObject({
       model: 'gpt-5-codex',
-          executionMode: 'safe-write',
+      executionMode: 'safe-write',
     });
     expect(project.ownerUserId).toBeTypeOf('string');
     expect(project.id).toBeTypeOf('string');
@@ -275,7 +271,10 @@ describe('API e2e', () => {
       },
     });
     expect(patchResponse.statusCode).toBe(200);
-    const patched = patchResponse.json() as { title: string; meta?: Record<string, unknown> };
+    const patched = patchResponse.json() as {
+      title: string;
+      meta?: Record<string, unknown>;
+    };
     expect(patched.title).toBe('Config Session Updated');
     expect(patched.meta).toMatchObject({
       runtime: {
@@ -411,7 +410,7 @@ describe('API e2e', () => {
       name: 'Project Config Updated',
       backendConfig: {
         model: 'gpt-5-mini',
-          executionMode: 'safe-write',
+        executionMode: 'safe-write',
       },
     });
 
@@ -584,7 +583,11 @@ describe('API e2e', () => {
       },
     });
     expect(createProjectResponse.statusCode).toBe(201);
-    const project = createProjectResponse.json() as { id: string; backend: string; backendConfig: Record<string, unknown> };
+    const project = createProjectResponse.json() as {
+      id: string;
+      backend: string;
+      backendConfig: Record<string, unknown>;
+    };
     expect(project.backend).toBe('claude');
     expect(project.backendConfig).toMatchObject({
       model: 'claude-sonnet-4',
@@ -861,14 +864,21 @@ describe('API e2e', () => {
       activeTurnId: string | null;
     };
     expect(history.messages.length).toBeGreaterThanOrEqual(2);
-    expect(history.messages[0]).toMatchObject({ role: 'user', content: 'hello from e2e' });
+    expect(history.messages[0]).toMatchObject({
+      role: 'user',
+      content: 'hello from e2e',
+    });
     expect(history.messages.at(-1)).toMatchObject({ role: 'assistant' });
     expect(history.turns).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           id: turnId,
-          requestedBackendConfig: expect.objectContaining({ cwd: TEST_REPO_PATH }),
-          effectiveBackendConfig: expect.objectContaining({ cwd: TEST_REPO_PATH }),
+          requestedBackendConfig: expect.objectContaining({
+            cwd: TEST_REPO_PATH,
+          }),
+          effectiveBackendConfig: expect.objectContaining({
+            cwd: TEST_REPO_PATH,
+          }),
         }),
       ]),
     );
@@ -923,9 +933,7 @@ describe('API e2e', () => {
       headers: { 'x-user-email': email },
     });
     expect(turnStatusResponse.statusCode).toBe(200);
-    expect(['queued', 'running', 'cancelled']).toContain(
-      (turnStatusResponse.json() as { status: string }).status,
-    );
+    expect(['queued', 'running', 'cancelled']).toContain((turnStatusResponse.json() as { status: string }).status);
 
     await sleep(300);
     const streamResponse = await app.inject({
@@ -942,8 +950,308 @@ describe('API e2e', () => {
       headers: { 'x-user-email': email },
     });
     expect(historyResponse.statusCode).toBe(200);
-    const history = historyResponse.json() as { messages: Array<{ role: string; content: string }> };
+    const history = historyResponse.json() as {
+      messages: Array<{ role: string; content: string }>;
+    };
     expect(history.messages.some((message) => message.role === 'assistant' && message.content.length > 0)).toBe(true);
+  });
+
+  it('coalesces high-frequency runner events before persistence', async () => {
+    const email = randomEmail('turn-coalesce');
+
+    const createProjectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: { name: 'Coalesce Project', repoPath: TEST_REPO_PATH },
+    });
+    expect(createProjectResponse.statusCode).toBe(201);
+    const project = createProjectResponse.json();
+
+    const createSessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Coalesce Session' },
+    });
+    expect(createSessionResponse.statusCode).toBe(201);
+    const session = createSessionResponse.json();
+
+    const userMessage = await prisma.message.create({
+      data: {
+        sessionId: session.id,
+        role: 'user',
+        content: 'coalesce runner events',
+      },
+    });
+    const turn = await prisma.turn.create({
+      data: {
+        sessionId: session.id,
+        userMessageId: userMessage.id,
+        status: 'running',
+      },
+      select: { id: true },
+    });
+    const turnId = turn.id;
+
+    for (const text of ['A', 'B', 'C']) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/internal/runner/turns/${turnId}/events`,
+        payload: {
+          type: 'assistant.delta',
+          payload: { text },
+        },
+      });
+      expect(response.statusCode).toBe(201);
+    }
+
+    for (const unifiedDiff of ['diff-v1', 'diff-v2']) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/internal/runner/turns/${turnId}/events`,
+        payload: {
+          type: 'diff.updated',
+          payload: {
+            diffAvailable: true,
+            unifiedDiff,
+          },
+        },
+      });
+      expect(response.statusCode).toBe(201);
+    }
+
+    for (const text of ['out-1', 'out-2']) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/internal/runner/turns/${turnId}/events`,
+        payload: {
+          type: 'tool.output',
+          payload: {
+            itemId: 'tool-1',
+            stream: 'stdout',
+            text,
+          },
+        },
+      });
+      expect(response.statusCode).toBe(201);
+    }
+
+    const completionResponse = await app.inject({
+      method: 'POST',
+      url: `/internal/runner/turns/${turnId}/events`,
+      payload: {
+        type: 'turn.completed',
+        payload: {
+          content: 'fallback content',
+        },
+      },
+    });
+    expect(completionResponse.statusCode).toBe(201);
+
+    const events = await prisma.event.findMany({
+      where: { turnId },
+      orderBy: { seq: 'asc' },
+      select: { type: true, payload: true },
+    });
+    const assistantDeltas = events.filter((event) => event.type === 'assistant.delta');
+    const diffUpdates = events.filter((event) => event.type === 'diff.updated');
+    const toolOutputs = events.filter((event) => event.type === 'tool.output');
+
+    expect(assistantDeltas).toHaveLength(1);
+    expect(assistantDeltas[0]?.payload).toMatchObject({ text: 'ABC' });
+    expect(diffUpdates).toHaveLength(1);
+    expect(diffUpdates[0]?.payload).toMatchObject({ unifiedDiff: 'diff-v2' });
+    expect(toolOutputs).toHaveLength(1);
+    expect(toolOutputs[0]?.payload).toMatchObject({ text: 'out-1out-2' });
+    expect(events.map((event) => event.type)).toContain('turn.completed');
+
+    const historyResponse = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${session.id}/history`,
+      headers: { 'x-user-email': email },
+    });
+    expect(historyResponse.statusCode).toBe(200);
+    const history = historyResponse.json() as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(history.messages.some((message) => message.role === 'assistant' && message.content === 'ABC')).toBe(true);
+  });
+
+  it('persists partial assistant history when a turn fails', async () => {
+    const email = randomEmail('turn-failed-history');
+
+    const createProjectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Failed Turn History Project',
+        repoPath: TEST_REPO_PATH,
+      },
+    });
+    expect(createProjectResponse.statusCode).toBe(201);
+    const project = createProjectResponse.json();
+
+    const createSessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Failed Turn History Session' },
+    });
+    expect(createSessionResponse.statusCode).toBe(201);
+    const session = createSessionResponse.json();
+
+    const userMessage = await prisma.message.create({
+      data: {
+        sessionId: session.id,
+        role: 'user',
+        content: 'preserve the partial response',
+      },
+    });
+    const turn = await prisma.turn.create({
+      data: {
+        sessionId: session.id,
+        userMessageId: userMessage.id,
+        status: 'running',
+      },
+      select: { id: true },
+    });
+
+    for (const text of ['partial ', 'assistant response']) {
+      const deltaResponse = await app.inject({
+        method: 'POST',
+        url: `/internal/runner/turns/${turn.id}/events`,
+        payload: {
+          type: 'assistant.delta',
+          payload: { text },
+        },
+      });
+      expect(deltaResponse.statusCode).toBe(201);
+    }
+
+    const failureResponse = await app.inject({
+      method: 'POST',
+      url: `/internal/runner/turns/${turn.id}/events`,
+      payload: {
+        type: 'turn.failed',
+        payload: {
+          code: 'TEST_FAILURE',
+          message: 'intentional test failure',
+        },
+      },
+    });
+    expect(failureResponse.statusCode).toBe(201);
+
+    const historyResponse = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${session.id}/history`,
+      headers: { 'x-user-email': email },
+    });
+    expect(historyResponse.statusCode).toBe(200);
+    const history = historyResponse.json() as {
+      messages: Array<{ id: string; role: string; content: string }>;
+      turns: Array<{
+        id: string;
+        status: string;
+        assistantMessageId: string | null;
+        failureCode: string | null;
+      }>;
+    };
+    const assistantMessage = history.messages.find((message) => message.role === 'assistant');
+    expect(assistantMessage).toMatchObject({
+      content: 'partial assistant response',
+    });
+    expect(history.turns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: turn.id,
+          status: 'failed',
+          assistantMessageId: assistantMessage?.id,
+          failureCode: 'TEST_FAILURE',
+        }),
+      ]),
+    );
+    expect(
+      await prisma.botMessage.count({
+        where: { sessionId: session.id, kind: 'turn_message' },
+      }),
+    ).toBe(1);
+  });
+
+  it('persists fallback assistant history when a failed turn has no delta events', async () => {
+    const email = randomEmail('turn-failed-fallback-history');
+
+    const createProjectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Failed Turn Fallback History Project',
+        repoPath: TEST_REPO_PATH,
+      },
+    });
+    expect(createProjectResponse.statusCode).toBe(201);
+    const project = createProjectResponse.json();
+
+    const createSessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Failed Turn Fallback History Session' },
+    });
+    expect(createSessionResponse.statusCode).toBe(201);
+    const session = createSessionResponse.json();
+
+    const userMessage = await prisma.message.create({
+      data: {
+        sessionId: session.id,
+        role: 'user',
+        content: 'preserve fallback response',
+      },
+    });
+    const turn = await prisma.turn.create({
+      data: {
+        sessionId: session.id,
+        userMessageId: userMessage.id,
+        status: 'running',
+      },
+      select: { id: true },
+    });
+
+    const failureResponse = await app.inject({
+      method: 'POST',
+      url: `/internal/runner/turns/${turn.id}/events`,
+      payload: {
+        type: 'turn.failed',
+        payload: {
+          code: 'TEST_FAILURE',
+          message: 'intentional fallback test failure',
+          content: 'assistant response recovered from completed item',
+        },
+      },
+    });
+    expect(failureResponse.statusCode).toBe(201);
+
+    const historyResponse = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${session.id}/history`,
+      headers: { 'x-user-email': email },
+    });
+    expect(historyResponse.statusCode).toBe(200);
+    expect(historyResponse.json()).toMatchObject({
+      messages: [
+        { role: 'user', content: 'preserve fallback response' },
+        { role: 'assistant', content: 'assistant response recovered from completed item' },
+      ],
+      turns: [
+        {
+          id: turn.id,
+          status: 'failed',
+          failureCode: 'TEST_FAILURE',
+        },
+      ],
+    });
   });
 
   it('persists approval events and exposes pending approval in turn status', async () => {

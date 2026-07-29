@@ -218,7 +218,7 @@ export interface RunnerAdapter {
     onEvent: (event: RunnerStreamEvent) => Promise<void>,
   ): Promise<void>;
   steerTurn(input: SteerTurnInput): Promise<void>;
-  cancelTurn(input: CancelTurnInput): Promise<void>;
+  cancelTurn(input: CancelTurnInput): Promise<boolean>;
   resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void>;
   readCodexRateLimits(): Promise<CodexRateLimits>;
   getHealth(): Promise<RunnerHealth>;

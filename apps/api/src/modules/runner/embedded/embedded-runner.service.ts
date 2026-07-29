@@ -231,18 +231,24 @@ export class EmbeddedRunnerService implements OnModuleInit {
       return;
     }
     if (turn.backend !== 'codex') {
-      await this.appendTurnEvent(turn.turnId, 'assistant.delta', { text: `\n[steer] ${input.content}` });
+      await this.appendTurnEvent(turn.turnId, 'assistant.delta', {
+        text: `\n[steer] ${input.content}`,
+      });
       return;
     }
-    await this.codexBackend.steerTurn({ turnId: input.turnId, content: input.content });
+    await this.codexBackend.steerTurn({
+      turnId: input.turnId,
+      content: input.content,
+    });
   }
 
-  async cancelTurn(input: CancelTurnInput): Promise<void> {
+  async cancelTurn(input: CancelTurnInput): Promise<boolean> {
     const turn = this.activeTurns.get(input.turnId);
     if (!turn) {
-      return;
+      return false;
     }
     await this.cancelActiveTurn(turn, { emitCancelEvent: true });
+    return true;
   }
 
   async resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void> {
@@ -379,15 +385,11 @@ export class EmbeddedRunnerService implements OnModuleInit {
     }
 
     if (requestedBackend === 'codex') {
-      return this.isBackendSupported('codex')
-        ? this.codexBackend.listSkills(cwdHint ?? this.codexDefaultCwd)
-        : [];
+      return this.isBackendSupported('codex') ? this.codexBackend.listSkills(cwdHint ?? this.codexDefaultCwd) : [];
     }
 
     if (requestedBackend === 'claude') {
-      return this.isBackendSupported('claude')
-        ? this.claudeBackend.listSkills(cwdHint ?? process.cwd())
-        : [];
+      return this.isBackendSupported('claude') ? this.claudeBackend.listSkills(cwdHint ?? process.cwd()) : [];
     }
 
     if (requestedBackend === 'mock') {
@@ -426,11 +428,7 @@ export class EmbeddedRunnerService implements OnModuleInit {
   }
 
   async listWorkspaceTree(input: WorkspaceTreeInput): Promise<WorkspaceTreeEntry[]> {
-    return this.filesystemBackend.listWorkspaceTree(
-      input.path,
-      input.limit ?? 200,
-      input.includeHidden === true,
-    );
+    return this.filesystemBackend.listWorkspaceTree(input.path, input.limit ?? 200, input.includeHidden === true);
   }
 
   async readWorkspaceFile(input: WorkspaceFileInput): Promise<WorkspaceFileResult> {
@@ -491,21 +489,31 @@ export class EmbeddedRunnerService implements OnModuleInit {
     const responseContent = `Echo: ${turn.content}`;
     const chunks = chunkText(responseContent, 12);
     chunks.forEach((chunk, index) => {
-      const timer = setTimeout(() => {
-        if (!this.activeTurns.has(turn.turnId)) {
-          return;
-        }
-        void this.appendTurnEvent(turn.turnId, 'assistant.delta', { text: chunk });
-      }, 120 + index * 120);
+      const timer = setTimeout(
+        () => {
+          if (!this.activeTurns.has(turn.turnId)) {
+            return;
+          }
+          void this.appendTurnEvent(turn.turnId, 'assistant.delta', {
+            text: chunk,
+          });
+        },
+        120 + index * 120,
+      );
       turn.timers.push(timer);
     });
 
-    const finalizeTimer = setTimeout(() => {
-      if (!this.activeTurns.has(turn.turnId)) {
-        return;
-      }
-      void this.finalizeTurn(turn.turnId, 'turn.completed', { content: responseContent });
-    }, 200 + chunks.length * 120);
+    const finalizeTimer = setTimeout(
+      () => {
+        if (!this.activeTurns.has(turn.turnId)) {
+          return;
+        }
+        void this.finalizeTurn(turn.turnId, 'turn.completed', {
+          content: responseContent,
+        });
+      },
+      200 + chunks.length * 120,
+    );
     turn.timers.push(finalizeTimer);
   }
 
@@ -586,11 +594,7 @@ export class EmbeddedRunnerService implements OnModuleInit {
     await this.finalizeTurn(turnId, 'turn.failed', { message });
   }
 
-  private async finalizeTurn(
-    turnId: string,
-    type: RunnerEventType,
-    payload: Record<string, unknown>,
-  ): Promise<void> {
+  private async finalizeTurn(turnId: string, type: RunnerEventType, payload: Record<string, unknown>): Promise<void> {
     const turn = this.activeTurns.get(turnId);
     if (!turn || turn.finalized) {
       return;
@@ -727,9 +731,12 @@ function parseSupportedBackends(value: string | undefined): RunnerBackend[] {
   return unique.length > 0 ? unique : [...ALL_RUNNER_BACKENDS];
 }
 
-async function parseWorkspaceUpload(
-  input: WorkspaceUploadInput,
-): Promise<{ workspacePath: string; fileName: string; mimeType: string; content: Buffer }> {
+async function parseWorkspaceUpload(input: WorkspaceUploadInput): Promise<{
+  workspacePath: string;
+  fileName: string;
+  mimeType: string;
+  content: Buffer;
+}> {
   const contentType = input.contentType;
   if (typeof contentType !== 'string' || !contentType.toLowerCase().includes('multipart/form-data')) {
     throw new Error('content-type must be multipart/form-data');

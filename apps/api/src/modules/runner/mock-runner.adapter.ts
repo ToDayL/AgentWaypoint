@@ -158,13 +158,13 @@ export class MockRunnerAdapter implements RunnerAdapter {
     return;
   }
 
-  async cancelTurn(input: CancelTurnInput): Promise<void> {
+  async cancelTurn(input: CancelTurnInput): Promise<boolean> {
     const turn = await this.prisma.turn.findUnique({
       where: { id: input.turnId },
       select: { status: true, sessionId: true },
     });
     if (!turn || TERMINAL_STATUSES.has(turn.status)) {
-      return;
+      return false;
     }
 
     this.clearTurnTimers(input.turnId);
@@ -192,6 +192,7 @@ export class MockRunnerAdapter implements RunnerAdapter {
       });
     });
     await this.appendEvent(input.turnId, 'turn.cancelled', {});
+    return true;
   }
 
   async steerTurn(input: SteerTurnInput): Promise<void> {
@@ -203,7 +204,9 @@ export class MockRunnerAdapter implements RunnerAdapter {
       return;
     }
 
-    await this.appendEvent(input.turnId, 'assistant.delta', { text: `\n[steer] ${input.content}` });
+    await this.appendEvent(input.turnId, 'assistant.delta', {
+      text: `\n[steer] ${input.content}`,
+    });
   }
 
   async resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void> {
@@ -365,7 +368,10 @@ export class MockRunnerAdapter implements RunnerAdapter {
 
     let entries;
     try {
-      entries = await readdir(scanDirectory, { withFileTypes: true, encoding: 'utf8' });
+      entries = await readdir(scanDirectory, {
+        withFileTypes: true,
+        encoding: 'utf8',
+      });
     } catch {
       return [];
     }
@@ -381,7 +387,10 @@ export class MockRunnerAdapter implements RunnerAdapter {
     const absolutePath = path.resolve(expandHomeToken(input.path.trim()));
     const limit = Number.isFinite(input.limit) ? Math.min(Math.max(Math.trunc(input.limit ?? 200), 1), 500) : 200;
     const includeHidden = input.includeHidden === true;
-    const entries = await readdir(absolutePath, { withFileTypes: true, encoding: 'utf8' });
+    const entries = await readdir(absolutePath, {
+      withFileTypes: true,
+      encoding: 'utf8',
+    });
     const resolvedEntries = await Promise.all(
       entries
         .filter((entry) => includeHidden || !entry.name.startsWith('.'))
@@ -607,11 +616,14 @@ export class MockRunnerAdapter implements RunnerAdapter {
     const scheduled: ReturnType<typeof setTimeout>[] = [];
 
     chunks.forEach((chunk, index) => {
-      const timer = setTimeout(() => {
-        void this.handleDelta(turnId, chunk).catch((error: unknown) => {
-          this.logError('Failed to emit assistant delta event', error);
-        });
-      }, 120 + index * 120);
+      const timer = setTimeout(
+        () => {
+          void this.handleDelta(turnId, chunk).catch((error: unknown) => {
+            this.logError('Failed to emit assistant delta event', error);
+          });
+        },
+        120 + index * 120,
+      );
       scheduled.push(timer);
     });
 
@@ -635,7 +647,10 @@ export class MockRunnerAdapter implements RunnerAdapter {
   }
 }
 
-function mapExecutionModeToRuntime(executionMode: string): { sandbox: string; approvalPolicy: string } {
+function mapExecutionModeToRuntime(executionMode: string): {
+  sandbox: string;
+  approvalPolicy: string;
+} {
   if (executionMode === 'read-only') {
     return { sandbox: 'read-only', approvalPolicy: 'on-request' };
   }
@@ -697,7 +712,12 @@ function expandHomeToken(inputPath: string): string {
     return inputPath;
   }
 
-  if (inputPath === '~' || inputPath.startsWith(`~${path.sep}`) || inputPath.startsWith('~/') || inputPath.startsWith('~\\')) {
+  if (
+    inputPath === '~' ||
+    inputPath.startsWith(`~${path.sep}`) ||
+    inputPath.startsWith('~/') ||
+    inputPath.startsWith('~\\')
+  ) {
     return path.join(homePath, inputPath.slice(1));
   }
   if (
