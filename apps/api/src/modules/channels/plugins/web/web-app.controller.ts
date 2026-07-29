@@ -6,6 +6,7 @@ import {
   Get,
   Headers,
   Inject,
+  Logger,
   Param,
   Patch,
   Post,
@@ -52,10 +53,13 @@ type RequestLike = {
 
 type ReplyLike = {
   raw: {
+    destroyed?: boolean;
+    writableEnded?: boolean;
     setHeader: (name: string, value: string) => void;
     write: (chunk: string) => void;
     end: (payload?: string | Buffer) => void;
     flushHeaders?: () => void;
+    once: (event: 'close' | 'error', handler: () => void) => void;
   };
 };
 
@@ -67,6 +71,8 @@ type UploadRequestLike = {
 @Controller('/api/channels/plugins/web/app')
 @UseGuards(AuthGuard)
 export class WebPluginAppController {
+  private readonly logger = new Logger(WebPluginAppController.name);
+
   constructor(@Inject(WebPlugin) private readonly webPlugin: WebPlugin) {}
 
   @Get('models')
@@ -347,14 +353,41 @@ export class WebPluginAppController {
       reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
 
-    const closeStream = (): void => {
+    const writeStreamError = (error: unknown): void => {
       if (closed) {
         return;
+      }
+      const payload = {
+        turnId: id,
+        cursor,
+        code: 'STREAM_POLL_FAILED',
+        message: 'Turn stream interrupted. Falling back to status polling.',
+      };
+      this.logger.error(
+        `Web turn stream poll failed for turn ${id} at cursor ${cursor}: ${formatErrorMessage(error)}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      reply.raw.write('event: stream.error\n');
+      reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    const cleanupStream = (): boolean => {
+      if (closed) {
+        return false;
       }
       closed = true;
       clearInterval(heartbeatTimer);
       clearInterval(pollTimer);
-      reply.raw.end();
+      return true;
+    };
+
+    const closeStream = (): void => {
+      if (!cleanupStream()) {
+        return;
+      }
+      if (!reply.raw.writableEnded && !reply.raw.destroyed) {
+        reply.raw.end();
+      }
     };
 
     const heartbeatTimer = setInterval(() => {
@@ -388,6 +421,9 @@ export class WebPluginAppController {
         if (terminalIdlePolls >= 2) {
           closeStream();
         }
+      } catch (error: unknown) {
+        writeStreamError(error);
+        closeStream();
       } finally {
         inFlight = false;
       }
@@ -398,7 +434,9 @@ export class WebPluginAppController {
     }, 300);
     void poll();
 
-    request.raw.on('close', closeStream);
+    void request;
+    reply.raw.once('close', cleanupStream);
+    reply.raw.once('error', cleanupStream);
   }
 }
 
@@ -414,4 +452,8 @@ function mergeBySeq(
     bySeq.set(event.seq, event);
   }
   return Array.from(bySeq.values()).sort((a, b) => a.seq - b.seq);
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'unknown stream error';
 }

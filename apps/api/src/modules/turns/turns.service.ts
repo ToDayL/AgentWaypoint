@@ -1,4 +1,12 @@
-import { ConflictException, Inject, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
+import {
+  ConflictException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RUNNER_ADAPTER, RunnerAdapter, RunnerStreamEvent } from '../runner/runner.types';
@@ -56,22 +64,70 @@ type GatewayCreateTurnInput = {
   triggerMessageId?: string | null;
 };
 
+type PendingCoalescedEvent = {
+  turnId: string;
+  type: RunnerEventType;
+  payload: Prisma.InputJsonValue;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+const COALESCED_EVENT_FLUSH_MS = 250;
+const RUNNER_CONSUMER_RETRY_MS = 1_000;
+const RUNNER_RECONCILE_INTERVAL_MS = 15_000;
+const LAST_WRITE_WINS_EVENT_TYPES = new Set<RunnerEventType>([
+  'diff.updated',
+  'plan.updated',
+  'thread.token_usage.updated',
+]);
+const TEXT_COALESCED_EVENT_TYPES = new Set<RunnerEventType>(['assistant.delta', 'reasoning.delta', 'tool.output']);
+
 @Injectable()
-export class TurnsService implements OnModuleInit {
+export class TurnsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TurnsService.name);
   private readonly runnerConsumers = new Map<string, Promise<void>>();
   private readonly reasoningOpenTurns = new Set<string>();
+  private readonly pendingCoalescedEvents = new Map<string, PendingCoalescedEvent>();
+  private readonly activeCoalescedFlushesByTurn = new Map<string, Set<Promise<void>>>();
+  private readonly eventWriteQueues = new Map<string, Promise<void>>();
+  private readonly runnerEventCursors = new Map<string, number>();
+  private readonly runnerConsumerRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private runnerReconcileTimer: ReturnType<typeof setInterval> | null = null;
+  private runnerReconcileInProgress = false;
 
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(RUNNER_ADAPTER) private readonly runnerAdapter: RunnerAdapter,
     @Inject(SettingsService) private readonly settingsService: SettingsService,
-    @Inject(QueueSignalService) private readonly queueSignalService: QueueSignalService,
-    @Inject(ApprovalQueueService) private readonly approvalQueue: ApprovalQueueService,
+    @Inject(QueueSignalService)
+    private readonly queueSignalService: QueueSignalService,
+    @Inject(ApprovalQueueService)
+    private readonly approvalQueue: ApprovalQueueService,
   ) {}
 
   async onModuleInit(): Promise<void> {
     await this.reconcileInFlightTurnsOnStartup();
+    this.runnerReconcileTimer = setInterval(() => {
+      void this.reconcileInFlightTurns().catch((error: unknown) => {
+        this.logger.error(
+          `Periodic in-flight turn reconciliation failed: ${formatErrorMessage(error)}`,
+          error instanceof Error ? error.stack : undefined,
+        );
+      });
+    }, RUNNER_RECONCILE_INTERVAL_MS);
+    this.runnerReconcileTimer.unref?.();
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    if (this.runnerReconcileTimer) {
+      clearInterval(this.runnerReconcileTimer);
+      this.runnerReconcileTimer = null;
+    }
+    for (const timer of this.runnerConsumerRetryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.runnerConsumerRetryTimers.clear();
+    await this.flushAllPendingCoalescedEvents();
+    await Promise.allSettled(this.eventWriteQueues.values());
   }
 
   async createTurnForSession(userId: string, sessionId: string, input: CreateTurnBody) {
@@ -95,10 +151,7 @@ export class TurnsService implements OnModuleInit {
     return this.createTurnWithResolvedSession(session, input);
   }
 
-  async createTurnForGateway(
-    sessionId: string,
-    input: GatewayCreateTurnInput,
-  ) {
+  async createTurnForGateway(sessionId: string, input: GatewayCreateTurnInput) {
     const session = await this.prisma.session.findUnique({
       where: { id: sessionId },
       select: {
@@ -137,7 +190,9 @@ export class TurnsService implements OnModuleInit {
       select: { id: true },
     });
     if (activeTurn) {
-      throw new ConflictException({ message: 'An active turn already exists for this session' });
+      throw new ConflictException({
+        message: 'An active turn already exists for this session',
+      });
     }
 
     const created = await this.prisma.$transaction(async (tx) => {
@@ -213,8 +268,28 @@ export class TurnsService implements OnModuleInit {
   }
 
   async cancelTurnForUser(userId: string, turnId: string) {
-    await this.getTurnForUser(userId, turnId);
-    await this.runnerAdapter.cancelTurn({ turnId });
+    const turn = await this.getTurnForUser(userId, turnId);
+    if (!ACTIVE_TURN_STATUSES.includes(turn.status)) {
+      return this.prisma.turn.findUnique({
+        where: { id: turnId },
+      });
+    }
+
+    let cancelledByRunner = false;
+    try {
+      cancelledByRunner = await this.runnerAdapter.cancelTurn({ turnId });
+    } catch (error: unknown) {
+      if (!isRunnerTurnMissingError(error)) {
+        throw error;
+      }
+    }
+
+    if (!cancelledByRunner) {
+      await this.ingestRunnerEvent(turnId, 'turn.cancelled', {
+        code: 'ORPHANED_TURN_CANCELLED',
+        message: 'The runner no longer had this active turn; AgentWaypoint closed the stale turn.',
+      });
+    }
 
     return this.prisma.turn.findUnique({
       where: { id: turnId },
@@ -229,7 +304,9 @@ export class TurnsService implements OnModuleInit {
 
     const turn = await this.getTurnForUser(userId, turnId);
     if (!STEERABLE_TURN_STATUSES.includes(turn.status)) {
-      throw new ConflictException({ message: 'Only running or queued turns can be steered' });
+      throw new ConflictException({
+        message: 'Only running or queued turns can be steered',
+      });
     }
 
     await this.prisma.message.create({
@@ -240,10 +317,30 @@ export class TurnsService implements OnModuleInit {
       },
     });
 
-    await this.runnerAdapter.steerTurn({
-      turnId,
-      content: input.content,
-    });
+    try {
+      await this.runnerAdapter.steerTurn({
+        turnId,
+        content: input.content,
+      });
+    } catch (error: unknown) {
+      if (!isRunnerTurnMissingError(error)) {
+        throw error;
+      }
+      const message = 'The runner no longer has this turn; AgentWaypoint closed the stale running record.';
+      await this.failTurn(
+        turnId,
+        turn.status,
+        'ORPHANED_TURN',
+        message,
+        this.normalizePayload({
+          code: 'ORPHANED_TURN',
+          message,
+        }),
+      );
+      throw new ConflictException({
+        message: 'This turn is no longer active. Its stale running state has been repaired.',
+      });
+    }
 
     return this.getTurnStatusForUser(userId, turnId);
   }
@@ -453,9 +550,14 @@ export class TurnsService implements OnModuleInit {
         }
         const text = payload.text;
         if (typeof text !== 'string' || text.length === 0) {
-          throw new ConflictException({ message: 'assistant.delta requires payload.text' });
+          throw new ConflictException({
+            message: 'assistant.delta requires payload.text',
+          });
         }
-        await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text }));
+        const normalizedPayload = this.normalizePayload({ text });
+        if (!this.coalesceEvent(turnId, 'assistant.delta', normalizedPayload)) {
+          await this.appendEvent(turnId, 'assistant.delta', normalizedPayload);
+        }
         return;
       }
       case 'reasoning.delta': {
@@ -467,8 +569,17 @@ export class TurnsService implements OnModuleInit {
           return;
         }
         await this.openReasoningBlockIfNeeded(turnId);
-        await this.appendEvent(turnId, 'reasoning.delta', this.normalizePayload({ delta }));
-        await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: delta, isReasoning: true }));
+        const reasoningPayload = this.normalizePayload({ delta });
+        const assistantPayload = this.normalizePayload({
+          text: delta,
+          isReasoning: true,
+        });
+        if (!this.coalesceEvent(turnId, 'reasoning.delta', reasoningPayload)) {
+          await this.appendEvent(turnId, 'reasoning.delta', reasoningPayload);
+        }
+        if (!this.coalesceEvent(turnId, 'assistant.delta', assistantPayload)) {
+          await this.appendEvent(turnId, 'assistant.delta', assistantPayload);
+        }
         return;
       }
       case 'turn.approval.requested': {
@@ -478,10 +589,13 @@ export class TurnsService implements OnModuleInit {
         const requestId = typeof payload.requestId === 'string' ? payload.requestId.trim() : '';
         const kind = typeof payload.kind === 'string' ? payload.kind.trim() : '';
         if (!requestId || !kind) {
-          throw new ConflictException({ message: 'turn.approval.requested requires payload.requestId and payload.kind' });
+          throw new ConflictException({
+            message: 'turn.approval.requested requires payload.requestId and payload.kind',
+          });
         }
 
         const normalizedPayload = this.normalizePayload(payload);
+        await this.flushPendingCoalescedEventsForTurn(turnId);
         // Hand off to the approval queue, which inserts the row as 'queued',
         // promotes it to 'pending' (and emits the user-visible event) only
         // when no other approval is in flight for this turn, and arms an
@@ -501,10 +615,13 @@ export class TurnsService implements OnModuleInit {
         const requestId = typeof payload.requestId === 'string' ? payload.requestId.trim() : '';
         const decision = typeof payload.decision === 'string' ? payload.decision.trim() : '';
         if (!requestId || !decision) {
-          throw new ConflictException({ message: 'turn.approval.resolved requires payload.requestId and payload.decision' });
+          throw new ConflictException({
+            message: 'turn.approval.resolved requires payload.requestId and payload.decision',
+          });
         }
 
         const normalizedPayload = this.normalizePayload(payload);
+        await this.flushPendingCoalescedEventsForTurn(turnId);
         await this.prisma.$transaction(async (tx) => {
           await tx.turnApproval.updateMany({
             where: { turnId, requestId, status: 'pending' },
@@ -538,12 +655,22 @@ export class TurnsService implements OnModuleInit {
       }
       case 'plan.updated':
       case 'diff.updated':
+      case 'tool.output': {
+        if (TERMINAL_STATUSES.includes(turn.status)) {
+          return;
+        }
+        const normalizedPayload = this.normalizePayload(payload);
+        if (!this.coalesceEvent(turnId, type, normalizedPayload)) {
+          await this.appendEvent(turnId, type, normalizedPayload);
+        }
+        return;
+      }
       case 'tool.started':
-      case 'tool.output':
       case 'tool.completed': {
         if (TERMINAL_STATUSES.includes(turn.status)) {
           return;
         }
+        await this.flushPendingCoalescedEventsForTurn(turnId);
         await this.appendEvent(turnId, type, this.normalizePayload(payload));
         return;
       }
@@ -553,7 +680,10 @@ export class TurnsService implements OnModuleInit {
         const windowTokens = readFiniteNumber(payload.modelContextWindow);
         const hasAnyUsageSignal = ratio !== null || remainingTokens !== null || windowTokens !== null;
         if (!hasAnyUsageSignal) {
-          await this.appendEvent(turnId, type, this.normalizePayload(payload));
+          const normalizedPayload = this.normalizePayload(payload);
+          if (!this.coalesceEvent(turnId, type, normalizedPayload)) {
+            await this.appendEvent(turnId, type, normalizedPayload);
+          }
           return;
         }
         await this.prisma.turn.update({
@@ -565,7 +695,10 @@ export class TurnsService implements OnModuleInit {
             contextUpdatedAt: new Date(),
           },
         });
-        await this.appendEvent(turnId, type, this.normalizePayload(payload));
+        const normalizedPayload = this.normalizePayload(payload);
+        if (!this.coalesceEvent(turnId, type, normalizedPayload)) {
+          await this.appendEvent(turnId, type, normalizedPayload);
+        }
         return;
       }
       case 'turn.completed': {
@@ -574,18 +707,22 @@ export class TurnsService implements OnModuleInit {
         }
         const content = payload.content;
         if (typeof content !== 'string') {
-          throw new ConflictException({ message: 'turn.completed requires payload.content' });
+          throw new ConflictException({
+            message: 'turn.completed requires payload.content',
+          });
         }
 
+        await this.flushPendingCoalescedEventsForTurn(turnId);
+        const assistantContentFromEvents = await this.collectAssistantDeltaContent(turnId);
+        const assistantContent =
+          assistantContentFromEvents.full.length > 0
+            ? assistantContentFromEvents.nonReasoning.length > 0
+              ? assistantContentFromEvents.full
+              : `${assistantContentFromEvents.full}${content}`
+            : content;
+        const normalizedAssistantContent = ensureBalancedThinkTags(assistantContent);
+
         await this.prisma.$transaction(async (tx) => {
-          const assistantContentFromEvents = await this.collectAssistantDeltaContent(tx, turnId);
-          const assistantContent =
-            assistantContentFromEvents.full.length > 0
-              ? assistantContentFromEvents.nonReasoning.length > 0
-                ? assistantContentFromEvents.full
-                : `${assistantContentFromEvents.full}${content}`
-              : content;
-          const normalizedAssistantContent = ensureBalancedThinkTags(assistantContent);
           const assistantMessage = await tx.message.create({
             data: {
               sessionId: turn.sessionId,
@@ -629,8 +766,15 @@ export class TurnsService implements OnModuleInit {
         if (TERMINAL_STATUSES.includes(turn.status)) {
           return;
         }
+        await this.flushPendingCoalescedEventsForTurn(turnId);
+        const assistantContent = ensureBalancedThinkTags(
+          resolveAssistantContent(
+            await this.collectAssistantDeltaContent(turnId),
+            typeof payload.content === 'string' ? payload.content : '',
+          ),
+        );
+
         await this.prisma.$transaction(async (tx) => {
-          const assistantContent = ensureBalancedThinkTags((await this.collectAssistantDeltaContent(tx, turnId)).full);
           const assistantMessage =
             assistantContent.length > 0
               ? await tx.message.create({
@@ -678,12 +822,20 @@ export class TurnsService implements OnModuleInit {
         if (TERMINAL_STATUSES.includes(turn.status)) {
           return;
         }
-        const code = typeof payload.code === 'string' && payload.code.trim().length > 0 ? payload.code.trim() : 'RUNNER_FAILED';
+        const code =
+          typeof payload.code === 'string' && payload.code.trim().length > 0 ? payload.code.trim() : 'RUNNER_FAILED';
         const message =
           typeof payload.message === 'string' && payload.message.trim().length > 0
             ? payload.message.trim()
             : 'Runner reported a failure';
-        await this.failTurn(turnId, turn.status, code, message, this.normalizePayload(payload));
+        await this.failTurn(
+          turnId,
+          turn.status,
+          code,
+          message,
+          this.normalizePayload(payload),
+          typeof payload.content === 'string' ? payload.content : '',
+        );
         return;
       }
       default:
@@ -691,7 +843,150 @@ export class TurnsService implements OnModuleInit {
     }
   }
 
+  private coalesceEvent(turnId: string, type: RunnerEventType, payload: Prisma.InputJsonValue): boolean {
+    if (LAST_WRITE_WINS_EVENT_TYPES.has(type)) {
+      this.upsertCoalescedEvent(`${turnId}:${type}`, turnId, type, payload);
+      return true;
+    }
+
+    if (!TEXT_COALESCED_EVENT_TYPES.has(type)) {
+      return false;
+    }
+
+    const textField = getCoalescedTextField(type, payload);
+    if (!textField) {
+      return false;
+    }
+
+    const key = buildTextCoalescingKey(turnId, type, payload, textField);
+    const existing = this.pendingCoalescedEvents.get(key);
+    if (existing) {
+      existing.payload = mergeCoalescedTextPayload(existing.payload, payload, textField);
+      return true;
+    }
+
+    this.upsertCoalescedEvent(key, turnId, type, payload);
+    return true;
+  }
+
+  private upsertCoalescedEvent(
+    key: string,
+    turnId: string,
+    type: RunnerEventType,
+    payload: Prisma.InputJsonValue,
+  ): void {
+    const existing = this.pendingCoalescedEvents.get(key);
+    if (existing) {
+      existing.payload = payload;
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      void this.flushPendingCoalescedEvent(key).catch((error: unknown) => {
+        this.logger.error(
+          `Failed to flush coalesced ${type} event for turn ${turnId}: ${formatErrorMessage(error)}`,
+          error instanceof Error ? error.stack : undefined,
+        );
+      });
+    }, COALESCED_EVENT_FLUSH_MS);
+    timer.unref?.();
+    this.pendingCoalescedEvents.set(key, {
+      turnId,
+      type,
+      payload,
+      timer,
+    });
+  }
+
+  private async flushPendingCoalescedEvent(key: string): Promise<void> {
+    const pending = this.pendingCoalescedEvents.get(key);
+    if (!pending) {
+      return;
+    }
+
+    this.pendingCoalescedEvents.delete(key);
+    clearTimeout(pending.timer);
+
+    const flush = this.appendEvent(pending.turnId, pending.type, pending.payload);
+    this.trackCoalescedFlush(pending.turnId, flush);
+    await flush;
+  }
+
+  private trackCoalescedFlush(turnId: string, flush: Promise<void>): void {
+    let active = this.activeCoalescedFlushesByTurn.get(turnId);
+    if (!active) {
+      active = new Set();
+      this.activeCoalescedFlushesByTurn.set(turnId, active);
+    }
+    active.add(flush);
+    void flush
+      .finally(() => {
+        const current = this.activeCoalescedFlushesByTurn.get(turnId);
+        current?.delete(flush);
+        if (current?.size === 0) {
+          this.activeCoalescedFlushesByTurn.delete(turnId);
+        }
+      })
+      .catch(() => {
+        // The original flush promise is awaited by the caller; this branch only
+        // prevents the cleanup promise from surfacing as an unhandled rejection.
+      });
+  }
+
+  private async flushPendingCoalescedEventsForTurn(turnId: string): Promise<void> {
+    while (true) {
+      const keys = Array.from(this.pendingCoalescedEvents.entries())
+        .filter(([, pending]) => pending.turnId === turnId)
+        .map(([key]) => key);
+
+      if (keys.length > 0) {
+        for (const key of keys) {
+          await this.flushPendingCoalescedEvent(key);
+        }
+        continue;
+      }
+
+      const active = Array.from(this.activeCoalescedFlushesByTurn.get(turnId) ?? []);
+      if (active.length === 0) {
+        return;
+      }
+      await Promise.all(active);
+    }
+  }
+
+  private async flushAllPendingCoalescedEvents(): Promise<void> {
+    while (this.pendingCoalescedEvents.size > 0) {
+      const keys = Array.from(this.pendingCoalescedEvents.keys());
+      for (const key of keys) {
+        await this.flushPendingCoalescedEvent(key);
+      }
+    }
+
+    const active = Array.from(this.activeCoalescedFlushesByTurn.values()).flatMap((flushes) => Array.from(flushes));
+    if (active.length > 0) {
+      await Promise.all(active);
+    }
+  }
+
   private async appendEvent(turnId: string, type: RunnerEventType, payload: Prisma.InputJsonValue): Promise<void> {
+    const previous = this.eventWriteQueues.get(turnId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => {
+        // Preserve queue progress after a failed write; the failing caller still
+        // observes its original rejection.
+      })
+      .then(() => this.appendEventNow(turnId, type, payload));
+    this.eventWriteQueues.set(turnId, next);
+    try {
+      await next;
+    } finally {
+      if (this.eventWriteQueues.get(turnId) === next) {
+        this.eventWriteQueues.delete(turnId);
+      }
+    }
+  }
+
+  private async appendEventNow(turnId: string, type: RunnerEventType, payload: Prisma.InputJsonValue): Promise<void> {
     const latest = await this.prisma.event.findFirst({
       where: { turnId },
       orderBy: { seq: 'desc' },
@@ -757,6 +1052,7 @@ export class TurnsService implements OnModuleInit {
     if (this.reasoningOpenTurns.has(turnId)) {
       return;
     }
+    await this.flushPendingCoalescedEventsForTurn(turnId);
     this.reasoningOpenTurns.add(turnId);
     await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: '<think>', isReasoning: true }));
   }
@@ -765,15 +1061,13 @@ export class TurnsService implements OnModuleInit {
     if (!this.reasoningOpenTurns.has(turnId)) {
       return;
     }
+    await this.flushPendingCoalescedEventsForTurn(turnId);
     this.reasoningOpenTurns.delete(turnId);
     await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: '</think>', isReasoning: true }));
   }
 
-  private async collectAssistantDeltaContent(
-    tx: Prisma.TransactionClient,
-    turnId: string,
-  ): Promise<{ full: string; nonReasoning: string }> {
-    const deltaEvents = await tx.event.findMany({
+  private async collectAssistantDeltaContent(turnId: string): Promise<{ full: string; nonReasoning: string }> {
+    const deltaEvents = await this.prisma.event.findMany({
       where: {
         turnId,
         type: 'assistant.delta',
@@ -804,18 +1098,29 @@ export class TurnsService implements OnModuleInit {
   }
 
   private async reconcileInFlightTurnsOnStartup(): Promise<void> {
-    const inFlightTurns = await this.prisma.turn.findMany({
-      where: { status: { in: ACTIVE_TURN_STATUSES } },
-      select: { id: true, status: true },
-    });
+    await this.reconcileInFlightTurns();
+  }
 
-    if (inFlightTurns.length === 0) {
+  private async reconcileInFlightTurns(): Promise<void> {
+    if (this.runnerReconcileInProgress) {
       return;
     }
+    this.runnerReconcileInProgress = true;
+    try {
+      const inFlightTurns = await this.prisma.turn.findMany({
+        where: { status: { in: ACTIVE_TURN_STATUSES } },
+        select: { id: true, status: true },
+      });
 
-    this.logger.warn(`Reconciling ${inFlightTurns.length} in-flight turn(s) after API startup`);
-    for (const turn of inFlightTurns) {
-      this.ensureRunnerEventConsumer(turn.id);
+      if (inFlightTurns.length === 0) {
+        return;
+      }
+
+      for (const turn of inFlightTurns) {
+        this.ensureRunnerEventConsumer(turn.id);
+      }
+    } finally {
+      this.runnerReconcileInProgress = false;
     }
   }
 
@@ -824,8 +1129,16 @@ export class TurnsService implements OnModuleInit {
       return;
     }
 
+    let retryConsumer = false;
     const task = this.consumeRunnerEvents(turnId)
       .catch((error: unknown) => {
+        if (isTransientDatabaseError(error)) {
+          retryConsumer = true;
+          this.logger.warn(
+            `Transient database failure while consuming runner events for turn ${turnId}; retrying: ${formatErrorMessage(error)}`,
+          );
+          return;
+        }
         if (error instanceof Error) {
           this.logger.error(`Runner stream failed for turn ${turnId}: ${error.message}`, error.stack);
           return;
@@ -834,9 +1147,24 @@ export class TurnsService implements OnModuleInit {
       })
       .finally(() => {
         this.runnerConsumers.delete(turnId);
+        if (retryConsumer) {
+          this.scheduleRunnerConsumerRetry(turnId);
+        }
       });
 
     this.runnerConsumers.set(turnId, task);
+  }
+
+  private scheduleRunnerConsumerRetry(turnId: string): void {
+    if (this.runnerConsumerRetryTimers.has(turnId)) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.runnerConsumerRetryTimers.delete(turnId);
+      this.ensureRunnerEventConsumer(turnId);
+    }, RUNNER_CONSUMER_RETRY_MS);
+    timer.unref?.();
+    this.runnerConsumerRetryTimers.set(turnId, timer);
   }
 
   private async consumeRunnerEvents(turnId: string): Promise<void> {
@@ -853,15 +1181,24 @@ export class TurnsService implements OnModuleInit {
       orderBy: { seq: 'desc' },
       select: { seq: true },
     });
+    const sinceSeq = this.runnerEventCursors.get(turnId) ?? latestEvent?.seq ?? 0;
 
     try {
       await this.runnerAdapter.consumeTurnEvents(
-        { turnId, sinceSeq: latestEvent?.seq ?? 0 },
+        { turnId, sinceSeq },
         async (event: RunnerStreamEvent) => {
           await this.ingestRunnerEvent(event.turnId, event.type, event.payload ?? {});
+          if (event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'turn.cancelled') {
+            this.runnerEventCursors.delete(turnId);
+          } else {
+            this.runnerEventCursors.set(turnId, event.seq);
+          }
         },
       );
     } catch (error: unknown) {
+      if (isTransientDatabaseError(error)) {
+        throw error;
+      }
       const currentTurn = await this.prisma.turn.findUnique({
         where: { id: turnId },
         select: { status: true },
@@ -871,16 +1208,20 @@ export class TurnsService implements OnModuleInit {
       }
 
       const message = error instanceof Error ? error.message : 'Runner stream failed';
+      const runnerTurnMissing = isRunnerTurnMissingError(error);
       await this.failTurn(
         turnId,
         currentTurn.status,
-        'RUNNER_STREAM_FAILED',
-        message,
+        runnerTurnMissing ? 'ORPHANED_TURN' : 'RUNNER_STREAM_FAILED',
+        runnerTurnMissing ? 'The database said this turn was active, but the runner no longer had it.' : message,
         this.normalizePayload({
-          code: 'RUNNER_STREAM_FAILED',
-          message,
+          code: runnerTurnMissing ? 'ORPHANED_TURN' : 'RUNNER_STREAM_FAILED',
+          message: runnerTurnMissing
+            ? 'The database said this turn was active, but the runner no longer had it.'
+            : message,
         }),
       );
+      this.runnerEventCursors.delete(turnId);
     }
   }
 
@@ -890,16 +1231,72 @@ export class TurnsService implements OnModuleInit {
     failureCode: string,
     failureMessage: string,
     eventPayload: Prisma.InputJsonValue,
+    fallbackAssistantContent = '',
   ): Promise<void> {
-    await this.prisma.turn.update({
+    await this.flushPendingCoalescedEventsForTurn(turnId);
+    const assistantContent = ensureBalancedThinkTags(
+      resolveAssistantContent(await this.collectAssistantDeltaContent(turnId), fallbackAssistantContent),
+    );
+    const turn = await this.prisma.turn.findUnique({
       where: { id: turnId },
-      data: {
-        status: 'failed',
-        failureCode,
-        failureMessage,
-        endedAt: new Date(),
-        startedAt: previousStatus === 'queued' ? new Date() : undefined,
+      select: {
+        id: true,
+        sessionId: true,
+        triggerIdentifier: true,
+        triggerProvider: true,
+        triggerIntegrationId: true,
+        triggerMessageId: true,
+        session: {
+          select: { projectId: true },
+        },
       },
+    });
+    if (!turn) {
+      return;
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const assistantMessage =
+        assistantContent.length > 0
+          ? await tx.message.create({
+              data: {
+                sessionId: turn.sessionId,
+                role: 'assistant',
+                content: assistantContent,
+              },
+            })
+          : null;
+
+      await tx.turn.update({
+        where: { id: turnId },
+        data: {
+          assistantMessageId: assistantMessage?.id,
+          status: 'failed',
+          failureCode,
+          failureMessage,
+          endedAt: new Date(),
+          startedAt: previousStatus === 'queued' ? new Date() : undefined,
+        },
+      });
+
+      if (assistantMessage) {
+        await tx.botMessage.create({
+          data: {
+            projectId: turn.session.projectId,
+            sessionId: turn.sessionId,
+            kind: 'turn_message',
+            payloadRaw: {
+              turnId: turn.id,
+              triggerIdentifier: turn.triggerIdentifier,
+              triggerProvider: turn.triggerProvider,
+              triggerIntegrationId: turn.triggerIntegrationId,
+              triggerMessageId: turn.triggerMessageId,
+              content: assistantContent,
+            },
+            status: 'queued',
+          },
+        });
+      }
     });
     await this.appendEvent(turnId, 'turn.failed', eventPayload);
   }
@@ -958,7 +1355,128 @@ function readFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function extractAssistantDelta(payload: Prisma.JsonValue): { text: string; isReasoning: boolean } {
+function resolveAssistantContent(
+  eventContent: { full: string; nonReasoning: string },
+  fallbackContent: string,
+): string {
+  if (eventContent.full.length === 0) {
+    return fallbackContent;
+  }
+  if (eventContent.nonReasoning.length > 0 || fallbackContent.length === 0) {
+    return eventContent.full;
+  }
+  return `${eventContent.full}${fallbackContent}`;
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'unknown error';
+}
+
+function isTransientDatabaseError(error: unknown): boolean {
+  const code =
+    error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code
+      : '';
+  if (['P1008', 'P2024', 'P2028'].includes(code)) {
+    return true;
+  }
+
+  const message = formatErrorMessage(error).toLowerCase();
+  return [
+    'socket timeout',
+    'database is locked',
+    'database table is locked',
+    'sqlite_busy',
+    'timed out fetching a new connection',
+    'transaction already closed',
+  ].some((fragment) => message.includes(fragment));
+}
+
+function isRunnerTurnMissingError(error: unknown): boolean {
+  const message = formatErrorMessage(error).toLowerCase();
+  return (
+    message.includes('active turn not found') ||
+    message.includes('turn not found') ||
+    message.includes('runner stream failed: 404')
+  );
+}
+
+function getCoalescedTextField(
+  type: RunnerEventType,
+  payload: Prisma.InputJsonValue,
+): 'text' | 'delta' | 'output' | null {
+  if (!isJsonObject(payload)) {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  if (type === 'assistant.delta') {
+    return typeof record.text === 'string' ? 'text' : null;
+  }
+  if (type === 'reasoning.delta') {
+    return typeof record.delta === 'string' ? 'delta' : null;
+  }
+  if (type === 'tool.output') {
+    if (typeof record.text === 'string') {
+      return 'text';
+    }
+    if (typeof record.output === 'string') {
+      return 'output';
+    }
+  }
+  return null;
+}
+
+function buildTextCoalescingKey(
+  turnId: string,
+  type: RunnerEventType,
+  payload: Prisma.InputJsonValue,
+  textField: 'text' | 'delta' | 'output',
+): string {
+  const metadata = isJsonObject(payload) ? { ...(payload as Record<string, unknown>) } : {};
+  delete metadata[textField];
+  return `${turnId}:${type}:${textField}:${stableStringify(metadata)}`;
+}
+
+function mergeCoalescedTextPayload(
+  existingPayload: Prisma.InputJsonValue,
+  nextPayload: Prisma.InputJsonValue,
+  textField: 'text' | 'delta' | 'output',
+): Prisma.InputJsonValue {
+  if (!isJsonObject(existingPayload) || !isJsonObject(nextPayload)) {
+    return nextPayload;
+  }
+  const existingRecord = existingPayload as Record<string, unknown>;
+  const nextRecord = nextPayload as Record<string, unknown>;
+  const existingText = typeof existingRecord[textField] === 'string' ? existingRecord[textField] : '';
+  const nextText = typeof nextRecord[textField] === 'string' ? nextRecord[textField] : '';
+  return {
+    ...existingRecord,
+    [textField]: `${existingText}${nextText}`,
+  } as Prisma.InputJsonValue;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
+function extractAssistantDelta(payload: Prisma.JsonValue): {
+  text: string;
+  isReasoning: boolean;
+} {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return { text: '', isReasoning: false };
   }
@@ -999,13 +1517,16 @@ function readSessionRuntimeFromMeta(meta: Prisma.JsonValue | null): {
   const root = normalizeJsonRecord(meta);
   const runtime = normalizeJsonRecord((root?.runtime as Prisma.JsonValue | undefined) ?? null);
   if (!runtime) {
-    throw new ConflictException({ message: 'Session runtime metadata is missing' });
+    throw new ConflictException({
+      message: 'Session runtime metadata is missing',
+    });
   }
-  const backend = typeof runtime.backend === 'string' && runtime.backend.trim().length > 0
-    ? runtime.backend.trim()
-    : null;
+  const backend =
+    typeof runtime.backend === 'string' && runtime.backend.trim().length > 0 ? runtime.backend.trim() : null;
   if (!backend) {
-    throw new ConflictException({ message: 'Session runtime backend is missing' });
+    throw new ConflictException({
+      message: 'Session runtime backend is missing',
+    });
   }
   const cwd = typeof runtime.cwd === 'string' && runtime.cwd.trim().length > 0 ? runtime.cwd.trim() : null;
   const backendConfig = normalizeJsonRecord((runtime.backendConfig as Prisma.JsonValue | undefined) ?? null) ?? null;
@@ -1044,7 +1565,10 @@ function buildRequestedBackendConfig(
 
 function buildEffectiveBackendConfig(
   payload: Record<string, unknown>,
-  turn: { backend: string | null; requestedBackendConfig: Prisma.JsonValue | null },
+  turn: {
+    backend: string | null;
+    requestedBackendConfig: Prisma.JsonValue | null;
+  },
 ): Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput {
   const effective: Record<string, unknown> = {};
   const requested = normalizeJsonRecord(turn.requestedBackendConfig);
@@ -1067,8 +1591,7 @@ function buildEffectiveBackendConfig(
     typeof requested?.executionMode === 'string' && requested.executionMode.trim().length > 0
       ? normalizeExecutionMode(requested.executionMode)
       : null;
-  const derivedExecutionMode =
-    turn.backend?.trim() === 'codex' ? deriveExecutionModeFromRuntime(payload) : null;
+  const derivedExecutionMode = turn.backend?.trim() === 'codex' ? deriveExecutionModeFromRuntime(payload) : null;
   const executionMode = explicitExecutionMode ?? requestedExecutionMode ?? derivedExecutionMode;
   if (executionMode) {
     effective.executionMode = executionMode;
@@ -1138,8 +1661,7 @@ function normalizeExecutionMode(value: string): ExecutionModeValue | null {
 function deriveExecutionModeFromRuntime(payload: Record<string, unknown>): ExecutionModeValue | null {
   const sandbox = typeof payload.sandbox === 'string' ? payload.sandbox.trim() : '';
   const approvalPolicy = typeof payload.approvalPolicy === 'string' ? payload.approvalPolicy.trim() : '';
-  const approvalsReviewer =
-    typeof payload.approvalsReviewer === 'string' ? payload.approvalsReviewer.trim() : '';
+  const approvalsReviewer = typeof payload.approvalsReviewer === 'string' ? payload.approvalsReviewer.trim() : '';
   if (!sandbox && !approvalPolicy && !approvalsReviewer) {
     return null;
   }

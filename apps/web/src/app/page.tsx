@@ -2527,12 +2527,7 @@ export default function HomePage() {
     setBusy(true);
     setError('');
     try {
-      const items = (await apiRequest<Session[]>(`/api/channels/plugins/web/app/projects/${projectId}/sessions`, {
-        method: 'GET',
-      })) as Session[];
-      setSessions(items);
-      setSessionsByProject((current) => ({ ...current, [projectId]: items }));
-      setExpandedProjectIds((current) => (current.includes(projectId) ? current : [...current, projectId]));
+      const items = await refreshSessionList(projectId);
       const preferredSessionId = options?.preferredSessionId?.trim() ?? '';
       const preferredSession = preferredSessionId.length > 0 ? items.find((item) => item.id === preferredSessionId) : undefined;
       const currentlySelectedSession = items.find((item) => item.id === selectedSessionId);
@@ -2565,6 +2560,16 @@ export default function HomePage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function refreshSessionList(projectId: string): Promise<Session[]> {
+    const items = (await apiRequest<Session[]>(`/api/channels/plugins/web/app/projects/${projectId}/sessions`, {
+      method: 'GET',
+    })) as Session[];
+    setSessions(items);
+    setSessionsByProject((current) => ({ ...current, [projectId]: items }));
+    setExpandedProjectIds((current) => (current.includes(projectId) ? current : [...current, projectId]));
+    return items;
   }
 
   async function loadWorkspaceTree(path: string): Promise<void> {
@@ -3935,7 +3940,11 @@ export default function HomePage() {
         if (deletingSelectedSession) {
           setSelectedSessionId('');
         }
-        await loadSessions(selectedProjectId);
+        if (deletingSelectedSession) {
+          await loadSessions(selectedProjectId);
+        } else {
+          await refreshSessionList(selectedProjectId);
+        }
       }
     } catch (requestError) {
       setError(extractMessage(requestError));

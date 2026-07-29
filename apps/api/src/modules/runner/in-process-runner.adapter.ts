@@ -33,7 +33,8 @@ import {
 @Injectable()
 export class InProcessRunnerAdapter implements RunnerAdapter {
   constructor(
-    @Inject(EmbeddedRunnerService) private readonly embedded: EmbeddedRunnerService,
+    @Inject(EmbeddedRunnerService)
+    private readonly embedded: EmbeddedRunnerService,
   ) {}
 
   startTurn(input: StartTurnInput): Promise<void> {
@@ -51,7 +52,7 @@ export class InProcessRunnerAdapter implements RunnerAdapter {
     return this.embedded.steerTurn(input);
   }
 
-  cancelTurn(input: CancelTurnInput): Promise<void> {
+  cancelTurn(input: CancelTurnInput): Promise<boolean> {
     return this.embedded.cancelTurn(input);
   }
 

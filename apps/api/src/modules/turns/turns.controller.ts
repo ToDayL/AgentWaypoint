@@ -4,6 +4,7 @@ import {
   Get,
   Headers,
   Inject,
+  Logger,
   Param,
   Post,
   Query,
@@ -36,16 +37,21 @@ type RequestLike = {
 
 type ReplyLike = {
   raw: {
+    destroyed?: boolean;
+    writableEnded?: boolean;
     setHeader: (name: string, value: string) => void;
     write: (chunk: string) => void;
     end: () => void;
     flushHeaders?: () => void;
+    once: (event: 'close' | 'error', handler: () => void) => void;
   };
 };
 
 @Controller('/api')
 @UseGuards(AuthGuard)
 export class TurnsController {
+  private readonly logger = new Logger(TurnsController.name);
+
   constructor(@Inject(TurnsService) private readonly turnsService: TurnsService) {}
 
   @Post('/sessions/:id/turns')
@@ -148,14 +154,41 @@ export class TurnsController {
       reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
 
-    const closeStream = (): void => {
+    const writeStreamError = (error: unknown): void => {
       if (closed) {
         return;
+      }
+      const payload = {
+        turnId: id,
+        cursor,
+        code: 'STREAM_POLL_FAILED',
+        message: 'Turn stream interrupted. Falling back to status polling.',
+      };
+      this.logger.error(
+        `Turn stream poll failed for turn ${id} at cursor ${cursor}: ${formatErrorMessage(error)}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      reply.raw.write('event: stream.error\n');
+      reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    const cleanupStream = (): boolean => {
+      if (closed) {
+        return false;
       }
       closed = true;
       clearInterval(heartbeatTimer);
       clearInterval(pollTimer);
-      reply.raw.end();
+      return true;
+    };
+
+    const closeStream = (): void => {
+      if (!cleanupStream()) {
+        return;
+      }
+      if (!reply.raw.writableEnded && !reply.raw.destroyed) {
+        reply.raw.end();
+      }
     };
 
     const heartbeatTimer = setInterval(() => {
@@ -187,6 +220,9 @@ export class TurnsController {
         if (terminalIdlePolls >= 2) {
           closeStream();
         }
+      } catch (error: unknown) {
+        writeStreamError(error);
+        closeStream();
       } finally {
         inFlight = false;
       }
@@ -197,6 +233,12 @@ export class TurnsController {
     }, 300);
     void poll();
 
-    request.raw.on('close', closeStream);
+    void request;
+    reply.raw.once('close', cleanupStream);
+    reply.raw.once('error', cleanupStream);
   }
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'unknown stream error';
 }

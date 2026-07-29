@@ -168,14 +168,24 @@ export class HttpRunnerAdapter implements RunnerAdapter {
     });
   }
 
-  async cancelTurn(input: CancelTurnInput): Promise<void> {
-    await this.request({
+  async cancelTurn(input: CancelTurnInput): Promise<boolean> {
+    const response = await this.request({
       method: 'POST',
       path: '/runner/turns/cancel',
       body: {
         turnId: input.turnId,
       },
     });
+    if (
+      response &&
+      typeof response === 'object' &&
+      typeof (response as { cancelled?: unknown }).cancelled === 'boolean'
+    ) {
+      return (response as { cancelled: boolean }).cancelled;
+    }
+    // Older remote runners did not return `cancelled`; preserve their accepted
+    // response semantics until both sides have upgraded.
+    return true;
   }
 
   async resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void> {
@@ -248,22 +258,25 @@ export class HttpRunnerAdapter implements RunnerAdapter {
               ? input.backend.trim()
               : '',
         model: typeof item.model === 'string' ? item.model : '',
-        displayName: typeof item.displayName === 'string' ? item.displayName : (typeof item.model === 'string' ? item.model : ''),
+        displayName:
+          typeof item.displayName === 'string' ? item.displayName : typeof item.model === 'string' ? item.model : '',
         description: typeof item.description === 'string' ? item.description : '',
         hidden: item.hidden === true,
         isDefault: item.isDefault === true,
         supportedEfforts: Array.isArray((item as { supportedEfforts?: unknown }).supportedEfforts)
-          ? ((item as { supportedEfforts: unknown[] }).supportedEfforts.filter(
-              (entry): entry is { value: string; description?: string } =>
-                !!entry && typeof entry === 'object' && typeof (entry as { value?: unknown }).value === 'string',
-            ).map((entry) => ({
-              value: entry.value,
-              description: typeof entry.description === 'string' ? entry.description : '',
-            })))
+          ? (item as { supportedEfforts: unknown[] }).supportedEfforts
+              .filter(
+                (entry): entry is { value: string; description?: string } =>
+                  !!entry && typeof entry === 'object' && typeof (entry as { value?: unknown }).value === 'string',
+              )
+              .map((entry) => ({
+                value: entry.value,
+                description: typeof entry.description === 'string' ? entry.description : '',
+              }))
           : [],
         defaultEffort:
           typeof (item as { defaultEffort?: unknown }).defaultEffort === 'string'
-            ? ((item as { defaultEffort: string }).defaultEffort)
+            ? (item as { defaultEffort: string }).defaultEffort
             : null,
       }))
       .filter((item) => item.id.length > 0 && item.model.length > 0 && item.backend.length > 0);
@@ -310,9 +323,10 @@ export class HttpRunnerAdapter implements RunnerAdapter {
     if (!response || typeof response !== 'object') {
       throw new Error('Runner fork thread response is invalid');
     }
-    const threadId = typeof (response as { threadId?: unknown }).threadId === 'string'
-      ? (response as { threadId: string }).threadId
-      : '';
+    const threadId =
+      typeof (response as { threadId?: unknown }).threadId === 'string'
+        ? (response as { threadId: string }).threadId
+        : '';
     if (!threadId) {
       throw new Error('Runner fork thread response did not include threadId');
     }
@@ -617,7 +631,11 @@ function extractRunnerErrorMessage(responseText: string, status: number): string
   return fallback;
 }
 
-function parseRateLimitWindow(value: unknown): { usedPercent: number | null; resetsAt: number | null; windowDurationMins: number | null } | null {
+function parseRateLimitWindow(value: unknown): {
+  usedPercent: number | null;
+  resetsAt: number | null;
+  windowDurationMins: number | null;
+} | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
@@ -633,9 +651,21 @@ function parseRateLimitSnapshot(value: unknown): {
   limitId: string | null;
   limitName: string | null;
   planType: string | null;
-  credits: { balance: string | null; hasCredits: boolean; unlimited: boolean } | null;
-  primary: { usedPercent: number | null; resetsAt: number | null; windowDurationMins: number | null } | null;
-  secondary: { usedPercent: number | null; resetsAt: number | null; windowDurationMins: number | null } | null;
+  credits: {
+    balance: string | null;
+    hasCredits: boolean;
+    unlimited: boolean;
+  } | null;
+  primary: {
+    usedPercent: number | null;
+    resetsAt: number | null;
+    windowDurationMins: number | null;
+  } | null;
+  secondary: {
+    usedPercent: number | null;
+    resetsAt: number | null;
+    windowDurationMins: number | null;
+  } | null;
 } | null {
   if (!value || typeof value !== 'object') {
     return null;
@@ -645,9 +675,10 @@ function parseRateLimitSnapshot(value: unknown): {
   const credits =
     creditsRaw && typeof creditsRaw === 'object'
       ? {
-          balance: typeof (creditsRaw as Record<string, unknown>).balance === 'string'
-            ? (creditsRaw as Record<string, unknown>).balance as string
-            : null,
+          balance:
+            typeof (creditsRaw as Record<string, unknown>).balance === 'string'
+              ? ((creditsRaw as Record<string, unknown>).balance as string)
+              : null,
           hasCredits: (creditsRaw as Record<string, unknown>).hasCredits === true,
           unlimited: (creditsRaw as Record<string, unknown>).unlimited === true,
         }
@@ -663,7 +694,9 @@ function parseRateLimitSnapshot(value: unknown): {
   };
 }
 
-function parseRateLimitsByLimitId(value: unknown): Record<string, ReturnType<typeof parseRateLimitSnapshot> extends infer T ? Exclude<T, null> : never> | null {
+function parseRateLimitsByLimitId(
+  value: unknown,
+): Record<string, ReturnType<typeof parseRateLimitSnapshot> extends infer T ? Exclude<T, null> : never> | null {
   if (!value || typeof value !== 'object') {
     return null;
   }

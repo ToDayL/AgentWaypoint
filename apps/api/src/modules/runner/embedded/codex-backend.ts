@@ -822,12 +822,19 @@ export class CodexBackend {
 
       const status = readNestedString(params, ['turn', 'status']);
       if (status === 'failed') {
-        const message = readNestedString(params, ['turn', 'error', 'message']) || 'Codex turn failed';
-        await this.deps.finalizeTurn(turn.turnId, 'turn.failed', { message });
+        const error = readOptionalObject(readOptionalObject(params.turn)?.error) ?? {};
+        const content = turn.assistantText || extractAssistantTextFromTurn(params);
+        await this.deps.finalizeTurn(turn.turnId, 'turn.failed', {
+          ...buildCodexFailurePayload(error, 'Codex turn failed'),
+          ...(content ? { content } : {}),
+        });
         return;
       }
       if (status === 'interrupted') {
-        await this.deps.finalizeTurn(turn.turnId, 'turn.cancelled', {});
+        const content = turn.assistantText || extractAssistantTextFromTurn(params);
+        await this.deps.finalizeTurn(turn.turnId, 'turn.cancelled', {
+          ...(content ? { content } : {}),
+        });
         return;
       }
 
@@ -847,8 +854,27 @@ export class CodexBackend {
         return;
       }
 
-      const message = readNestedString(params, ['error', 'message']) || 'Codex runner error';
-      await this.deps.finalizeTurn(turn.turnId, 'turn.failed', { message });
+      const error = readOptionalObject(params.error) ?? {};
+      const failure = buildCodexFailurePayload(error, 'Codex runner error');
+      if (params.willRetry === true) {
+        await this.deps.appendTurnEvent(turn.turnId, 'tool.output', {
+          kind: 'system',
+          itemId: `codex-retry-${turn.turnId}`,
+          stream: null,
+          title: 'Codex connection retry',
+          text: `${failure.message}\n`,
+          willRetry: true,
+          codexErrorInfo: failure.codexErrorInfo,
+          additionalDetails: failure.additionalDetails,
+        });
+        return;
+      }
+
+      await this.deps.finalizeTurn(turn.turnId, 'turn.failed', {
+        ...failure,
+        willRetry: false,
+        ...(turn.assistantText ? { content: turn.assistantText } : {}),
+      });
     }
   }
 
@@ -1100,6 +1126,43 @@ function readOptionalString(value: unknown): string | null {
 
 function readOptionalPayloadString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function buildCodexFailurePayload(
+  error: Record<string, unknown>,
+  fallbackMessage: string,
+): {
+  code: string;
+  message: string;
+  codexErrorInfo: unknown;
+  additionalDetails: string | null;
+} {
+  const codexErrorInfo = error.codexErrorInfo ?? null;
+  const errorKind = readCodexErrorKind(codexErrorInfo);
+  return {
+    code: errorKind ? `CODEX_${toUpperSnakeCase(errorKind)}` : 'CODEX_ERROR',
+    message: readOptionalString(error.message) ?? fallbackMessage,
+    codexErrorInfo,
+    additionalDetails: readOptionalString(error.additionalDetails),
+  };
+}
+
+function readCodexErrorKind(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value.trim();
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return Object.keys(value as Record<string, unknown>)[0] ?? null;
+}
+
+function toUpperSnakeCase(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toUpperCase();
 }
 
 function readCommandForDisplay(value: unknown): string | null {

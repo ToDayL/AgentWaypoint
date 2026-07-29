@@ -188,6 +188,7 @@ model BotMessage {
   project           Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   session           Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
+  @@index([sessionId])
   @@index([projectId, sessionId, createdAt])
   @@index([status, nextAttemptAt, createdAt])
   @@index([status, leaseExpireAt, createdAt])
@@ -207,6 +208,7 @@ model ChannelFile {
   project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   session         Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
+  @@index([sessionId])
   @@index([projectId, sessionId, createdAt])
   @@index([storageProvider, storageKey])
 }

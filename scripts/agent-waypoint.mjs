@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * agent-waypoint CLI: start | stop | restart | status | logs
+ * agent-waypoint CLI: start | stop | restart | status | logs | cleanup-db
  *
  * Manages the lightweight AgentWaypoint stack (API + Next.js Web) as
  * background processes. All state lives under the data directory
@@ -29,6 +29,7 @@ const pidFile = path.join(dataHome, 'agent-waypoint.pid');
 const logsDir = path.join(dataHome, 'logs');
 const apiLog = path.join(logsDir, 'api.log');
 const webLog = path.join(logsDir, 'web.log');
+const STARTUP_TIMEOUT_MS = 60_000;
 
 switch (command) {
   case 'start':
@@ -46,6 +47,9 @@ switch (command) {
     break;
   case 'logs':
     cmdLogs(commandArgs);
+    break;
+  case 'cleanup-db':
+    await cmdCleanupDb();
     break;
   case 'help':
   case '--help':
@@ -98,6 +102,7 @@ function printUsage() {
       '  restart   Stop, then start.',
       '  status    Show running PIDs and URL.',
       '  logs [api|web]  Tail the named service log (default: api).',
+      '  cleanup-db  Backup, VACUUM/optimize the SQLite DB, then delete the backup.',
       '',
       'Options:',
       '  --home <dir>  Override the data directory (default: $AGENTWAYPOINT_HOME or ~/.agentwaypoint).',
@@ -170,8 +175,10 @@ async function cmdStart() {
   apiChild.unref();
   webChild.unref();
 
+  await waitForStartup(record);
+
   process.stdout.write(
-    `AgentWaypoint starting (api PID ${record.apiPid}, web PID ${record.webPid}).\n` +
+    `AgentWaypoint started (api PID ${record.apiPid}, web PID ${record.webPid}).\n` +
       `Logs: ${apiLog}\n      ${webLog}\n` +
       `URL:  http://localhost:${record.webPort}\n`,
   );
@@ -247,6 +254,58 @@ function cmdLogs(rawArgs) {
   }
   const tail = spawn('tail', ['-f', file], { stdio: 'inherit' });
   tail.on('exit', (code) => process.exit(code ?? 0));
+}
+
+async function cmdCleanupDb() {
+  const record = readPidFile();
+  if (record && (isAlive(record.apiPid) || isAlive(record.webPid))) {
+    throw new Error(
+      `Stop AgentWaypoint before cleaning the database: ` +
+        `./agent-waypoint stop --home ${shellQuote(dataHome)}`,
+    );
+  }
+  if (!commandExists('sqlite3')) {
+    throw new Error('sqlite3 is required for cleanup-db but was not found on PATH.');
+  }
+
+  const databasePath = resolveDatabasePathForHome(dataHome);
+  if (!fs.existsSync(databasePath)) {
+    throw new Error(`SQLite database not found at ${databasePath}`);
+  }
+
+  const backupPath = buildBackupPath(databasePath);
+  let cleanupSucceeded = false;
+  const before = readDatabaseStats(databasePath);
+
+  process.stdout.write(
+    `Database: ${databasePath}\n` +
+      `Before:   ${formatDatabaseStats(before)}\n` +
+      `Backup:   ${backupPath}\n`,
+  );
+
+  try {
+    runSqlite(databasePath, `.backup ${sqliteCliQuote(backupPath)}`);
+    assertQuickCheckOk(backupPath, 'backup');
+    assertQuickCheckOk(databasePath, 'database');
+
+    process.stdout.write('Cleaning: VACUUM + PRAGMA optimize\n');
+    runSqlite(databasePath, 'VACUUM; PRAGMA optimize;');
+    assertQuickCheckOk(databasePath, 'database');
+
+    const after = readDatabaseStats(databasePath);
+    fs.rmSync(backupPath, { force: true });
+    cleanupSucceeded = true;
+
+    process.stdout.write(
+      `After:    ${formatDatabaseStats(after)}\n` +
+        `Backup deleted: ${backupPath}\n` +
+        'Database cleanup completed.\n',
+    );
+  } finally {
+    if (!cleanupSucceeded && fs.existsSync(backupPath)) {
+      process.stderr.write(`Cleanup failed; backup retained at ${backupPath}\n`);
+    }
+  }
 }
 
 function readPidFile() {
@@ -373,6 +432,107 @@ function shouldSkipBuildInput(name) {
   return name === 'node_modules' || name === '.next' || name === 'dist' || name === '.turbo';
 }
 
+function resolveDatabasePathForHome(home) {
+  const configPath = path.join(home, 'config.json');
+  if (!fs.existsSync(configPath)) {
+    return path.join(home, 'agentwaypoint.db');
+  }
+  const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  const databaseUrl = typeof parsed.DATABASE_URL === 'string' ? parsed.DATABASE_URL : '';
+  return resolveSqliteDatabasePath(databaseUrl, home);
+}
+
+function resolveSqliteDatabasePath(databaseUrl, home) {
+  if (!databaseUrl.startsWith('file:')) {
+    return path.join(home, 'agentwaypoint.db');
+  }
+  const withoutPrefix = databaseUrl.slice('file:'.length);
+  const withoutQuery = withoutPrefix.split('?')[0] ?? '';
+  const decoded = decodeURIComponent(withoutQuery);
+  return path.isAbsolute(decoded) ? decoded : path.resolve(home, decoded);
+}
+
+function buildBackupPath(databasePath) {
+  const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, 'Z');
+  return `${databasePath}.cleanup-${timestamp}.bak`;
+}
+
+function runSqlite(databasePath, sql) {
+  const result = spawnSync('sqlite3', [databasePath, sql], {
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    const detail = [result.stderr, result.stdout].filter(Boolean).join('\n').trim();
+    throw new Error(`sqlite3 failed with status ${result.status}${detail ? `: ${detail}` : ''}`);
+  }
+  return (result.stdout ?? '').trim();
+}
+
+function assertQuickCheckOk(databasePath, label) {
+  const output = runSqlite(databasePath, 'PRAGMA quick_check;').trim();
+  if (output !== 'ok') {
+    throw new Error(`SQLite quick_check failed for ${label}: ${output || '(no output)'}`);
+  }
+}
+
+function readDatabaseStats(databasePath) {
+  const output = runSqlite(
+    databasePath,
+    [
+      'PRAGMA page_size;',
+      'PRAGMA page_count;',
+      'PRAGMA freelist_count;',
+    ].join(' '),
+  );
+  const [pageSizeRaw, pageCountRaw, freelistCountRaw] = output.split(/\s+/);
+  const pageSize = Number(pageSizeRaw);
+  const pageCount = Number(pageCountRaw);
+  const freelistCount = Number(freelistCountRaw);
+  const fileSize = fs.statSync(databasePath).size;
+  return {
+    fileSize,
+    pageSize,
+    pageCount,
+    freelistCount,
+    reusableBytes: Number.isFinite(pageSize) && Number.isFinite(freelistCount) ? pageSize * freelistCount : 0,
+  };
+}
+
+function formatDatabaseStats(stats) {
+  return (
+    `${formatBytes(stats.fileSize)} file, ` +
+    `${formatBytes(stats.reusableBytes)} reusable, ` +
+    `${stats.pageCount} pages, ${stats.freelistCount} free pages`
+  );
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) {
+    return 'unknown';
+  }
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const precision = unitIndex === 0 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(precision)} ${units[unitIndex]}`;
+}
+
+function sqliteCliQuote(value) {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function shellQuote(value) {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 function spawnDetached(argv, logFilePath, env) {
   const out = fs.openSync(logFilePath, 'a');
   const err = fs.openSync(logFilePath, 'a');
@@ -395,30 +555,62 @@ function sleep(ms) {
  */
 async function runBootstrapForeground() {
   const configPath = path.join(dataHome, 'config.json');
+  const [command, ...args] = pnpmCommand([
+    '--filter',
+    '@agentwaypoint/api',
+    'exec',
+    'tsx',
+    'src/bootstrap/run-bootstrap.ts',
+  ]);
+  const result = spawnSync(command, args, {
+    cwd: REPO_ROOT,
+    stdio: 'inherit',
+    env: { ...process.env, AGENTWAYPOINT_HOME: dataHome },
+  });
+  if (result.status !== 0) {
+    throw new Error(`Bootstrap failed with status ${result.status}`);
+  }
   if (!fs.existsSync(configPath)) {
-    const [command, ...args] = pnpmCommand([
-      '--filter',
-      '@agentwaypoint/api',
-      'exec',
-      'tsx',
-      'src/bootstrap/run-bootstrap.ts',
-    ]);
-    const result = spawnSync(command, args, {
-      cwd: REPO_ROOT,
-      stdio: 'inherit',
-      env: { ...process.env, AGENTWAYPOINT_HOME: dataHome },
-    });
-    if (result.status !== 0) {
-      throw new Error(`Bootstrap failed with status ${result.status}`);
-    }
-    if (!fs.existsSync(configPath)) {
-      throw new Error(
-        `Bootstrap exited cleanly but did not write ${configPath}. ` +
-          `Re-run \`./agent-waypoint start\` from a real terminal.`,
-      );
-    }
+    throw new Error(
+      `Bootstrap exited cleanly but did not write ${configPath}. ` +
+        `Re-run \`./agent-waypoint start\` from a real terminal.`,
+    );
   }
   return JSON.parse(fs.readFileSync(configPath, 'utf8'));
+}
+
+async function waitForStartup(record) {
+  await waitForHttpOk({
+    name: 'API',
+    url: `http://127.0.0.1:${record.apiPort}/api/health`,
+    timeoutMs: STARTUP_TIMEOUT_MS,
+    logFilePath: apiLog,
+  });
+  await waitForHttpOk({
+    name: 'Web',
+    url: `http://127.0.0.1:${record.webPort}/`,
+    timeoutMs: STARTUP_TIMEOUT_MS,
+    logFilePath: webLog,
+  });
+}
+
+async function waitForHttpOk({ name, url, timeoutMs, logFilePath }) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url, { cache: 'no-store' });
+      if (response.ok) {
+        return;
+      }
+      lastError = new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(500);
+  }
+  const detail = lastError instanceof Error ? ` Last error: ${lastError.message}` : '';
+  throw new Error(`${name} did not become ready within ${timeoutMs / 1000}s. Check ${logFilePath}.${detail}`);
 }
 
 function resolvePackageManager() {

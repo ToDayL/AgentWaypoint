@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import { getApiBaseUrl } from '../_lib';
+import { relayEventStream } from '../_stream-proxy';
 
 export const dynamic = 'force-dynamic';
 
@@ -77,6 +78,19 @@ async function proxyRequest(request: NextRequest, context: Params): Promise<Resp
   const acceptHeader = request.headers.get('accept');
   const lastEventIdHeader = request.headers.get('last-event-id');
   const upstreamPath = `/api/${path.map((segment) => encodeURIComponent(segment)).join('/')}${request.nextUrl.search}`;
+  const upstreamAbortController = new AbortController();
+  const abortUpstream = (): void => {
+    if (!upstreamAbortController.signal.aborted) {
+      upstreamAbortController.abort(request.signal.reason);
+    }
+  };
+  const detachRequestAbort = (): void => {
+    request.signal.removeEventListener('abort', abortUpstream);
+  };
+  request.signal.addEventListener('abort', abortUpstream, { once: true });
+  if (request.signal.aborted) {
+    abortUpstream();
+  }
 
   try {
     const upstream = await fetch(`${getApiBaseUrl()}${upstreamPath}`, {
@@ -93,6 +107,7 @@ async function proxyRequest(request: NextRequest, context: Params): Promise<Resp
       ...(upstreamBody ? { body: upstreamBody } : {}),
       ...(upstreamBody === request.body ? { duplex: 'half' } : {}),
       cache: 'no-store',
+      signal: upstreamAbortController.signal,
     } as RequestInit & { duplex?: 'half' });
 
     const upstreamContentType = upstream.headers.get('content-type') ?? '';
@@ -101,14 +116,20 @@ async function proxyRequest(request: NextRequest, context: Params): Promise<Resp
       upstreamContentType.includes('text/event-stream') || (acceptHeader ?? '').includes('text/event-stream');
 
     if (isEventStream && upstream.body) {
-      return new Response(upstream.body, {
-        status: upstream.status,
-        headers: {
-          'content-type': 'text/event-stream; charset=utf-8',
-          'cache-control': 'no-cache',
-          connection: 'keep-alive',
+      return new Response(
+        relayEventStream(upstream.body, {
+          abortUpstream,
+          onFinalize: detachRequestAbort,
+        }),
+        {
+          status: upstream.status,
+          headers: {
+            'content-type': 'text/event-stream; charset=utf-8',
+            'cache-control': 'no-cache',
+            connection: 'keep-alive',
+          },
         },
-      });
+      );
     }
 
     const responseHeaders: Record<string, string> = {};
@@ -124,6 +145,7 @@ async function proxyRequest(request: NextRequest, context: Params): Promise<Resp
     }
 
     if (noBodyStatus || method === 'HEAD') {
+      detachRequestAbort();
       return new Response(null, {
         status: upstream.status,
         headers: responseHeaders,
@@ -131,11 +153,13 @@ async function proxyRequest(request: NextRequest, context: Params): Promise<Resp
     }
 
     const responseBuffer = await upstream.arrayBuffer();
+    detachRequestAbort();
     return new Response(responseBuffer, {
       status: upstream.status,
       headers: responseHeaders,
     });
   } catch {
+    detachRequestAbort();
     return Response.json(
       {
         error: {
