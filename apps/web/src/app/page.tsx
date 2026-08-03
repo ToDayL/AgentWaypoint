@@ -360,6 +360,14 @@ function renderEffortSelect(
   );
 }
 
+function retainSupportedEffort(models: AvailableModel[], modelName: string, effort: string): string {
+  if (!effort) {
+    return '';
+  }
+  const model = models.find((entry) => entry.model === modelName);
+  return model?.supportedEfforts.some((entry) => entry.value === effort) ? effort : '';
+}
+
 function normalizeSupportedBackends(input: unknown): string[] {
   if (!Array.isArray(input)) {
     return ['codex'];
@@ -4254,6 +4262,7 @@ export default function HomePage() {
                       onChange={(event) => {
                         const nextBackend = event.target.value.trim() || 'codex';
                         setNewProjectBackend(nextBackend);
+                        setNewProjectEffort('');
                         void loadAvailableModels(nextBackend, { target: 'new' });
                       }}
                     >
@@ -4268,7 +4277,11 @@ export default function HomePage() {
                     Default Model
                     <select
                       value={newProjectDefaultModel}
-                      onChange={(event) => setNewProjectDefaultModel(event.target.value)}
+                      onChange={(event) => {
+                        const nextModel = event.target.value;
+                        setNewProjectDefaultModel(nextModel);
+                        setNewProjectEffort((current) => retainSupportedEffort(availableModels, nextModel, current));
+                      }}
                     >
                       {availableModels.map((model) => (
                         <option key={model.id} value={model.model}>
@@ -4357,6 +4370,7 @@ export default function HomePage() {
                       onChange={(event) => {
                         const nextBackend = event.target.value.trim() || 'codex';
                         setNewSessionBackend(nextBackend);
+                        setNewSessionEffort('');
                         void loadAvailableModels(nextBackend, { target: 'session' });
                       }}
                     >
@@ -4371,7 +4385,11 @@ export default function HomePage() {
                     Default Model
                     <select
                       value={newSessionDefaultModel}
-                      onChange={(event) => setNewSessionDefaultModel(event.target.value)}
+                      onChange={(event) => {
+                        const nextModel = event.target.value;
+                        setNewSessionDefaultModel(nextModel);
+                        setNewSessionEffort((current) => retainSupportedEffort(availableModels, nextModel, current));
+                      }}
                     >
                       {availableModels.map((model) => (
                         <option key={model.id} value={model.model}>
@@ -4495,7 +4513,11 @@ export default function HomePage() {
                     Default Model
                     <select
                       value={projectConfigDefaultModel}
-                      onChange={(event) => setProjectConfigDefaultModel(event.target.value)}
+                      onChange={(event) => {
+                        const nextModel = event.target.value;
+                        setProjectConfigDefaultModel(nextModel);
+                        setProjectConfigEffort((current) => retainSupportedEffort(availableModels, nextModel, current));
+                      }}
                     >
                       {availableModels.map((model) => (
                         <option key={model.id} value={model.model}>
@@ -4556,7 +4578,11 @@ export default function HomePage() {
                     Default Model
                     <select
                       value={sessionConfigDefaultModel}
-                      onChange={(event) => setSessionConfigDefaultModel(event.target.value)}
+                      onChange={(event) => {
+                        const nextModel = event.target.value;
+                        setSessionConfigDefaultModel(nextModel);
+                        setSessionConfigEffort((current) => retainSupportedEffort(availableModels, nextModel, current));
+                      }}
                     >
                       {availableModels.map((model) => (
                         <option key={model.id} value={model.model}>

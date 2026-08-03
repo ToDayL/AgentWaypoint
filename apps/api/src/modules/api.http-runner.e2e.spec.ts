@@ -61,6 +61,35 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForTurnStatus(
+  apiBaseUrl: string,
+  email: string,
+  turnId: string,
+  expectedStatus: string,
+  timeoutMs = 5000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus = 'unknown';
+
+  while (Date.now() < deadline) {
+    const response = await fetch(`${apiBaseUrl}/api/turns/${turnId}`, {
+      headers: { 'x-user-email': email },
+    });
+    if (response.status === 200) {
+      const turn = (await response.json()) as { status?: unknown };
+      lastStatus = typeof turn.status === 'string' ? turn.status : 'unknown';
+      if (lastStatus === expectedStatus) {
+        return;
+      }
+    } else {
+      lastStatus = `HTTP ${response.status}`;
+    }
+    await sleep(50);
+  }
+
+  throw new Error(`Timed out waiting for turn ${turnId} to become ${expectedStatus}; last status: ${lastStatus}`);
+}
+
 function mapExecutionModeToRuntime(executionMode: string): { sandbox: string; approvalPolicy: string } {
   if (executionMode === 'read-only') {
     return { sandbox: 'read-only', approvalPolicy: 'on-request' };
@@ -187,6 +216,12 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
               description: 'Primary coding model',
               hidden: false,
               isDefault: true,
+              supportedEfforts: [
+                { value: 'low', description: 'Faster responses' },
+                { value: 'high', description: 'Deeper reasoning' },
+                { value: 'xhigh', description: 'Maximum reasoning' },
+              ],
+              defaultEffort: 'high',
             },
             {
               id: 'model-gpt-5-mini',
@@ -259,6 +294,10 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
           typeof backendConfig.executionMode === 'string' && backendConfig.executionMode.trim().length > 0
             ? backendConfig.executionMode.trim()
             : 'safe-write';
+        const effort =
+          typeof backendConfig.effort === 'string' && backendConfig.effort.trim().length > 0
+            ? backendConfig.effort.trim()
+            : null;
         const runtimeConfig = mapExecutionModeToRuntime(executionMode);
         const threadId = `thread-${sessionId}`;
         ensureBufferedTurn(turnId);
@@ -270,6 +309,7 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
         void emitEvent(turnId, 'turn.started', {
           threadId,
           ...(model ? { model } : {}),
+          ...(effort ? { effort } : {}),
           ...(cwd ? { cwd } : {}),
           ...(runtimeConfig.sandbox ? { sandbox: runtimeConfig.sandbox } : {}),
           ...(runtimeConfig.approvalPolicy ? { approvalPolicy: runtimeConfig.approvalPolicy } : {}),
@@ -576,6 +616,12 @@ describe.sequential('API e2e (http runner)', () => {
           backend: 'codex',
           model: 'gpt-5-codex',
           displayName: 'GPT-5 Codex',
+          supportedEfforts: [
+            { value: 'low', description: 'Faster responses' },
+            { value: 'high', description: 'Deeper reasoning' },
+            { value: 'xhigh', description: 'Maximum reasoning' },
+          ],
+          defaultEffort: 'high',
         }),
         expect.objectContaining({
           backend: 'codex',
@@ -599,6 +645,7 @@ describe.sequential('API e2e (http runner)', () => {
         backendConfig: {
           model: 'gpt-5-codex',
           executionMode: 'safe-write',
+          effort: 'xhigh',
         },
       }),
     });
@@ -631,6 +678,11 @@ describe.sequential('API e2e (http runner)', () => {
       id: turn.turnId,
       effectiveBackendConfig: {
         model: 'gpt-5-codex',
+        effort: 'xhigh',
+      },
+      effectiveRuntimeConfig: {
+        model: 'gpt-5-codex',
+        effort: 'xhigh',
       },
     });
 
@@ -640,6 +692,7 @@ describe.sequential('API e2e (http runner)', () => {
     expect(streamResponse.status).toBe(200);
     const streamText = await streamResponse.text();
     expect(streamText).toContain('"model":"gpt-5-codex"');
+    expect(streamText).toContain('"effort":"xhigh"');
   });
 
   it('uses project repoPath when dispatching a turn', async () => {
@@ -903,8 +956,8 @@ describe.sequential('API e2e (http runner)', () => {
       body: JSON.stringify({ content: 'prepare thread before manual compact' }),
     });
     expect(turnResponse.status).toBe(201);
-
-    await sleep(1300);
+    const turn = (await turnResponse.json()) as { turnId: string };
+    await waitForTurnStatus(apiBaseUrl, email, turn.turnId, 'completed');
 
     const compactResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}/compact`, {
       method: 'POST',
@@ -1261,8 +1314,8 @@ describe.sequential('API e2e (http runner)', () => {
       body: JSON.stringify({ content: 'prepare claude thread before manual compact' }),
     });
     expect(turnResponse.status).toBe(201);
-
-    await sleep(1300);
+    const turn = (await turnResponse.json()) as { turnId: string };
+    await waitForTurnStatus(apiBaseUrl, email, turn.turnId, 'completed');
 
     const compactResponse = await fetch(`${apiBaseUrl}/api/sessions/${sessionId}/compact`, {
       method: 'POST',

@@ -24,6 +24,7 @@ function createHarness() {
   const activeTurns = new Map<string, ActiveTurn>([[turn.turnId, turn]]);
   const appended: Array<{ turnId: string; type: RunnerEventType; payload: Record<string, unknown> }> = [];
   const finalized: Array<{ turnId: string; type: RunnerEventType; payload: Record<string, unknown> }> = [];
+  const failed: Array<{ turnId: string; message: string }> = [];
   const backend = new CodexBackend(
     {
       codexBin: 'codex',
@@ -39,13 +40,134 @@ function createHarness() {
       },
       finalizeTurn: async (turnId, type, payload) => {
         finalized.push({ turnId, type, payload });
+        const activeTurn = activeTurns.get(turnId);
+        if (activeTurn) {
+          activeTurn.finalized = true;
+          activeTurns.delete(turnId);
+          if (activeTurn.backend === 'codex' || activeTurn.backend === 'claude') {
+            activeTurn.completionResolve?.();
+          }
+        }
       },
-      failTurn: async () => undefined,
+      failTurn: async (turnId, message) => {
+        failed.push({ turnId, message });
+      },
     },
   );
   const notify = (backend as unknown as NotificationHandler).handleCodexNotification.bind(backend);
-  return { appended, finalized, notify };
+  return { activeTurns, appended, backend, failed, finalized, notify };
 }
+
+type WorkerRequestHarness = {
+  ensureCodexWorker(): Promise<{ readyPromise: Promise<void> }>;
+  sendWorkerRequest(worker: unknown, method: string, params: unknown): Promise<unknown>;
+};
+
+function stubWorkerRequests(
+  backend: CodexBackend,
+  handler: (method: string, params: unknown) => Promise<unknown>,
+): void {
+  const internals = backend as unknown as WorkerRequestHarness;
+  internals.ensureCodexWorker = async () => ({ readyPromise: Promise.resolve() });
+  internals.sendWorkerRequest = async (_worker, method, params) => handler(method, params);
+}
+
+describe('CodexBackend reasoning effort', () => {
+  it('maps model reasoning effort metadata from model/list', async () => {
+    const harness = createHarness();
+    stubWorkerRequests(harness.backend, async (method) => {
+      expect(method).toBe('model/list');
+      return {
+        data: [
+          {
+            id: 'gpt-5.4',
+            model: 'gpt-5.4',
+            displayName: 'GPT-5.4',
+            description: 'Test model',
+            hidden: false,
+            isDefault: true,
+            supportedReasoningEfforts: [
+              { reasoningEffort: 'low', description: 'Fast' },
+              { reasoningEffort: 'xhigh', description: 'Deep' },
+            ],
+            defaultReasoningEffort: 'xhigh',
+          },
+        ],
+        nextCursor: null,
+      };
+    });
+
+    await expect(harness.backend.listModels()).resolves.toEqual([
+      expect.objectContaining({
+        model: 'gpt-5.4',
+        supportedEfforts: [
+          { value: 'low', description: 'Fast' },
+          { value: 'xhigh', description: 'Deep' },
+        ],
+        defaultEffort: 'xhigh',
+      }),
+    ]);
+  });
+
+  it('passes configured effort through turn/start and the effective start event', async () => {
+    const harness = createHarness();
+    const requests: Array<{ method: string; params: unknown }> = [];
+    stubWorkerRequests(harness.backend, async (method, params) => {
+      requests.push({ method, params });
+      if (method === 'thread/start') {
+        return { thread: { id: 'codex-thread-effort' } };
+      }
+      if (method === 'turn/start') {
+        setTimeout(() => {
+          void harness.notify('turn/completed', {
+            threadId: 'codex-thread-effort',
+            turn: { id: 'codex-turn-effort', status: 'completed' },
+          });
+        }, 0);
+        return { turn: { id: 'codex-turn-effort' } };
+      }
+      throw new Error(`Unexpected worker request: ${method}`);
+    });
+
+    await harness.backend.startTurn({
+      turnId: 'waypoint-turn-effort',
+      sessionId: 'session-effort',
+      content: 'Use deep reasoning',
+      backend: 'codex',
+      backendConfig: {
+        model: 'gpt-5.4',
+        executionMode: 'safe-write',
+        effort: 'xhigh',
+      },
+      cwd: process.cwd(),
+    });
+
+    expect(requests).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          method: 'turn/start',
+          params: expect.objectContaining({
+            model: 'gpt-5.4',
+            effort: 'xhigh',
+          }),
+        }),
+      ]),
+    );
+    expect(harness.appended).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          turnId: 'waypoint-turn-effort',
+          type: 'turn.started',
+          payload: expect.objectContaining({
+            model: 'gpt-5.4',
+            effort: 'xhigh',
+          }),
+        }),
+      ]),
+    );
+    expect(harness.failed).toEqual([]);
+  });
+});
 
 describe('CodexBackend error notifications', () => {
   it('keeps the turn active when Codex will retry', async () => {

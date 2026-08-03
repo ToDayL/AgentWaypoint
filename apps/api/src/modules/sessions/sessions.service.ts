@@ -523,15 +523,22 @@ function resolveRuntimeBackendConfig(input: {
   if (input.backend === 'codex' || input.backend === 'claude') {
     const model = typeof merged.model === 'string' ? merged.model.trim() : '';
     const executionMode = typeof merged.executionMode === 'string' ? merged.executionMode.trim() : '';
+    const effort = typeof merged.effort === 'string' ? merged.effort.trim() : '';
     if (!model || !EXECUTION_MODES.has(executionMode)) {
       throw new ConflictException({
         message: `Session runtime for backend ${input.backend} requires backendConfig.model and backendConfig.executionMode`,
+      });
+    }
+    if (typeof merged.effort !== 'undefined' && !effort) {
+      throw new ConflictException({
+        message: `Session runtime for backend ${input.backend} requires backendConfig.effort to be a non-empty string`,
       });
     }
     return {
       ...merged,
       model,
       executionMode,
+      ...(effort ? { effort } : {}),
     };
   }
 

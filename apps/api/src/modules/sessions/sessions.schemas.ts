@@ -10,6 +10,26 @@ export const SessionIdParamsSchema = z.object({
 
 const BackendConfigSchema = z.record(z.unknown());
 const ExecutionModeSchema = z.enum(['read-only', 'safe-write', 'auto-review', 'yolo']);
+const EffortSchema = z.string().trim().min(1).max(40);
+
+function validateBackendConfig(
+  backendConfig: Record<string, unknown>,
+  ctx: z.RefinementCtx,
+): void {
+  const model = backendConfig.model;
+  const executionMode = backendConfig.executionMode;
+  const effort = backendConfig.effort;
+  const hasModel = typeof model === 'string' && model.trim().length > 0;
+  const parsedMode = ExecutionModeSchema.safeParse(executionMode);
+  const parsedEffort = typeof effort === 'undefined' ? null : EffortSchema.safeParse(effort);
+  if (!hasModel || !parsedMode.success || (parsedEffort !== null && !parsedEffort.success)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'backendConfig requires model, executionMode, and an optional non-empty effort string',
+      path: ['backendConfig'],
+    });
+  }
+}
 
 export const CreateSessionBodySchema = z
   .object({
@@ -24,17 +44,7 @@ export const CreateSessionBodySchema = z
     if (typeof input.backendConfig === 'undefined') {
       return;
     }
-    const model = input.backendConfig.model;
-    const executionMode = input.backendConfig.executionMode;
-    const hasModel = typeof model === 'string' && model.trim().length > 0;
-    const parsedMode = ExecutionModeSchema.safeParse(executionMode);
-    if (!hasModel || !parsedMode.success) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'backendConfig requires model and executionMode',
-        path: ['backendConfig'],
-      });
-    }
+    validateBackendConfig(input.backendConfig, ctx);
   });
 
 export const ForkSessionBodySchema = z.object({
@@ -51,17 +61,7 @@ export const UpdateSessionBodySchema = z
   .strict()
   .superRefine((input, ctx) => {
     if (typeof input.backendConfig !== 'undefined') {
-      const model = input.backendConfig.model;
-      const executionMode = input.backendConfig.executionMode;
-      const hasModel = typeof model === 'string' && model.trim().length > 0;
-      const parsedMode = ExecutionModeSchema.safeParse(executionMode);
-      if (!hasModel || !parsedMode.success) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'backendConfig requires model and executionMode',
-          path: ['backendConfig'],
-        });
-      }
+      validateBackendConfig(input.backendConfig, ctx);
     }
 
     if (Object.keys(input).length === 0) {
