@@ -149,7 +149,7 @@ export class ChannelsService {
       await this.ensureSessionOwnedByUser(userId, query.sessionId);
     }
 
-    return this.prisma.botMessage.findMany({
+    const messages = await this.prisma.botMessage.findMany({
       where: {
         project: {
           ownerUserId: userId,
@@ -162,6 +162,7 @@ export class ChannelsService {
       orderBy: { createdAt: 'desc' },
       take: query.limit ?? 50,
     });
+    return Promise.all(messages.map((message) => this.hydrateEventBackedMessage(message)));
   }
 
   async getMessage(userId: string, messageId: string): Promise<BotMessage> {
@@ -177,7 +178,7 @@ export class ChannelsService {
       throw new NotFoundException({ message: 'Message not found' });
     }
     ensureOwnedByUser(userId, message.project.ownerUserId);
-    return message;
+    return this.hydrateEventBackedMessage(message);
   }
 
   async listActiveIntegrationsForGateway(query: GatewayActiveIntegrationsQuery): Promise<BotIntegration[]> {
@@ -294,6 +295,10 @@ export class ChannelsService {
         },
       });
     });
+  }
+
+  async hydrateOutboundForGateway(message: BotMessage): Promise<BotMessage> {
+    return this.hydrateEventBackedMessage(message);
   }
 
   async reportOutboundResultForGateway(messageId: string, input: GatewayResultBody): Promise<BotMessage> {
@@ -536,6 +541,44 @@ export class ChannelsService {
       },
     });
     await this.queueSignalService.publishOutboundWake();
+  }
+
+  private async hydrateEventBackedMessage(message: BotMessage): Promise<BotMessage> {
+    if (!message.eventId) {
+      return message;
+    }
+
+    const event = await this.prisma.event.findUnique({
+      where: { id: message.eventId },
+      include: {
+        turn: {
+          select: {
+            triggerIdentifier: true,
+            triggerProvider: true,
+            triggerIntegrationId: true,
+            triggerMessageId: true,
+          },
+        },
+      },
+    });
+    if (!event) {
+      throw new NotFoundException({ message: `Event not found for outbound message ${message.id}` });
+    }
+
+    return {
+      ...message,
+      payloadRaw: {
+        turnId: event.turnId,
+        seq: event.seq,
+        type: event.type,
+        payload: event.payload,
+        createdAt: event.createdAt.toISOString(),
+        triggerIdentifier: event.turn.triggerIdentifier,
+        triggerProvider: event.turn.triggerProvider,
+        triggerIntegrationId: event.turn.triggerIntegrationId,
+        triggerMessageId: event.turn.triggerMessageId,
+      },
+    };
   }
 }
 

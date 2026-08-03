@@ -62,7 +62,7 @@ API-internal approval queue events are also persisted/streamed:
 - `turn.approval.timer_paused`
 - `turn.approval.timer_resumed`
 
-API persists each event in the `Event` table, assigns its own per-turn `seq`, streams from persisted rows, and mirrors events into `BotMessage(kind=event)` for channel dispatch.
+API persists each event in the `Event` table, assigns its own per-turn `seq`, and streams from persisted rows. Channel dispatch uses `BotMessage(kind=event, eventId=...)` as an outbox reference; the gateway hydrates the canonical event payload once before passing it to channel plugins.
 
 ## 5. Backend Config
 

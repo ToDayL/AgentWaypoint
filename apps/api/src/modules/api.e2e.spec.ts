@@ -1052,7 +1052,7 @@ describe('API e2e', () => {
     const events = await prisma.event.findMany({
       where: { turnId },
       orderBy: { seq: 'asc' },
-      select: { type: true, payload: true },
+      select: { id: true, seq: true, type: true, payload: true },
     });
     const assistantDeltas = events.filter((event) => event.type === 'assistant.delta');
     const diffUpdates = events.filter((event) => event.type === 'diff.updated');
@@ -1065,6 +1065,39 @@ describe('API e2e', () => {
     expect(toolOutputs).toHaveLength(1);
     expect(toolOutputs[0]?.payload).toMatchObject({ text: 'out-1out-2' });
     expect(events.map((event) => event.type)).toContain('turn.completed');
+
+    const assistantDelta = assistantDeltas[0];
+    if (!assistantDelta) {
+      throw new Error('Expected a persisted assistant.delta event');
+    }
+    const eventOutbox = await prisma.botMessage.findUnique({
+      where: { eventId: assistantDelta.id },
+    });
+    if (!eventOutbox) {
+      throw new Error('Expected an event-backed BotMessage');
+    }
+    expect(eventOutbox).toMatchObject({
+      kind: 'event',
+      eventId: assistantDelta.id,
+      payloadRaw: {},
+    });
+
+    const hydratedMessageResponse = await app.inject({
+      method: 'GET',
+      url: `/api/channels/messages/${eventOutbox.id}`,
+      headers: { 'x-user-email': email },
+    });
+    expect(hydratedMessageResponse.statusCode).toBe(200);
+    expect(hydratedMessageResponse.json()).toMatchObject({
+      id: eventOutbox.id,
+      eventId: assistantDelta.id,
+      payloadRaw: {
+        turnId,
+        seq: assistantDelta.seq,
+        type: 'assistant.delta',
+        payload: { text: 'ABC' },
+      },
+    });
 
     const historyResponse = await app.inject({
       method: 'GET',

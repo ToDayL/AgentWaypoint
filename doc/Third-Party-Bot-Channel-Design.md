@@ -10,7 +10,7 @@ The channel system is implemented as an in-process API subsystem. It supports:
 - Discord plugin as a real provider integration.
 - Generic integration records through `BotIntegration`.
 - Generic outbound queue records through `BotMessage`.
-- Event mirroring from turns to channel plugins.
+- Event outbox references from turns to channel plugins.
 
 The larger external gateway design remains future work.
 
@@ -60,6 +60,7 @@ Active fields include:
 - `sessionId`
 - `kind`: `turn_message`, `approval_request`, `user_input_request`, or `event`
 - `payloadRaw`
+- `eventId`: canonical `Event` reference for event-backed queue items
 - `status`: `queued`, `sending`, `sent`, `delivered`, or `failed`
 - claim/lease fields
 - provider delivery fields
@@ -220,7 +221,7 @@ Bindings are stored in Discord `pluginConfig` as channel/session binding maps.
 1. Web calls `POST /api/channels/plugins/web/app/sessions/:id/turns`.
 2. Web plugin delegates to `TurnsService`.
 3. Turn events are persisted to `Event`.
-4. Events are also queued as `BotMessage(kind=event)`.
+4. Events are queued as `BotMessage(kind=event, eventId=...)` references and hydrated by the gateway before plugin dispatch.
 5. Gateway dispatches to plugins.
 6. Web SSE merges durable events with web plugin buffer.
 

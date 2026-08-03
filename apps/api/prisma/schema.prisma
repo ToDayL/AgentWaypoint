@@ -137,13 +137,14 @@ model TurnApproval {
 }
 
 model Event {
-  id        String   @id @default(cuid())
-  turnId    String
-  seq       Int
-  type      String
-  payload   Json
-  createdAt DateTime @default(now())
-  turn      Turn     @relation(fields: [turnId], references: [id], onDelete: Cascade)
+  id         String      @id @default(cuid())
+  turnId     String
+  seq        Int
+  type       String
+  payload    Json
+  createdAt  DateTime    @default(now())
+  turn       Turn        @relation(fields: [turnId], references: [id], onDelete: Cascade)
+  botMessage BotMessage?
 
   @@index([turnId, seq])
 }
@@ -185,8 +186,10 @@ model BotMessage {
   createdAt         DateTime  @default(now())
   sentAt            DateTime?
   deliveredAt       DateTime?
+  eventId           String?   @unique
   project           Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   session           Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  event             Event?    @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
   @@index([sessionId])
   @@index([projectId, sessionId, createdAt])

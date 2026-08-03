@@ -315,53 +315,42 @@ export class ApprovalQueueService implements OnModuleInit {
   }
 
   private async appendEvent(turnId: string, type: string, payload: Record<string, unknown>): Promise<void> {
-    const latest = await this.prisma.event.findFirst({
-      where: { turnId },
-      orderBy: { seq: 'desc' },
-      select: { seq: true },
-    });
-    const event = await this.prisma.event.create({
-      data: {
-        turnId,
-        seq: (latest?.seq ?? 0) + 1,
-        type,
-        payload: payload as Prisma.InputJsonValue,
-      },
-    });
-
-    const turn = await this.prisma.turn.findUnique({
-      where: { id: turnId },
-      select: {
-        sessionId: true,
-        triggerIdentifier: true,
-        triggerProvider: true,
-        triggerIntegrationId: true,
-        triggerMessageId: true,
-        session: { select: { projectId: true } },
-      },
-    });
-    if (!turn) {
-      return;
-    }
-
-    await this.prisma.botMessage.create({
-      data: {
-        projectId: turn.session.projectId,
-        sessionId: turn.sessionId,
-        kind: 'event',
-        payloadRaw: {
+    await this.prisma.$transaction(async (tx) => {
+      const latest = await tx.event.findFirst({
+        where: { turnId },
+        orderBy: { seq: 'desc' },
+        select: { seq: true },
+      });
+      const event = await tx.event.create({
+        data: {
           turnId,
-          seq: event.seq,
+          seq: (latest?.seq ?? 0) + 1,
           type,
           payload: payload as Prisma.InputJsonValue,
-          createdAt: event.createdAt.toISOString(),
-          triggerIdentifier: turn.triggerIdentifier,
-          triggerProvider: turn.triggerProvider,
-          triggerIntegrationId: turn.triggerIntegrationId,
-          triggerMessageId: turn.triggerMessageId,
         },
-        status: 'queued',
-      },
+      });
+
+      const turn = await tx.turn.findUnique({
+        where: { id: turnId },
+        select: {
+          sessionId: true,
+          session: { select: { projectId: true } },
+        },
+      });
+      if (!turn) {
+        return;
+      }
+
+      await tx.botMessage.create({
+        data: {
+          projectId: turn.session.projectId,
+          sessionId: turn.sessionId,
+          kind: 'event',
+          eventId: event.id,
+          payloadRaw: {},
+          status: 'queued',
+        },
+      });
     });
     await this.queueSignalService.publishOutboundWake();
   }
