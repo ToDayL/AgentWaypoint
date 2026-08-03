@@ -9,7 +9,7 @@
     "pnpm": ">=10"
   },
   "scripts": {
-    "dev": "AGENTWAYPOINT_HOME=$PWD/.agentwaypoint-dev pnpm --filter @agentwaypoint/api dev",
+    "dev": "AGENTWAYPOINT_HOME=$PWD/.agentwaypoint-dev corepack pnpm --filter @agentwaypoint/api dev",
     "dev:up": "./scripts/dev-up.sh",
     "dev:down": "./scripts/dev-down.sh",
     "dev:status": "./scripts/dev-status.sh",
@@ -17,15 +17,15 @@
     "prod:down": "./scripts/prod-down.sh",
     "prod:status": "./scripts/prod-status.sh",
     "test:api:e2e": "./scripts/test-api-e2e.sh",
-    "build": "pnpm --filter @agentwaypoint/api prisma:generate && pnpm -r --if-present build",
+    "build": "corepack pnpm --filter @agentwaypoint/api prisma:generate && corepack pnpm -r --if-present build",
     "start": "./agent-waypoint start",
     "stop": "./agent-waypoint stop",
     "restart": "./agent-waypoint restart",
     "status": "./agent-waypoint status",
-    "test": "pnpm -r --if-present test",
-    "lint": "pnpm -r --if-present lint",
-    "typecheck": "pnpm -r --if-present typecheck",
-    "format": "pnpm -r --if-present format"
+    "test": "corepack pnpm -r --if-present test",
+    "lint": "corepack pnpm -r --if-present lint",
+    "typecheck": "corepack pnpm -r --if-present typecheck",
+    "format": "corepack pnpm -r --if-present format"
   },
   "devDependencies": {
     "@types/react": "^19.1.13",
