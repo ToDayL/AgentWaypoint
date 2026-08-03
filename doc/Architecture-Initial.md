@@ -156,7 +156,7 @@ Flow:
 2. API creates a user `Message` and a `Turn(status=queued)`.
 3. API dispatches to the selected runner backend.
 4. API consumes normalized runner events and persists them as `Event` rows.
-5. API streams persisted events to Web over SSE and queues mirrored `BotMessage(kind=event)` rows for channels.
+5. API streams persisted events to Web over SSE and queues `BotMessage(kind=event, eventId=...)` outbox references for channels; the gateway hydrates each event before dispatch.
 6. On completion/cancel/failure, API creates/finalizes assistant messages and terminal turn state.
 
 Only one active turn is allowed per session.

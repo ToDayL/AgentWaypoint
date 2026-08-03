@@ -54,7 +54,7 @@ flowchart TB
   - `WebPlugin`
   - `DiscordPlugin`
 - `BotMessage` is the active outbound queue table.
-- Runner events are persisted to `Event` and mirrored to `BotMessage(kind=event)`.
+- Runner events are persisted to `Event`; `BotMessage(kind=event)` stores an `eventId` outbox reference, which the gateway hydrates before plugin dispatch.
 - Dispatch routing is binding-driven:
   - Web plugin binds all sessions.
   - Discord bindings live in `BotIntegration.pluginConfig`.

@@ -411,10 +411,11 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
         gatewayInstanceId: this.gatewayInstanceId,
         leaseSeconds: 30,
       });
+      const hydrated = await this.channelsService.hydrateOutboundForGateway(claimed);
       const sendResults = await Promise.all(
         deliveries.map(async ({ plugin, binding }) => {
-          const dispatchContext = buildDispatchContextForPlugin(plugin, binding, claimed);
-          return plugin.sendMessage(claimed, dispatchContext);
+          const dispatchContext = buildDispatchContextForPlugin(plugin, binding, hydrated);
+          return plugin.sendMessage(hydrated, dispatchContext);
         }),
       );
       const providerMessageId = sendResults.find((result) => typeof result.providerMessageId === 'string')?.providerMessageId;
