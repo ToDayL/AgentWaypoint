@@ -61,6 +61,35 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForTurnStatus(
+  apiBaseUrl: string,
+  email: string,
+  turnId: string,
+  expectedStatus: string,
+  timeoutMs = 5000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus = 'unknown';
+
+  while (Date.now() < deadline) {
+    const response = await fetch(`${apiBaseUrl}/api/turns/${turnId}`, {
+      headers: { 'x-user-email': email },
+    });
+    if (response.status === 200) {
+      const turn = (await response.json()) as { status?: unknown };
+      lastStatus = typeof turn.status === 'string' ? turn.status : 'unknown';
+      if (lastStatus === expectedStatus) {
+        return;
+      }
+    } else {
+      lastStatus = `HTTP ${response.status}`;
+    }
+    await sleep(50);
+  }
+
+  throw new Error(`Timed out waiting for turn ${turnId} to become ${expectedStatus}; last status: ${lastStatus}`);
+}
+
 function mapExecutionModeToRuntime(executionMode: string): { sandbox: string; approvalPolicy: string } {
   if (executionMode === 'read-only') {
     return { sandbox: 'read-only', approvalPolicy: 'on-request' };
@@ -927,8 +956,8 @@ describe.sequential('API e2e (http runner)', () => {
       body: JSON.stringify({ content: 'prepare thread before manual compact' }),
     });
     expect(turnResponse.status).toBe(201);
-
-    await sleep(1300);
+    const turn = (await turnResponse.json()) as { turnId: string };
+    await waitForTurnStatus(apiBaseUrl, email, turn.turnId, 'completed');
 
     const compactResponse = await fetch(`${apiBaseUrl}/api/sessions/${session.id}/compact`, {
       method: 'POST',
@@ -1285,8 +1314,8 @@ describe.sequential('API e2e (http runner)', () => {
       body: JSON.stringify({ content: 'prepare claude thread before manual compact' }),
     });
     expect(turnResponse.status).toBe(201);
-
-    await sleep(1300);
+    const turn = (await turnResponse.json()) as { turnId: string };
+    await waitForTurnStatus(apiBaseUrl, email, turn.turnId, 'completed');
 
     const compactResponse = await fetch(`${apiBaseUrl}/api/sessions/${sessionId}/compact`, {
       method: 'POST',
