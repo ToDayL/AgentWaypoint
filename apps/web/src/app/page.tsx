@@ -2,8 +2,8 @@
 
 import {
   ChangeEvent,
-  CompositionEvent as ReactCompositionEvent,
   CSSProperties,
+  forwardRef,
   KeyboardEvent,
   memo,
   PointerEvent as ReactPointerEvent,
@@ -11,6 +11,7 @@ import {
   UIEvent as ReactUIEvent,
   useCallback,
   useEffect,
+  useImperativeHandle,
   useMemo,
   useRef,
   useState,
@@ -276,6 +277,24 @@ type SkillOption = {
   description: string;
 };
 type CommandSuggestionMode = 'codex-skill' | 'claude-slash';
+
+type ChatComposerHandle = {
+  setValue: (value: string, options?: { focus?: boolean }) => void;
+};
+
+type ChatComposerProps = {
+  availableSkills: SkillOption[];
+  busy: boolean;
+  canStartTurn: boolean;
+  canSteerTurn: boolean;
+  commandSuggestionMode: CommandSuggestionMode;
+  draftRef: { current: string };
+  onOpenUploadDialog: () => void;
+  onSubmit: (content: string) => void;
+  uploadError: string;
+  uploadingFiles: boolean;
+  workspaceAvailable: boolean;
+};
 
 const DEFAULT_CODEX_MODEL = 'gpt-5-codex';
 const DEFAULT_CODEX_EXECUTION_MODE = 'safe-write';
@@ -715,10 +734,6 @@ export default function HomePage() {
   const [newSessionAutoApprove, setNewSessionAutoApprove] = useState(false);
   const [newSessionAutoApproveTimeout, setNewSessionAutoApproveTimeout] = useState(10);
   const [availableSkills, setAvailableSkills] = useState<SkillOption[]>([]);
-  const [prompt, setPrompt] = useState('');
-  const [promptCursor, setPromptCursor] = useState(0);
-  const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
-  const [skillSuggestionSuppressedKey, setSkillSuggestionSuppressedKey] = useState('');
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
   const [timelineScrollTop, setTimelineScrollTop] = useState(0);
   const [timelineViewportHeight, setTimelineViewportHeight] = useState(0);
@@ -792,16 +807,25 @@ export default function HomePage() {
     leftWidth: number;
   } | null>(null);
   const chatThreadRef = useRef<HTMLDivElement | null>(null);
-  const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const chatComposerRef = useRef<ChatComposerHandle | null>(null);
+  const promptDraftRef = useRef('');
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const sendTurnHandlerRef = useRef(handleSendTurn);
+  const openUploadDialogHandlerRef = useRef(handleOpenUploadDialog);
+  sendTurnHandlerRef.current = handleSendTurn;
+  openUploadDialogHandlerRef.current = handleOpenUploadDialog;
+  const handleComposerSubmit = useCallback((content: string): void => {
+    void sendTurnHandlerRef.current(content);
+  }, []);
+  const handleComposerOpenUpload = useCallback((): void => {
+    openUploadDialogHandlerRef.current();
+  }, []);
   const chatAtBottomRef = useRef(true);
   const chatScrollIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const chatScrollSettleRafRef = useRef<number | null>(null);
   const suppressBottomAutoCollapseRef = useRef(false);
   const previousDisplayedMessageCountRef = useRef(0);
   const chatScrollTopRef = useRef(0);
-  const promptComposingRef = useRef(false);
-  const promptCompositionEndedAtRef = useRef(0);
   const wasConfigFullscreenActiveRef = useRef(false);
   const previewLoadSeqRef = useRef(0);
   const fileNodeLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -810,9 +834,9 @@ export default function HomePage() {
   const panelLayoutHydratedRef = useRef(false);
   const inspectedTurnIdRef = useRef('');
 
-  const canStartTurn = !!selectedSessionId && prompt.trim().length > 0 && activeTurnId === '';
+  const canStartTurn = !!selectedSessionId && activeTurnId === '';
   const canSteerTurn =
-    appSettings.turnSteerEnabled && !!activeTurnId && prompt.trim().length > 0 && pendingApproval === null;
+    appSettings.turnSteerEnabled && !!activeTurnId && pendingApproval === null;
   const canManualCompact = !!selectedSessionId && !activeTurnId && !busy && !compactingContext;
   const supportedBackends = appSettings.supportedBackends;
   const codexBackendEnabled = supportedBackends.includes('codex');
@@ -889,36 +913,6 @@ export default function HomePage() {
       ? selectedProject.backend.trim()
       : null);
   const commandSuggestionMode: CommandSuggestionMode = effectiveBackend === 'claude' ? 'claude-slash' : 'codex-skill';
-  const commandSuggestionPrefix = commandSuggestionMode === 'claude-slash' ? '/' : '$';
-  const activeSkillToken = useMemo(
-    () => findSkillTokenContext(prompt, promptCursor, commandSuggestionMode),
-    [prompt, promptCursor, commandSuggestionMode],
-  );
-  const filteredSkillSuggestions = useMemo(() => {
-    if (!activeSkillToken) {
-      return [];
-    }
-    const loweredPrefix = activeSkillToken.prefix.toLowerCase();
-    const startsWithMatches = availableSkills.filter((skill) => skill.name.toLowerCase().startsWith(loweredPrefix));
-    const containsMatches = availableSkills.filter(
-      (skill) => !skill.name.toLowerCase().startsWith(loweredPrefix) && skill.name.toLowerCase().includes(loweredPrefix),
-    );
-    return [...startsWithMatches, ...containsMatches];
-  }, [availableSkills, activeSkillToken]);
-  const activeSkillSuggestionKey = useMemo(() => {
-    if (!activeSkillToken) {
-      return '';
-    }
-    return `${activeSkillToken.start}:${activeSkillToken.end}:${activeSkillToken.prefix.toLowerCase()}`;
-  }, [activeSkillToken]);
-  const skillSuggestionVisible =
-    !!activeSkillToken &&
-    filteredSkillSuggestions.length > 0 &&
-    skillSuggestionSuppressedKey !== activeSkillSuggestionKey;
-  const selectedSkillSuggestion =
-    skillSuggestionVisible && filteredSkillSuggestions.length > 0
-      ? filteredSkillSuggestions[Math.min(skillSuggestionIndex, filteredSkillSuggestions.length - 1)] ?? null
-      : null;
   const displayedMessages = useMemo(() => {
     const base = messages.map((message) => ({ ...message, streaming: false }));
     if (!streamBubbleTurnId) {
@@ -1630,27 +1624,6 @@ export default function HomePage() {
       controller.abort();
     };
   }, [mounted, authenticated, activeWorkspacePath, selectedProject?.backend, selectedSession?.meta]);
-
-  useEffect(() => {
-    setSkillSuggestionIndex(0);
-  }, [activeSkillSuggestionKey]);
-
-  useEffect(() => {
-    if (!skillSuggestionVisible) {
-      setSkillSuggestionIndex(0);
-      return;
-    }
-    setSkillSuggestionIndex((current) => Math.max(0, Math.min(current, filteredSkillSuggestions.length - 1)));
-  }, [skillSuggestionVisible, filteredSkillSuggestions.length]);
-
-  useEffect(() => {
-    if (!skillSuggestionSuppressedKey || !activeSkillSuggestionKey) {
-      return;
-    }
-    if (skillSuggestionSuppressedKey !== activeSkillSuggestionKey) {
-      setSkillSuggestionSuppressedKey('');
-    }
-  }, [skillSuggestionSuppressedKey, activeSkillSuggestionKey]);
 
   useEffect(() => {
     const container = chatThreadRef.current;
@@ -2676,24 +2649,14 @@ export default function HomePage() {
     }
     const relativePath = resolveWorkspaceRelativePath(normalizedTargetPath, workspaceRoot);
     const mention = `@${relativePath}`;
-    setPrompt((current) => {
-      const base = current.trimEnd();
-      if (!base) {
-        return mention;
-      }
-      return `${base} ${mention}`;
-    });
+    const base = promptDraftRef.current.trimEnd();
+    setComposerPrompt(base ? `${base} ${mention}` : mention, { focus: true });
     triggerMentionBlink(targetPath);
-    if (typeof window !== 'undefined') {
-      window.requestAnimationFrame(() => {
-        const input = promptInputRef.current;
-        if (!input) {
-          return;
-        }
-        input.focus();
-        input.setSelectionRange(input.value.length, input.value.length);
-      });
-    }
+  }
+
+  function setComposerPrompt(value: string, options?: { focus?: boolean }): void {
+    promptDraftRef.current = value;
+    chatComposerRef.current?.setValue(value, options);
   }
 
   function clearFileNodeLongPressTimer(): void {
@@ -2927,12 +2890,12 @@ export default function HomePage() {
     }
   }
 
-  async function handleSendTurn(): Promise<void> {
-    if (!canStartTurn && !canSteerTurn) {
+  async function handleSendTurn(content: string): Promise<void> {
+    const userContent = content.trim();
+    if (!userContent || (!canStartTurn && !canSteerTurn)) {
       return;
     }
 
-    const userContent = prompt.trim();
     let optimisticMessageId = '';
 
     setBusy(true);
@@ -2940,7 +2903,7 @@ export default function HomePage() {
 
     try {
       if (canSteerTurn && activeTurnId) {
-        const steerContent = prompt.trim();
+        const steerContent = userContent;
         const optimisticMessageId = `steer-${Date.now()}`;
         setMessages((current) => [
           ...current,
@@ -2951,7 +2914,7 @@ export default function HomePage() {
             createdAt: new Date().toISOString(),
           },
         ]);
-        setPrompt('');
+        setComposerPrompt('');
         try {
           await apiRequest<TurnStatusResponse>(`/api/channels/plugins/web/app/turns/${activeTurnId}/steer`, {
             method: 'POST',
@@ -2959,7 +2922,7 @@ export default function HomePage() {
           });
         } catch {
           setMessages((current) => current.filter((message) => message.id !== optimisticMessageId));
-          setPrompt(steerContent);
+          setComposerPrompt(steerContent, { focus: true });
           throw new Error('Failed to steer the current turn');
         }
         return;
@@ -2975,7 +2938,7 @@ export default function HomePage() {
           createdAt: new Date().toISOString(),
         },
       ]);
-      setPrompt('');
+      setComposerPrompt('');
       replaceTimelineEvents([]);
       replaceAssistantText('');
       setReasoningText('');
@@ -3019,14 +2982,14 @@ export default function HomePage() {
         setTurnStatus('idle');
         setStreamActive(false);
         setStreamBubbleTurnId('');
-        setPrompt(userContent);
+        setComposerPrompt(userContent, { focus: true });
         return;
       }
       setError(extractMessage(requestError));
       setTurnStatus('idle');
       setStreamActive(false);
       setStreamBubbleTurnId('');
-      setPrompt(userContent);
+      setComposerPrompt(userContent, { focus: true });
     } finally {
       pendingTurnCreateAbortRef.current = null;
       setBusy(false);
@@ -3959,97 +3922,6 @@ export default function HomePage() {
     } finally {
       setBusy(false);
       closeActionPanel();
-    }
-  }
-
-  function handlePromptKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
-    const composing =
-      promptComposingRef.current ||
-      event.nativeEvent.isComposing ||
-      event.keyCode === 229 ||
-      (event.key === 'Enter' &&
-        promptCompositionEndedAtRef.current > 0 &&
-        Date.now() - promptCompositionEndedAtRef.current < PROMPT_COMPOSITION_ENTER_SUPPRESS_MS);
-    if (composing) {
-      return;
-    }
-
-    if (skillSuggestionVisible && filteredSkillSuggestions.length > 0) {
-      if (event.key === 'ArrowDown') {
-        event.preventDefault();
-        setSkillSuggestionIndex((current) => (current + 1) % filteredSkillSuggestions.length);
-        return;
-      }
-      if (event.key === 'ArrowUp') {
-        event.preventDefault();
-        setSkillSuggestionIndex((current) =>
-          current === 0 ? filteredSkillSuggestions.length - 1 : current - 1,
-        );
-        return;
-      }
-      if ((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') {
-        event.preventDefault();
-        if (selectedSkillSuggestion) {
-          applySkillSuggestion(selectedSkillSuggestion);
-        }
-        return;
-      }
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        setSkillSuggestionSuppressedKey(activeSkillSuggestionKey);
-        return;
-      }
-    }
-    if (event.key !== 'Enter' || event.shiftKey) {
-      return;
-    }
-    event.preventDefault();
-    if (busy || (!canStartTurn && !canSteerTurn)) {
-      return;
-    }
-    void handleSendTurn();
-  }
-
-  function handlePromptCompositionStart(_event: ReactCompositionEvent<HTMLTextAreaElement>): void {
-    promptComposingRef.current = true;
-  }
-
-  function handlePromptCompositionEnd(_event: ReactCompositionEvent<HTMLTextAreaElement>): void {
-    promptComposingRef.current = false;
-    promptCompositionEndedAtRef.current = Date.now();
-  }
-
-  function handlePromptChange(event: ChangeEvent<HTMLTextAreaElement>): void {
-    const nextPrompt = event.target.value;
-    const selectionStart = event.target.selectionStart ?? nextPrompt.length;
-    setPrompt(nextPrompt);
-    setPromptCursor(selectionStart);
-  }
-
-  function handlePromptSelection(event: SyntheticEvent<HTMLTextAreaElement>): void {
-    const target = event.currentTarget;
-    setPromptCursor(target.selectionStart ?? prompt.length);
-  }
-
-  function applySkillSuggestion(skill: SkillOption): void {
-    if (!activeSkillToken) {
-      return;
-    }
-    const replacement = `${commandSuggestionPrefix}${skill.name} `;
-    const nextPrompt = `${prompt.slice(0, activeSkillToken.start)}${replacement}${prompt.slice(activeSkillToken.end)}`;
-    const nextCursor = activeSkillToken.start + replacement.length;
-    setPrompt(nextPrompt);
-    setPromptCursor(nextCursor);
-    setSkillSuggestionSuppressedKey('');
-    if (typeof window !== 'undefined') {
-      window.requestAnimationFrame(() => {
-        const input = promptInputRef.current;
-        if (!input) {
-          return;
-        }
-        input.focus();
-        input.setSelectionRange(nextCursor, nextCursor);
-      });
     }
   }
 
@@ -5656,76 +5528,29 @@ export default function HomePage() {
                 </article>
               ) : null}
 
-              <div className="chat-composer">
-                <input
-                  ref={uploadInputRef}
-                  type="file"
-                  multiple
-                  className="upload-input-hidden"
-                  onChange={(event) => {
-                    void handleFileInputChange(event);
-                  }}
-                />
-                <div className="chat-composer-row">
-                  <button
-                    type="button"
-                    className="icon-button composer-upload-button"
-                    title="Upload File"
-                    aria-label="Upload File"
-                    onClick={handleOpenUploadDialog}
-                    disabled={busy || uploadingFiles || !activeWorkspacePath}
-                  >
-                    <Paperclip />
-                  </button>
-                  <div className="composer-textarea-wrap">
-                    <textarea
-                      ref={promptInputRef}
-                      value={prompt}
-                      onChange={handlePromptChange}
-                      onSelect={handlePromptSelection}
-                      onClick={handlePromptSelection}
-                      onKeyUp={handlePromptSelection}
-                      onKeyDown={handlePromptKeyDown}
-                      onCompositionStart={handlePromptCompositionStart}
-                      onCompositionEnd={handlePromptCompositionEnd}
-                      placeholder="Send a message..."
-                      rows={3}
-                    />
-                    {skillSuggestionVisible ? (
-                      <div className="composer-skill-suggestions">
-                        {filteredSkillSuggestions.map((skill, index) => (
-                          <button
-                            key={skill.name}
-                            type="button"
-                            className={`composer-skill-suggestion-item ${index === skillSuggestionIndex ? 'active' : ''}`}
-                            onMouseDown={(event) => {
-                              event.preventDefault();
-                              applySkillSuggestion(skill);
-                            }}
-                          >
-                            <span className="composer-skill-line">
-                              <span className="composer-skill-name">{`${commandSuggestionPrefix}${skill.name}`}</span>
-                              <span className="composer-skill-description">{skill.description || 'Skill'}</span>
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                  <button
-                    type="button"
-                    className="icon-button composer-send-button"
-                    title={canSteerTurn ? 'Steer Current Turn' : 'Send'}
-                    aria-label={canSteerTurn ? 'Steer Current Turn' : 'Send'}
-                    onClick={() => void handleSendTurn()}
-                    disabled={(!canStartTurn && !canSteerTurn) || busy}
-                  >
-                    <Send />
-                  </button>
-                </div>
-                {uploadingFiles ? <p className="composer-upload-hint">Uploading file...</p> : null}
-                {uploadError ? <p className="composer-upload-error">{uploadError}</p> : null}
-              </div>
+              <input
+                ref={uploadInputRef}
+                type="file"
+                multiple
+                className="upload-input-hidden"
+                onChange={(event) => {
+                  void handleFileInputChange(event);
+                }}
+              />
+              <ChatComposer
+                ref={chatComposerRef}
+                availableSkills={availableSkills}
+                busy={busy}
+                canStartTurn={canStartTurn}
+                canSteerTurn={canSteerTurn}
+                commandSuggestionMode={commandSuggestionMode}
+                draftRef={promptDraftRef}
+                onOpenUploadDialog={handleComposerOpenUpload}
+                onSubmit={handleComposerSubmit}
+                uploadError={uploadError}
+                uploadingFiles={uploadingFiles}
+                workspaceAvailable={!!activeWorkspacePath}
+              />
             </section> : null}
 
             {!configFullscreenActive && (rightSidebarMode !== 'closed' || mobileInsightsOpen) ? (
@@ -5899,6 +5724,260 @@ export default function HomePage() {
     </main>
   );
 }
+
+const ChatComposer = memo(forwardRef<ChatComposerHandle, ChatComposerProps>(function ChatComposer(
+  {
+    availableSkills,
+    busy,
+    canStartTurn,
+    canSteerTurn,
+    commandSuggestionMode,
+    draftRef,
+    onOpenUploadDialog,
+    onSubmit,
+    uploadError,
+    uploadingFiles,
+    workspaceAvailable,
+  },
+  ref,
+) {
+  const [prompt, setPrompt] = useState(() => draftRef.current);
+  const [promptCursor, setPromptCursor] = useState(() => draftRef.current.length);
+  const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
+  const [skillSuggestionSuppressedKey, setSkillSuggestionSuppressedKey] = useState('');
+  const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const promptComposingRef = useRef(false);
+  const promptCompositionEndedAtRef = useRef(0);
+
+  const commandSuggestionPrefix = commandSuggestionMode === 'claude-slash' ? '/' : '$';
+  const activeSkillToken = useMemo(
+    () => findSkillTokenContext(prompt, promptCursor, commandSuggestionMode),
+    [prompt, promptCursor, commandSuggestionMode],
+  );
+  const filteredSkillSuggestions = useMemo(() => {
+    if (!activeSkillToken) {
+      return [];
+    }
+    const loweredPrefix = activeSkillToken.prefix.toLowerCase();
+    const startsWithMatches = availableSkills.filter((skill) => skill.name.toLowerCase().startsWith(loweredPrefix));
+    const containsMatches = availableSkills.filter(
+      (skill) => !skill.name.toLowerCase().startsWith(loweredPrefix) && skill.name.toLowerCase().includes(loweredPrefix),
+    );
+    return [...startsWithMatches, ...containsMatches];
+  }, [availableSkills, activeSkillToken]);
+  const activeSkillSuggestionKey = useMemo(() => {
+    if (!activeSkillToken) {
+      return '';
+    }
+    return `${activeSkillToken.start}:${activeSkillToken.end}:${activeSkillToken.prefix.toLowerCase()}`;
+  }, [activeSkillToken]);
+  const skillSuggestionVisible =
+    !!activeSkillToken &&
+    filteredSkillSuggestions.length > 0 &&
+    skillSuggestionSuppressedKey !== activeSkillSuggestionKey;
+  const selectedSkillSuggestion =
+    skillSuggestionVisible && filteredSkillSuggestions.length > 0
+      ? filteredSkillSuggestions[Math.min(skillSuggestionIndex, filteredSkillSuggestions.length - 1)] ?? null
+      : null;
+  const hasPrompt = prompt.trim().length > 0;
+  const canSubmit = hasPrompt && (canStartTurn || canSteerTurn) && !busy;
+
+  const updatePrompt = useCallback((value: string, options?: { focus?: boolean }): void => {
+    draftRef.current = value;
+    setPrompt(value);
+    setPromptCursor(value.length);
+    setSkillSuggestionSuppressedKey('');
+    if (options?.focus && typeof window !== 'undefined') {
+      window.requestAnimationFrame(() => {
+        const input = promptInputRef.current;
+        if (!input) {
+          return;
+        }
+        input.focus();
+        input.setSelectionRange(value.length, value.length);
+      });
+    }
+  }, [draftRef]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      setValue(value: string, options?: { focus?: boolean }): void {
+        updatePrompt(value, options);
+      },
+    }),
+    [updatePrompt],
+  );
+
+  useEffect(() => {
+    setSkillSuggestionIndex(0);
+  }, [activeSkillSuggestionKey]);
+
+  useEffect(() => {
+    if (!skillSuggestionVisible) {
+      setSkillSuggestionIndex(0);
+      return;
+    }
+    setSkillSuggestionIndex((current) => Math.max(0, Math.min(current, filteredSkillSuggestions.length - 1)));
+  }, [skillSuggestionVisible, filteredSkillSuggestions.length]);
+
+  useEffect(() => {
+    if (!skillSuggestionSuppressedKey || !activeSkillSuggestionKey) {
+      return;
+    }
+    if (skillSuggestionSuppressedKey !== activeSkillSuggestionKey) {
+      setSkillSuggestionSuppressedKey('');
+    }
+  }, [skillSuggestionSuppressedKey, activeSkillSuggestionKey]);
+
+  function applySkillSuggestion(skill: SkillOption): void {
+    if (!activeSkillToken) {
+      return;
+    }
+    const replacement = `${commandSuggestionPrefix}${skill.name} `;
+    const nextPrompt = `${prompt.slice(0, activeSkillToken.start)}${replacement}${prompt.slice(activeSkillToken.end)}`;
+    const nextCursor = activeSkillToken.start + replacement.length;
+    draftRef.current = nextPrompt;
+    setPrompt(nextPrompt);
+    setPromptCursor(nextCursor);
+    setSkillSuggestionSuppressedKey('');
+    if (typeof window !== 'undefined') {
+      window.requestAnimationFrame(() => {
+        const input = promptInputRef.current;
+        if (!input) {
+          return;
+        }
+        input.focus();
+        input.setSelectionRange(nextCursor, nextCursor);
+      });
+    }
+  }
+
+  function handlePromptKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    const composing =
+      promptComposingRef.current ||
+      event.nativeEvent.isComposing ||
+      event.keyCode === 229 ||
+      (event.key === 'Enter' &&
+        promptCompositionEndedAtRef.current > 0 &&
+        Date.now() - promptCompositionEndedAtRef.current < PROMPT_COMPOSITION_ENTER_SUPPRESS_MS);
+    if (composing) {
+      return;
+    }
+
+    if (skillSuggestionVisible && filteredSkillSuggestions.length > 0) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setSkillSuggestionIndex((current) => (current + 1) % filteredSkillSuggestions.length);
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setSkillSuggestionIndex((current) =>
+          current === 0 ? filteredSkillSuggestions.length - 1 : current - 1,
+        );
+        return;
+      }
+      if ((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') {
+        event.preventDefault();
+        if (selectedSkillSuggestion) {
+          applySkillSuggestion(selectedSkillSuggestion);
+        }
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setSkillSuggestionSuppressedKey(activeSkillSuggestionKey);
+        return;
+      }
+    }
+    if (event.key !== 'Enter' || event.shiftKey) {
+      return;
+    }
+    event.preventDefault();
+    if (canSubmit) {
+      onSubmit(prompt);
+    }
+  }
+
+  function handlePromptChange(event: ChangeEvent<HTMLTextAreaElement>): void {
+    const nextPrompt = event.target.value;
+    draftRef.current = nextPrompt;
+    setPrompt(nextPrompt);
+    setPromptCursor(event.target.selectionStart ?? nextPrompt.length);
+  }
+
+  function handlePromptSelection(event: SyntheticEvent<HTMLTextAreaElement>): void {
+    setPromptCursor(event.currentTarget.selectionStart ?? prompt.length);
+  }
+
+  return (
+    <div className="chat-composer">
+      <div className="chat-composer-row">
+        <button
+          type="button"
+          className="icon-button composer-upload-button"
+          title="Upload File"
+          aria-label="Upload File"
+          onClick={onOpenUploadDialog}
+          disabled={busy || uploadingFiles || !workspaceAvailable}
+        >
+          <Paperclip />
+        </button>
+        <div className="composer-textarea-wrap">
+          <textarea
+            ref={promptInputRef}
+            value={prompt}
+            onChange={handlePromptChange}
+            onSelect={handlePromptSelection}
+            onKeyDown={handlePromptKeyDown}
+            onCompositionStart={() => {
+              promptComposingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              promptComposingRef.current = false;
+              promptCompositionEndedAtRef.current = Date.now();
+            }}
+            placeholder="Send a message..."
+            rows={3}
+          />
+          {skillSuggestionVisible ? (
+            <div className="composer-skill-suggestions">
+              {filteredSkillSuggestions.map((skill, index) => (
+                <button
+                  key={skill.name}
+                  type="button"
+                  className={`composer-skill-suggestion-item ${index === skillSuggestionIndex ? 'active' : ''}`}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    applySkillSuggestion(skill);
+                  }}
+                >
+                  <span className="composer-skill-line">
+                    <span className="composer-skill-name">{`${commandSuggestionPrefix}${skill.name}`}</span>
+                    <span className="composer-skill-description">{skill.description || 'Skill'}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          className="icon-button composer-send-button"
+          title={canSteerTurn ? 'Steer Current Turn' : 'Send'}
+          aria-label={canSteerTurn ? 'Steer Current Turn' : 'Send'}
+          onClick={() => onSubmit(prompt)}
+          disabled={!canSubmit}
+        >
+          <Send />
+        </button>
+      </div>
+      {uploadingFiles ? <p className="composer-upload-hint">Uploading file...</p> : null}
+      {uploadError ? <p className="composer-upload-error">{uploadError}</p> : null}
+    </div>
+  );
+}));
 
 function clampLeftPaneWidth(value: number): number {
   if (!Number.isFinite(value)) {
