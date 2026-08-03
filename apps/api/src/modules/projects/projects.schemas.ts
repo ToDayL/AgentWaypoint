@@ -4,6 +4,7 @@ const BackendConfigSchema = z.record(z.unknown());
 const CodexBackendConfigSchema = z.object({
   model: z.string().trim().min(1).max(120),
   executionMode: z.enum(['read-only', 'safe-write', 'auto-review', 'yolo']),
+  effort: z.string().trim().min(1).max(40).optional(),
 });
 const ClaudeBackendConfigSchema = z.object({
   model: z.string().trim().min(1).max(120),

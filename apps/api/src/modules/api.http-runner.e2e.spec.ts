@@ -187,6 +187,12 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
               description: 'Primary coding model',
               hidden: false,
               isDefault: true,
+              supportedEfforts: [
+                { value: 'low', description: 'Faster responses' },
+                { value: 'high', description: 'Deeper reasoning' },
+                { value: 'xhigh', description: 'Maximum reasoning' },
+              ],
+              defaultEffort: 'high',
             },
             {
               id: 'model-gpt-5-mini',
@@ -259,6 +265,10 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
           typeof backendConfig.executionMode === 'string' && backendConfig.executionMode.trim().length > 0
             ? backendConfig.executionMode.trim()
             : 'safe-write';
+        const effort =
+          typeof backendConfig.effort === 'string' && backendConfig.effort.trim().length > 0
+            ? backendConfig.effort.trim()
+            : null;
         const runtimeConfig = mapExecutionModeToRuntime(executionMode);
         const threadId = `thread-${sessionId}`;
         ensureBufferedTurn(turnId);
@@ -270,6 +280,7 @@ async function createTestRunnerServer(): Promise<TestRunnerServer> {
         void emitEvent(turnId, 'turn.started', {
           threadId,
           ...(model ? { model } : {}),
+          ...(effort ? { effort } : {}),
           ...(cwd ? { cwd } : {}),
           ...(runtimeConfig.sandbox ? { sandbox: runtimeConfig.sandbox } : {}),
           ...(runtimeConfig.approvalPolicy ? { approvalPolicy: runtimeConfig.approvalPolicy } : {}),
@@ -576,6 +587,12 @@ describe.sequential('API e2e (http runner)', () => {
           backend: 'codex',
           model: 'gpt-5-codex',
           displayName: 'GPT-5 Codex',
+          supportedEfforts: [
+            { value: 'low', description: 'Faster responses' },
+            { value: 'high', description: 'Deeper reasoning' },
+            { value: 'xhigh', description: 'Maximum reasoning' },
+          ],
+          defaultEffort: 'high',
         }),
         expect.objectContaining({
           backend: 'codex',
@@ -599,6 +616,7 @@ describe.sequential('API e2e (http runner)', () => {
         backendConfig: {
           model: 'gpt-5-codex',
           executionMode: 'safe-write',
+          effort: 'xhigh',
         },
       }),
     });
@@ -631,6 +649,11 @@ describe.sequential('API e2e (http runner)', () => {
       id: turn.turnId,
       effectiveBackendConfig: {
         model: 'gpt-5-codex',
+        effort: 'xhigh',
+      },
+      effectiveRuntimeConfig: {
+        model: 'gpt-5-codex',
+        effort: 'xhigh',
       },
     });
 
@@ -640,6 +663,7 @@ describe.sequential('API e2e (http runner)', () => {
     expect(streamResponse.status).toBe(200);
     const streamText = await streamResponse.text();
     expect(streamText).toContain('"model":"gpt-5-codex"');
+    expect(streamText).toContain('"effort":"xhigh"');
   });
 
   it('uses project repoPath when dispatching a turn', async () => {

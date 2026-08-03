@@ -67,6 +67,7 @@ export class MockRunnerAdapter implements RunnerAdapter {
         : null;
     const model = readOptionalString(backendConfig?.model);
     const executionMode = readOptionalString(backendConfig?.executionMode) ?? 'safe-write';
+    const effort = readOptionalString(backendConfig?.effort);
     const runtimeConfig = mapExecutionModeToRuntime(executionMode);
 
     await this.prisma.turn.update({
@@ -78,10 +79,12 @@ export class MockRunnerAdapter implements RunnerAdapter {
           cwd: input.cwd,
           model,
           executionMode,
+          effort,
         }),
         effectiveRuntimeConfig: buildEffectiveRuntimeConfig({
           cwd: input.cwd,
           model,
+          effort,
           sandbox: runtimeConfig.sandbox,
           approvalPolicy: runtimeConfig.approvalPolicy,
         }),
@@ -91,6 +94,7 @@ export class MockRunnerAdapter implements RunnerAdapter {
     await this.appendEvent(input.turnId, 'turn.started', {
       threadId,
       ...(model ? { model } : {}),
+      ...(effort ? { effort } : {}),
       ...(input.cwd ? { cwd: input.cwd } : {}),
       ...(runtimeConfig.sandbox ? { sandbox: runtimeConfig.sandbox } : {}),
       ...(runtimeConfig.approvalPolicy ? { approvalPolicy: runtimeConfig.approvalPolicy } : {}),
@@ -654,6 +658,7 @@ function mapExecutionModeToRuntime(executionMode: string): {
 function buildEffectiveRuntimeConfig(input: {
   cwd?: string | null;
   model?: string | null;
+  effort?: string | null;
   sandbox?: string | null;
   approvalPolicy?: string | null;
 }): Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput {
@@ -663,6 +668,9 @@ function buildEffectiveRuntimeConfig(input: {
   }
   if (typeof input.model === 'string' && input.model.trim().length > 0) {
     payload.model = input.model.trim();
+  }
+  if (typeof input.effort === 'string' && input.effort.trim().length > 0) {
+    payload.effort = input.effort.trim();
   }
   if (typeof input.sandbox === 'string' && input.sandbox.trim().length > 0) {
     payload.sandbox = input.sandbox.trim();
@@ -680,6 +688,7 @@ function buildEffectiveBackendConfig(input: {
   cwd?: string | null;
   model?: string | null;
   executionMode?: string | null;
+  effort?: string | null;
 }): Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput {
   const payload: Record<string, unknown> = {};
   if (typeof input.cwd === 'string' && input.cwd.trim().length > 0) {
@@ -690,6 +699,9 @@ function buildEffectiveBackendConfig(input: {
   }
   if (typeof input.executionMode === 'string' && input.executionMode.trim().length > 0) {
     payload.executionMode = input.executionMode.trim();
+  }
+  if (typeof input.effort === 'string' && input.effort.trim().length > 0) {
+    payload.effort = input.effort.trim();
   }
   if (Object.keys(payload).length === 0) {
     return Prisma.JsonNull;

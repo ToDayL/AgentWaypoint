@@ -1570,6 +1570,11 @@ function buildEffectiveBackendConfig(
   } else if (typeof requested?.model === 'string' && requested.model.trim().length > 0) {
     effective.model = requested.model.trim();
   }
+  if (typeof payload.effort === 'string' && payload.effort.trim().length > 0) {
+    effective.effort = payload.effort.trim();
+  } else if (typeof requested?.effort === 'string' && requested.effort.trim().length > 0) {
+    effective.effort = requested.effort.trim();
+  }
 
   const explicitExecutionMode =
     typeof payload.executionMode === 'string' && payload.executionMode.trim().length > 0
@@ -1610,6 +1615,9 @@ function buildEffectiveRuntimeConfig(
   }
   if (typeof payload.model === 'string' && payload.model.trim().length > 0) {
     runtime.model = payload.model.trim();
+  }
+  if (typeof payload.effort === 'string' && payload.effort.trim().length > 0) {
+    runtime.effort = payload.effort.trim();
   }
   if (typeof payload.sandbox === 'string' && payload.sandbox.trim().length > 0) {
     runtime.sandbox = payload.sandbox.trim();

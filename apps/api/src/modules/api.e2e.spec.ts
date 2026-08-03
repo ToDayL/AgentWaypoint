@@ -87,6 +87,7 @@ describe('API e2e', () => {
         backendConfig: {
           model: 'gpt-5-codex',
           executionMode: 'safe-write',
+          effort: 'xhigh',
         },
       },
     });
@@ -180,6 +181,7 @@ describe('API e2e', () => {
         backendConfig: {
           model: 'gpt-5-codex',
           executionMode: 'safe-write',
+          effort: 'xhigh',
         },
       },
     });
@@ -201,6 +203,7 @@ describe('API e2e', () => {
         backendConfig: {
           model: 'gpt-5-mini',
           executionMode: 'safe-write',
+          effort: 'low',
         },
       },
     });
@@ -223,10 +226,39 @@ describe('API e2e', () => {
     });
     expect(turnStatusResponse.statusCode).toBe(200);
     expect(turnStatusResponse.json()).toMatchObject({
+      requestedBackendConfig: {
+        model: 'gpt-5-codex',
+        effort: 'xhigh',
+      },
       effectiveBackendConfig: {
         model: 'gpt-5-codex',
+        effort: 'xhigh',
+      },
+      effectiveRuntimeConfig: {
+        model: 'gpt-5-codex',
+        effort: 'xhigh',
       },
     });
+  });
+
+  it('rejects malformed reasoning effort values', async () => {
+    const email = randomEmail('session-effort-validation');
+    const projectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: {
+        name: 'Effort Validation Project',
+        repoPath: TEST_REPO_PATH,
+        backend: 'codex',
+        backendConfig: {
+          model: 'gpt-5-codex',
+          executionMode: 'safe-write',
+          effort: 123,
+        },
+      },
+    });
+    expect(projectResponse.statusCode).toBe(400);
   });
 
   it('updates session config for model and execution mode while keeping backend and cwd fixed', async () => {
