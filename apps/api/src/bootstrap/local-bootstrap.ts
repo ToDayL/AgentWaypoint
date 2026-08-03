@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
+import { isIP } from 'node:net';
 import * as path from 'node:path';
 import * as readline from 'node:readline/promises';
 
@@ -9,6 +10,7 @@ const CONFIG_FILENAME = 'config.json';
 const DB_FILENAME = 'agentwaypoint.db';
 const DEFAULT_API_PORT = '4000';
 const DEFAULT_WEB_PORT = '3000';
+const DEFAULT_LISTEN_IP = '0.0.0.0';
 const BASELINE_MIGRATION_NAME = '20260713000000_initial_schema';
 
 export type AgentWaypointConfig = {
@@ -18,6 +20,7 @@ export type AgentWaypointConfig = {
   AUTH_SESSION_COOKIE_NAME: string;
   API_PORT: string;
   WEB_PORT: string;
+  LISTEN_IP: string;
   DEFAULT_WORKSPACE_ROOT: string;
   RUNNER_MODE: string;
 };
@@ -99,7 +102,13 @@ function readConfig(configPath: string): AgentWaypointConfig {
       throw new Error(`Config at ${configPath} is missing required field: ${key}`);
     }
   }
-  return parsed as AgentWaypointConfig;
+  // LISTEN_IP was introduced after the initial config format. Preserve old
+  // installations by treating its absence as the original all-interface bind.
+  const listenIp = parsed.LISTEN_IP ?? DEFAULT_LISTEN_IP;
+  if (typeof listenIp !== 'string' || isIP(listenIp) === 0) {
+    throw new Error(`Config at ${configPath} has an invalid LISTEN_IP; expected an IPv4 or IPv6 address`);
+  }
+  return { ...parsed, LISTEN_IP: listenIp } as AgentWaypointConfig;
 }
 
 function applyToEnv(config: AgentWaypointConfig): void {
@@ -137,6 +146,12 @@ async function runInteractiveBootstrap(defaultHome: string): Promise<AgentWaypoi
     const displayName = (await rl.question('Display name [Admin]: ')).trim() || 'Admin';
     const apiPort = (await rl.question(`API port [${DEFAULT_API_PORT}]: `)).trim() || DEFAULT_API_PORT;
     const webPort = (await rl.question(`Web port [${DEFAULT_WEB_PORT}]: `)).trim() || DEFAULT_WEB_PORT;
+    const listenIp = await promptUntil(
+      rl,
+      `Listen IP [${DEFAULT_LISTEN_IP}]: `,
+      (raw) => raw.trim().length === 0 || isIP(raw.trim()) !== 0,
+      'Please enter a valid IPv4 or IPv6 address.',
+    );
 
     const config: AgentWaypointConfig = {
       AGENTWAYPOINT_HOME: home,
@@ -145,6 +160,7 @@ async function runInteractiveBootstrap(defaultHome: string): Promise<AgentWaypoi
       AUTH_SESSION_COOKIE_NAME: 'aw_session',
       API_PORT: apiPort,
       WEB_PORT: webPort,
+      LISTEN_IP: listenIp.trim() || DEFAULT_LISTEN_IP,
       DEFAULT_WORKSPACE_ROOT: path.join(home, 'workspaces'),
       RUNNER_MODE: 'embedded',
     };
@@ -305,8 +321,11 @@ type PrismaCommandResult = {
 
 function runPrismaCommand(repoRoot: string, databaseUrl: string, args: string[]): PrismaCommandResult {
   const result = spawnSync(
-    'pnpm',
-    ['--filter', '@agentwaypoint/api', 'exec', 'prisma', ...args],
+    // Always go through Corepack. The launcher can start via `corepack pnpm`
+    // when pnpm is not on PATH; invoking pnpm directly here would then make
+    // bootstrap fail before Prisma gets a chance to run.
+    'corepack',
+    ['pnpm', '--filter', '@agentwaypoint/api', 'exec', 'prisma', ...args],
     {
       cwd: repoRoot,
       encoding: 'utf8',

@@ -117,7 +117,7 @@ async function cmdStart() {
   if (existing && bothAlive(existing)) {
     process.stdout.write(
       `AgentWaypoint already running (api=${existing.apiPid}, web=${existing.webPid}).\n` +
-        `URL: http://localhost:${existing.webPort}\n`,
+        `URL: ${webUrl(existing.listenIp, existing.webPort)}\n`,
     );
     return;
   }
@@ -142,6 +142,8 @@ async function cmdStart() {
     'start',
     '-p',
     String(config.WEB_PORT),
+    '-H',
+    String(config.LISTEN_IP),
   ]);
 
   const apiChild = spawnDetached(apiCmd, apiLog, {
@@ -151,6 +153,7 @@ async function cmdStart() {
     JWT_SECRET: config.JWT_SECRET,
     AUTH_SESSION_COOKIE_NAME: config.AUTH_SESSION_COOKIE_NAME,
     API_PORT: String(config.API_PORT),
+    LISTEN_IP: String(config.LISTEN_IP),
     DEFAULT_WORKSPACE_ROOT: config.DEFAULT_WORKSPACE_ROOT,
     RUNNER_MODE: config.RUNNER_MODE,
   });
@@ -158,7 +161,8 @@ async function cmdStart() {
   const webChild = spawnDetached(webCmd, webLog, {
     ...process.env,
     AGENTWAYPOINT_HOME: config.AGENTWAYPOINT_HOME,
-    NEXT_PUBLIC_API_BASE_URL: `http://localhost:${config.API_PORT}`,
+    API_BASE_URL: apiUrl(config.LISTEN_IP, config.API_PORT),
+    NEXT_PUBLIC_API_BASE_URL: apiUrl(config.LISTEN_IP, config.API_PORT),
     PORT: String(config.WEB_PORT),
   });
 
@@ -167,6 +171,7 @@ async function cmdStart() {
     webPid: webChild.pid,
     apiPort: Number(config.API_PORT),
     webPort: Number(config.WEB_PORT),
+    listenIp: String(config.LISTEN_IP),
     startedAt: new Date().toISOString(),
     home: config.AGENTWAYPOINT_HOME,
   };
@@ -180,7 +185,7 @@ async function cmdStart() {
   process.stdout.write(
     `AgentWaypoint started (api PID ${record.apiPid}, web PID ${record.webPid}).\n` +
       `Logs: ${apiLog}\n      ${webLog}\n` +
-      `URL:  http://localhost:${record.webPort}\n`,
+      `URL:  ${webUrl(record.listenIp, record.webPort)}\n`,
   );
 }
 
@@ -235,8 +240,9 @@ function cmdStatus() {
       `Home:     ${record.home}`,
       `API:      PID ${record.apiPid} ${apiAlive ? '(alive)' : '(DEAD)'} :${record.apiPort}`,
       `Web:      PID ${record.webPid} ${webAlive ? '(alive)' : '(DEAD)'} :${record.webPort}`,
+      `Listen IP: ${record.listenIp ?? '0.0.0.0'}`,
       `Started:  ${record.startedAt}`,
-      `URL:      http://localhost:${record.webPort}`,
+      `URL:      ${webUrl(record.listenIp, record.webPort)}`,
       '',
     ].join('\n'),
   );
@@ -576,22 +582,39 @@ async function runBootstrapForeground() {
         `Re-run \`./agent-waypoint start\` from a real terminal.`,
     );
   }
-  return JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  // Configs created before LISTEN_IP existed retain the historical bind-all
+  // behavior without requiring a manual migration.
+  return { LISTEN_IP: '0.0.0.0', ...JSON.parse(fs.readFileSync(configPath, 'utf8')) };
 }
 
 async function waitForStartup(record) {
   await waitForHttpOk({
     name: 'API',
-    url: `http://127.0.0.1:${record.apiPort}/api/health`,
+    url: `${apiUrl(record.listenIp, record.apiPort)}/api/health`,
     timeoutMs: STARTUP_TIMEOUT_MS,
     logFilePath: apiLog,
   });
   await waitForHttpOk({
     name: 'Web',
-    url: `http://127.0.0.1:${record.webPort}/`,
+    url: webUrl(record.listenIp, record.webPort),
     timeoutMs: STARTUP_TIMEOUT_MS,
     logFilePath: webLog,
   });
+}
+
+function formatHost(host) {
+  const normalized = host || '0.0.0.0';
+  if (normalized === '0.0.0.0') return '127.0.0.1';
+  if (normalized === '::') return '[::1]';
+  return normalized.includes(':') ? `[${normalized}]` : normalized;
+}
+
+function apiUrl(listenIp, port) {
+  return `http://${formatHost(listenIp)}:${port}`;
+}
+
+function webUrl(listenIp, port) {
+  return `http://${formatHost(listenIp)}:${port}`;
 }
 
 async function waitForHttpOk({ name, url, timeoutMs, logFilePath }) {

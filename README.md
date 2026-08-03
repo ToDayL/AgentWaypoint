@@ -37,6 +37,7 @@ On first start, the CLI prompts for:
 - data directory, defaulting to `~/.agentwaypoint`
 - admin email and password
 - API and Web ports, defaulting to `4000` and `3000`
+- listen IP, defaulting to `0.0.0.0` (all IPv4 interfaces)
 
 Open the printed URL, usually:
 ```text

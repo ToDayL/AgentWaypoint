@@ -22,7 +22,8 @@ async function bootstrap(): Promise<void> {
   app.useGlobalFilters(new HttpExceptionFilter());
 
   const port = Number(process.env.API_PORT ?? process.env.PORT ?? 4000);
-  await app.listen(port, '0.0.0.0');
+  const listenIp = process.env.LISTEN_IP ?? '0.0.0.0';
+  await app.listen(port, listenIp);
 }
 
 void bootstrap();

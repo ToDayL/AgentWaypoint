@@ -37,7 +37,7 @@ rm -rf ./.agentwaypoint-dev apps/web/.next
 pnpm dev:up
 ```
 
-On first run, bootstrap prompts for admin credentials and ports. Use non-reserved ports such as API `4000` and Web `3000`.
+On first run, bootstrap prompts for admin credentials, ports, and a listen IP. Use non-reserved ports such as API `4000` and Web `3000`. The default listen IP is `0.0.0.0`; enter a specific IPv4 or IPv6 address to restrict both services to that interface.
 The launcher rebuilds the web app when the existing `.next` build is missing or stale. To force a rebuild, run:
 ```bash
 ./agent-waypoint restart --home ./.agentwaypoint-dev --rebuild
