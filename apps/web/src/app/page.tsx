@@ -12,6 +12,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -51,6 +52,7 @@ import {
   SlidersHorizontal,
   Trash2,
   UserCog,
+  X,
 } from 'lucide-react';
 import { oneDark as codeMirrorOneDark } from '@codemirror/theme-one-dark';
 import CodeMirror from '@uiw/react-codemirror';
@@ -608,6 +610,7 @@ const TIMELINE_BATCH_MAX_EVENTS = 500;
 const CHAT_BUBBLE_BATCH_FLUSH_MS = 50;
 const CHAT_BUBBLE_BATCH_MAX_CHUNKS = 200;
 const PROMPT_COMPOSITION_ENTER_SUPPRESS_MS = 80;
+const ERROR_TOAST_DURATION_MS = 5000;
 const WORKSPACE_SUGGESTIONS_LIST_ID = 'workspace-path-suggestions';
 const LAST_PROJECT_STORAGE_KEY_PREFIX = 'agentwaypoint:last-project:';
 const LAST_SESSION_STORAGE_KEY_PREFIX = 'agentwaypoint:last-session:';
@@ -780,14 +783,15 @@ export default function HomePage() {
   const [projectDeleteTarget, setProjectDeleteTarget] = useState<Project | null>(null);
   const [sessionDeleteTarget, setSessionDeleteTarget] = useState<Session | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setErrorState] = useState('');
+  const [errorVersion, setErrorVersion] = useState(0);
+  const [errorToastTop, setErrorToastTop] = useState<number | null>(null);
   const [compactingContext, setCompactingContext] = useState(false);
   const [uploadingFiles, setUploadingFiles] = useState(false);
   const [uploadError, setUploadError] = useState('');
   const eventSourceRef = useRef<EventSource | null>(null);
   const turnStreamCursorRef = useRef<Record<string, number>>({});
   const sessionHistoryRequestRef = useRef(0);
-  const turnPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timelineListRef = useRef<HTMLDivElement | null>(null);
   const timelineRowHeightsRef = useRef<Record<string, number>>({});
   const timelineStickToBottomRef = useRef(true);
@@ -810,6 +814,7 @@ export default function HomePage() {
   const chatComposerRef = useRef<ChatComposerHandle | null>(null);
   const promptDraftRef = useRef('');
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const shellHeaderRef = useRef<HTMLElement | null>(null);
   const sendTurnHandlerRef = useRef(handleSendTurn);
   const openUploadDialogHandlerRef = useRef(handleOpenUploadDialog);
   sendTurnHandlerRef.current = handleSendTurn;
@@ -833,6 +838,13 @@ export default function HomePage() {
   const mentionBlinkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const panelLayoutHydratedRef = useRef(false);
   const inspectedTurnIdRef = useRef('');
+
+  const setError = useCallback((message: string): void => {
+    setErrorState(message);
+    if (message) {
+      setErrorVersion((current) => current + 1);
+    }
+  }, []);
 
   const canStartTurn = !!selectedSessionId && activeTurnId === '';
   const canSteerTurn =
@@ -1350,7 +1362,6 @@ export default function HomePage() {
       eventSourceRef.current = null;
       clearPendingTimelineBatch();
       clearPendingAssistantTextBatch();
-      stopTurnStatusPolling();
       pendingTurnCreateAbortRef.current?.abort();
       pendingTurnCreateAbortRef.current = null;
       if (chatScrollIdleTimerRef.current) {
@@ -1370,6 +1381,36 @@ export default function HomePage() {
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  useLayoutEffect(() => {
+    const header = shellHeaderRef.current;
+    if (!header) {
+      return undefined;
+    }
+    const updateToastTop = (): void => {
+      setErrorToastTop(Math.ceil(header.getBoundingClientRect().bottom));
+    };
+    updateToastTop();
+    const resizeObserver = new ResizeObserver(updateToastTop);
+    resizeObserver.observe(header);
+    window.addEventListener('resize', updateToastTop);
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', updateToastTop);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!error) {
+      return undefined;
+    }
+    const timeoutId = window.setTimeout(() => {
+      setErrorState('');
+    }, ERROR_TOAST_DURATION_MS);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [error, errorVersion]);
 
   useEffect(() => {
     void loadAuthSession();
@@ -3120,7 +3161,6 @@ export default function HomePage() {
     if (!sessionId) {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
-      stopTurnStatusPolling();
       setMessages([]);
       setTurns([]);
       replaceAssistantText('');
@@ -3146,7 +3186,6 @@ export default function HomePage() {
 
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
-    stopTurnStatusPolling();
     setError('');
     try {
       const history = await apiRequest<SessionHistory>(`/api/channels/plugins/web/app/sessions/${sessionId}/history`, {
@@ -3263,6 +3302,28 @@ export default function HomePage() {
     const source = new EventSource(streamUrl);
     eventSourceRef.current = source;
     let sawNonReasoningAssistantDelta = options?.initialSawNonReasoningAssistantDelta === true;
+    let disconnected = false;
+
+    const finishStream = (status: string): void => {
+      if (eventSourceRef.current !== source) {
+        return;
+      }
+      flushPendingTimelineEvents();
+      flushPendingAssistantText();
+      setTurnStatus(status);
+      setStreamActive(false);
+      setResumedTurnHint('');
+      setPendingApproval(null);
+      source.close();
+      eventSourceRef.current = null;
+      if (sessionId) {
+        void loadSessionHistory(sessionId, {
+          resumeStream: false,
+          resetEventLog: false,
+          resetInspectPanel: false,
+        });
+      }
+    };
 
     STREAM_EVENTS.forEach((eventType) => {
       source.addEventListener(eventType, (evt) => {
@@ -3370,85 +3431,51 @@ export default function HomePage() {
         }
 
         if (envelope.type === 'turn.completed' || envelope.type === 'turn.failed' || envelope.type === 'turn.cancelled') {
-          flushPendingTimelineEvents();
-          flushPendingAssistantText();
           if (envelope.type === 'turn.completed' && !sawNonReasoningAssistantDelta) {
             const completedContent = typeof envelope.payload.content === 'string' ? envelope.payload.content : '';
             appendCompletedAssistantText(completedContent);
           }
-          setTurnStatus(envelope.type.replace('turn.', ''));
-          setStreamActive(false);
-          setResumedTurnHint('');
-          setPendingApproval(null);
-          stopTurnStatusPolling();
-          if (sessionId) {
-            void loadSessionHistory(sessionId, {
-              resumeStream: false,
-              resetEventLog: false,
-              resetInspectPanel: false,
-            });
-          }
-          source.close();
-          eventSourceRef.current = null;
+          finishStream(envelope.type.replace('turn.', ''));
         }
       });
     });
+
+    source.addEventListener('stream.end', (evt) => {
+      if (eventSourceRef.current !== source) {
+        return;
+      }
+      try {
+        const payload = JSON.parse((evt as MessageEvent<string>).data) as { status?: unknown };
+        if (typeof payload.status === 'string' && TERMINAL_TURN_STATUSES.has(payload.status)) {
+          finishStream(payload.status);
+        }
+      } catch {
+        // A malformed end marker is treated as an interrupted stream;
+        // EventSource reconnects after the server closes the response.
+      }
+    });
+
+    source.onopen = () => {
+      if (eventSourceRef.current !== source) {
+        return;
+      }
+      setStreamActive(true);
+      if (disconnected) {
+        appendSystemTimelineEvent('Stream reconnected');
+        disconnected = false;
+      }
+    };
 
     source.onerror = () => {
       if (eventSourceRef.current !== source) {
         return;
       }
       flushPendingAssistantText();
-      appendSystemTimelineEvent('Stream disconnected');
-      source.close();
-      eventSourceRef.current = null;
-      if (turnId) {
-        appendSystemTimelineEvent('Switched to turn status polling');
-        startTurnStatusPolling(turnId, sessionId);
+      if (!disconnected) {
+        appendSystemTimelineEvent('Stream disconnected; reconnecting automatically');
+        disconnected = true;
       }
     };
-  }
-
-  function stopTurnStatusPolling(): void {
-    if (turnPollTimerRef.current) {
-      clearInterval(turnPollTimerRef.current);
-      turnPollTimerRef.current = null;
-    }
-  }
-
-  function startTurnStatusPolling(turnId: string, sessionId: string): void {
-    stopTurnStatusPolling();
-    turnPollTimerRef.current = setInterval(() => {
-      void (async () => {
-        try {
-          const status = await apiRequest<TurnStatusResponse>(`/api/channels/plugins/web/app/turns/${turnId}`, {
-            method: 'GET',
-          });
-          setTurnStatus(status.status);
-          setContextRemainingRatio((current) => status.contextRemainingRatio ?? current);
-          setPendingApproval(status.pendingApproval);
-          if (status.status === 'failed' && status.failureMessage) {
-            setError(status.failureMessage);
-          }
-          if (TERMINAL_TURN_STATUSES.has(status.status)) {
-            stopTurnStatusPolling();
-            setActiveTurnId('');
-            setStreamActive(false);
-            setResumedTurnHint('');
-            setPendingApproval(null);
-            if (sessionId) {
-              await loadSessionHistory(sessionId, {
-                resumeStream: false,
-                resetEventLog: false,
-                resetInspectPanel: false,
-              });
-            }
-          }
-        } catch (requestError) {
-          setError(extractMessage(requestError));
-        }
-      })();
-    }, 1200);
   }
 
   async function handleCreateProjectFromPanel(): Promise<void> {
@@ -3990,7 +4017,7 @@ export default function HomePage() {
   return (
     <main className="sim-shell">
       <section className="sim-panel">
-        <header className="sim-header shell-header">
+        <header ref={shellHeaderRef} className="sim-header shell-header">
           {authenticated ? (
             <div className="header-mobile-side header-mobile-left">
               <button
@@ -5719,7 +5746,29 @@ export default function HomePage() {
           </div>
         ) : null}
 
-        {error ? <p className="sim-error">{error}</p> : null}
+        {error ? (
+          <div
+            className="error-toast"
+            role="alert"
+            aria-live="assertive"
+            aria-atomic="true"
+            style={errorToastTop === null ? undefined : { top: `calc(${errorToastTop}px + 0.6rem)` }}
+          >
+            <div className="error-toast-content">
+              <strong>Request failed</strong>
+              <p>{error}</p>
+            </div>
+            <button
+              type="button"
+              className="error-toast-close"
+              onClick={() => setErrorState('')}
+              aria-label="Dismiss error"
+              title="Dismiss error"
+            >
+              <X />
+            </button>
+          </div>
+        ) : null}
       </section>
     </main>
   );

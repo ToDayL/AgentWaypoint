@@ -633,7 +633,16 @@ API-internal persisted event types additionally include:
 Web SSE sends:
 
 ```text
+retry: 2000
+
 id: <seq>
 event: <type>
 data: {"turnId":"...","seq":1,"type":"...","payload":{},"createdAt":"..."}
+```
+
+Clients reconnect automatically after transient disconnects. The browser-provided `Last-Event-ID` and the optional `since` query parameter are both accepted as sequence cursors. After a terminal turn has no more events to send, the stream emits a cursor-independent end marker so clients can stop reconnecting even when the terminal event was already consumed:
+
+```text
+event: stream.end
+data: {"turnId":"...","status":"completed","cursor":42}
 ```

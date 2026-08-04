@@ -132,4 +132,43 @@ describe('turn stream error handling', () => {
     expect(webPlugin.getEventsForTurn).toHaveBeenCalledTimes(1);
     expect(reply.raw.end).not.toHaveBeenCalled();
   });
+
+  it('ends a completed core turn stream with an explicit end event', async () => {
+    vi.useFakeTimers();
+    const turnsService = {
+      getTurnForUser: vi.fn().mockResolvedValue({ status: 'completed', sessionId: 'session-1' }),
+      getEventsForTurn: vi.fn().mockResolvedValue([]),
+    };
+    const controller = new TurnsController(turnsService as unknown as TurnsService);
+    const reply = createReply();
+
+    await controller.streamTurn(user, { id: 'turn-1' }, { since: 12 }, undefined, createRequest(), reply);
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(reply.chunks.join('')).toContain('retry: 2000');
+    expect(reply.chunks.join('')).toContain('event: stream.end');
+    expect(reply.chunks.join('')).toContain('"status":"completed"');
+    expect(reply.chunks.join('')).toContain('"cursor":12');
+    expect(reply.raw.end).toHaveBeenCalledTimes(1);
+  });
+
+  it('ends a completed web plugin stream with an explicit end event', async () => {
+    vi.useFakeTimers();
+    const webPlugin = {
+      getTurnForUser: vi.fn().mockResolvedValue({ status: 'completed', sessionId: 'session-1' }),
+      getEventsForTurn: vi.fn().mockResolvedValue([]),
+      getDispatchedEventsForSessionTurn: vi.fn().mockReturnValue([]),
+    };
+    const controller = new WebPluginAppController(webPlugin as unknown as WebPlugin);
+    const reply = createReply();
+
+    await controller.streamTurn(user, { id: 'turn-1' }, { since: 12 }, undefined, createRequest(), reply);
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(reply.chunks.join('')).toContain('retry: 2000');
+    expect(reply.chunks.join('')).toContain('event: stream.end');
+    expect(reply.chunks.join('')).toContain('"status":"completed"');
+    expect(reply.chunks.join('')).toContain('"cursor":12');
+    expect(reply.raw.end).toHaveBeenCalledTimes(1);
+  });
 });
