@@ -130,6 +130,7 @@ export class TurnsController {
     reply.raw.setHeader('Cache-Control', 'no-cache');
     reply.raw.setHeader('Connection', 'keep-alive');
     reply.raw.flushHeaders?.();
+    reply.raw.write('retry: 2000\n\n');
 
     let closed = false;
     let inFlight = false;
@@ -162,7 +163,7 @@ export class TurnsController {
         turnId: id,
         cursor,
         code: 'STREAM_POLL_FAILED',
-        message: 'Turn stream interrupted. Falling back to status polling.',
+        message: 'Turn stream interrupted. The client will reconnect automatically.',
       };
       this.logger.error(
         `Turn stream poll failed for turn ${id} at cursor ${cursor}: ${formatErrorMessage(error)}`,
@@ -218,6 +219,8 @@ export class TurnsController {
         }
 
         if (terminalIdlePolls >= 2) {
+          reply.raw.write('event: stream.end\n');
+          reply.raw.write(`data: ${JSON.stringify({ turnId: id, status: turn.status, cursor })}\n\n`);
           closeStream();
         }
       } catch (error: unknown) {

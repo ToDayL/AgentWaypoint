@@ -329,6 +329,7 @@ export class WebPluginAppController {
     reply.raw.setHeader('Cache-Control', 'no-cache');
     reply.raw.setHeader('Connection', 'keep-alive');
     reply.raw.flushHeaders?.();
+    reply.raw.write('retry: 2000\n\n');
 
     let closed = false;
     let inFlight = false;
@@ -361,7 +362,7 @@ export class WebPluginAppController {
         turnId: id,
         cursor,
         code: 'STREAM_POLL_FAILED',
-        message: 'Turn stream interrupted. Falling back to status polling.',
+        message: 'Turn stream interrupted. The client will reconnect automatically.',
       };
       this.logger.error(
         `Web turn stream poll failed for turn ${id} at cursor ${cursor}: ${formatErrorMessage(error)}`,
@@ -419,6 +420,10 @@ export class WebPluginAppController {
         }
 
         if (terminalIdlePolls >= 2) {
+          reply.raw.write('event: stream.end\n');
+          reply.raw.write(
+            `data: ${JSON.stringify({ turnId: id, status: latestTurn.status, cursor })}\n\n`,
+          );
           closeStream();
         }
       } catch (error: unknown) {
