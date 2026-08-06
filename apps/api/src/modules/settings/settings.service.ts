@@ -15,9 +15,16 @@ import { CC_SWITCH_CLIENT, CcSwitchApp, CcSwitchClient, CcSwitchState } from './
 const ACTIVE_TURN_STATUSES = ['queued', 'running', 'waiting_approval'];
 const RUNTIME_CONTROL_ID = 'provider-switch';
 const PROVIDER_SWITCH_LEASE_MS = 2 * 60 * 1000;
+const PROVIDER_SWITCH_LEASE_RENEW_MS = 30 * 1000;
 
 export type CcSwitchSettingsState = CcSwitchState & {
   hasActiveTurn: boolean;
+};
+
+type ProviderSwitchLeaseHeartbeat = {
+  assertHeld: () => void;
+  renew: () => Promise<void>;
+  stop: () => void;
 };
 
 @Injectable()
@@ -74,9 +81,12 @@ export class SettingsService {
     }
     this.providerSwitchInProgress = true;
     let switchOwner: string | null = null;
+    let leaseHeartbeat: ProviderSwitchLeaseHeartbeat | null = null;
     try {
       switchOwner = await this.acquireProviderSwitchLease();
+      leaseHeartbeat = this.startProviderSwitchLeaseHeartbeat(switchOwner);
       const state = await this.getCcSwitchProviders();
+      leaseHeartbeat.assertHeld();
       if (!state.canSwitch) {
         throw new ConflictException({ message: state.reason ?? 'cc-switch is unavailable' });
       }
@@ -98,7 +108,9 @@ export class SettingsService {
       try {
         for (const [app, providerId] of requested) {
           if (providerId !== previous[app]) {
+            await leaseHeartbeat.renew();
             await this.ccSwitchClient.switchProvider(app, providerId);
+            leaseHeartbeat.assertHeld();
             switched.push(app);
           }
         }
@@ -114,10 +126,13 @@ export class SettingsService {
       }
 
       if (switched.includes('codex')) {
+        await leaseHeartbeat.renew();
         await this.runnerAdapter.resetWorkers();
+        leaseHeartbeat.assertHeld();
       }
       return this.getCcSwitchProviders();
     } finally {
+      leaseHeartbeat?.stop();
       if (switchOwner) {
         try {
           await this.releaseProviderSwitchLease(switchOwner);
@@ -179,6 +194,66 @@ export class SettingsService {
         providerSwitchLeaseExpires: null,
       },
     });
+  }
+
+  private startProviderSwitchLeaseHeartbeat(owner: string): ProviderSwitchLeaseHeartbeat {
+    let stopped = false;
+    let lost = false;
+    let renewal: Promise<void> | null = null;
+    const renew = async (): Promise<void> => {
+      if (stopped || lost) {
+        return;
+      }
+      if (renewal) {
+        return renewal;
+      }
+      renewal = (async () => {
+        try {
+          const renewed = await this.prisma.runtimeControl.updateMany({
+            where: {
+              id: RUNTIME_CONTROL_ID,
+              providerSwitchInProgress: true,
+              providerSwitchOwner: owner,
+            },
+            data: {
+              providerSwitchLeaseExpires: new Date(Date.now() + PROVIDER_SWITCH_LEASE_MS),
+            },
+          });
+          if (renewed.count !== 1) {
+            lost = true;
+          }
+        } catch (error: unknown) {
+          lost = true;
+          const message = error instanceof Error ? error.message : 'unknown database error';
+          this.logger.error(`Failed to renew provider switch lease: ${message}`);
+        } finally {
+          renewal = null;
+        }
+      })();
+      return renewal;
+    };
+    const timer = setInterval(() => {
+      void renew();
+    }, PROVIDER_SWITCH_LEASE_RENEW_MS);
+    timer.unref?.();
+
+    return {
+      assertHeld: () => {
+        if (lost) {
+          throw new ConflictException({ message: 'Provider switch lease was lost; refresh and try again' });
+        }
+      },
+      renew: async () => {
+        await renew();
+        if (lost) {
+          throw new ConflictException({ message: 'Provider switch lease was lost; refresh and try again' });
+        }
+      },
+      stop: () => {
+        stopped = true;
+        clearInterval(timer);
+      },
+    };
   }
 
   private async hasActiveTurn(): Promise<boolean> {

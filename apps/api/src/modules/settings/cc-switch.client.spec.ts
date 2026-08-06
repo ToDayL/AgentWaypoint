@@ -158,4 +158,22 @@ describe('cc-switch integration', () => {
 
     await expect(service.assertProviderSwitchAllowsTurn(tx as never)).rejects.toMatchObject({ status: 409 });
   });
+
+  it('stops a switch when its database lease can no longer be renewed', async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const service = new SettingsService(
+      { runtimeControl: { updateMany } } as unknown as PrismaService,
+      {} as RunnerAdapter,
+      {} as CcSwitchClient,
+    );
+    const heartbeat = (
+      service as unknown as {
+        startProviderSwitchLeaseHeartbeat(owner: string): { renew(): Promise<void>; stop(): void };
+      }
+    ).startProviderSwitchLeaseHeartbeat('lost-owner');
+
+    await expect(heartbeat.renew()).rejects.toMatchObject({ status: 409 });
+    expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ providerSwitchOwner: 'lost-owner' }) }));
+    heartbeat.stop();
+  });
 });
