@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import multipart from '@fastify/multipart';
+import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
@@ -20,6 +21,29 @@ async function bootstrap(): Promise<void> {
     },
   });
   app.useGlobalFilters(new HttpExceptionFilter());
+
+  const logger = new Logger('Bootstrap');
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (signal: NodeJS.Signals): Promise<void> => {
+    if (!shutdownPromise) {
+      shutdownPromise = (async () => {
+        logger.log(`Received ${signal}; shutting down gracefully.`);
+        await app.close();
+      })();
+    }
+    return shutdownPromise;
+  };
+
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.once(signal, () => {
+      void shutdown(signal)
+        .then(() => process.exit(0))
+        .catch((error: unknown) => {
+          logger.error(`Failed to shut down after ${signal}`, error instanceof Error ? error.stack : undefined);
+          process.exit(1);
+        });
+    });
+  }
 
   const port = Number(process.env.API_PORT ?? process.env.PORT ?? 4000);
   const listenIp = process.env.LISTEN_IP ?? '0.0.0.0';

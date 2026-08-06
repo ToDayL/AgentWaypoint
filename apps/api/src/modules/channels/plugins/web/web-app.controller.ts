@@ -326,8 +326,11 @@ export class WebPluginAppController {
     let cursor = Math.max(queryInput.since ?? 0, Number.isFinite(headerSeq) ? headerSeq : 0);
 
     reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    reply.raw.setHeader('Cache-Control', 'no-cache');
+    reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
     reply.raw.setHeader('Connection', 'keep-alive');
+    // Prevent common reverse proxies (notably nginx) from batching SSE
+    // frames, which would make approval prompts arrive after auto-approval.
+    reply.raw.setHeader('X-Accel-Buffering', 'no');
     reply.raw.flushHeaders?.();
     reply.raw.write('retry: 2000\n\n');
 

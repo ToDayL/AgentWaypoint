@@ -1197,6 +1197,18 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
 
       const message = error instanceof Error ? error.message : 'Runner stream failed';
       const runnerTurnMissing = isRunnerTurnMissingError(error);
+      if (!runnerTurnMissing) {
+        try {
+          // Do not leave a native Codex turn running after its durable event
+          // stream has become terminal. Its later output and approvals would
+          // have no turn that a channel can present to the user.
+          await this.runnerAdapter.cancelTurn({ turnId });
+        } catch (cancelError: unknown) {
+          this.logger.warn(
+            `Failed to interrupt runner turn ${turnId} after stream failure: ${formatErrorMessage(cancelError)}`,
+          );
+        }
+      }
       await this.failTurn(
         turnId,
         currentTurn.status,
@@ -1377,6 +1389,11 @@ function isTransientDatabaseError(error: unknown): boolean {
     'sqlite_busy',
     'timed out fetching a new connection',
     'transaction already closed',
+    // SQLite SQLITE_IOERR_DELETE_NOENT (5898) can occur while a rollback
+    // journal is being cleaned up. Resume from the durable event cursor
+    // instead of immediately failing the user's turn.
+    'extended_code: 5898',
+    'error code 5898',
   ].some((fragment) => message.includes(fragment));
 }
 
