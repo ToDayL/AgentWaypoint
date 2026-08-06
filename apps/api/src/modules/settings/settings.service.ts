@@ -110,8 +110,8 @@ export class SettingsService {
           if (providerId !== previous[app]) {
             await leaseHeartbeat.renew();
             await this.ccSwitchClient.switchProvider(app, providerId);
-            leaseHeartbeat.assertHeld();
             switched.push(app);
+            leaseHeartbeat.assertHeld();
           }
         }
       } catch (error: unknown) {

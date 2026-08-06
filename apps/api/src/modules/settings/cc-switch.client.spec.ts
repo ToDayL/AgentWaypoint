@@ -176,4 +176,46 @@ describe('cc-switch integration', () => {
     expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ providerSwitchOwner: 'lost-owner' }) }));
     heartbeat.stop();
   });
+
+  it('rolls back a provider that changed before the switch lease is lost', async () => {
+    vi.useFakeTimers();
+    try {
+      const prisma = createProviderSwitchPrisma();
+      const updateMany = (prisma as unknown as { runtimeControl: { updateMany: ReturnType<typeof vi.fn> } }).runtimeControl.updateMany;
+      updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+      let commandStarted!: () => void;
+      let releaseCommand!: () => void;
+      const started = new Promise<void>((resolve) => {
+        commandStarted = resolve;
+      });
+      const commandFinished = new Promise<void>((resolve) => {
+        releaseCommand = resolve;
+      });
+      const switchProvider = vi.fn(async (_app: string, providerId: string) => {
+        if (providerId === 'internal') {
+          commandStarted();
+          await commandFinished;
+        }
+      });
+      const service = new SettingsService(
+        prisma,
+        { resetWorkers: vi.fn() } as unknown as RunnerAdapter,
+        { discover: vi.fn().mockResolvedValue(availableState()), switchProvider } as CcSwitchClient,
+      );
+
+      const switching = service.updateCcSwitchProviders({
+        codexProviderId: 'internal',
+        expectedCurrent: { codex: 'codex-official' },
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(30_000);
+      releaseCommand();
+
+      await expect(switching).rejects.toMatchObject({ status: 409 });
+      expect(switchProvider).toHaveBeenNthCalledWith(1, 'codex', 'internal');
+      expect(switchProvider).toHaveBeenNthCalledWith(2, 'codex', 'codex-official');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
