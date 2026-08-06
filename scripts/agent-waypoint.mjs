@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * agent-waypoint CLI: start | stop | restart | status | logs | cleanup-db
+ * agent-waypoint CLI: start | stop | restart | status | logs | check-db | cleanup-db
  *
  * Manages the lightweight AgentWaypoint stack (API + Next.js Web) as
  * background processes. All state lives under the data directory
@@ -29,6 +29,7 @@ const pidFile = path.join(dataHome, 'agent-waypoint.pid');
 const logsDir = path.join(dataHome, 'logs');
 const apiLog = path.join(logsDir, 'api.log');
 const webLog = path.join(logsDir, 'web.log');
+const cleanShutdownFile = path.join(dataHome, 'sqlite-clean-shutdown.json');
 const STARTUP_TIMEOUT_MS = 60_000;
 const SHUTDOWN_TIMEOUT_MS = 60_000;
 
@@ -48,6 +49,9 @@ switch (command) {
     break;
   case 'logs':
     cmdLogs(commandArgs);
+    break;
+  case 'check-db':
+    await cmdCheckDb();
     break;
   case 'cleanup-db':
     await cmdCleanupDb();
@@ -103,6 +107,7 @@ function printUsage() {
       '  restart   Stop, then start.',
       '  status    Show running PIDs and URL.',
       '  logs [api|web]  Tail the named service log (default: api).',
+      '  check-db   Run an explicit SQLite integrity check.',
       '  cleanup-db  Backup, VACUUM/optimize the SQLite DB, then delete the backup.',
       '',
       'Options:',
@@ -130,6 +135,7 @@ async function cmdStart() {
   // Run bootstrap synchronously in the foreground so prompts work.
   ensureDirs();
   verifyExistingDatabaseBeforeBootstrap();
+  clearCleanShutdownMarker();
   const config = await runBootstrapForeground();
 
   ensureWebBuild({ force: forceRebuild });
@@ -285,6 +291,15 @@ function cmdLogs(rawArgs) {
   tail.on('exit', (code) => process.exit(code ?? 0));
 }
 
+async function cmdCheckDb() {
+  const databasePath = resolveDatabasePathForHome(dataHome);
+  if (!fs.existsSync(databasePath)) {
+    throw new Error(`SQLite database not found at ${databasePath}`);
+  }
+  assertQuickCheckOk(databasePath, 'database');
+  process.stdout.write('SQLite integrity check passed.\n');
+}
+
 async function cmdCleanupDb() {
   const record = readPidFile();
   if (record && (isAlive(record.apiPid) || isAlive(record.webPid))) {
@@ -312,6 +327,7 @@ async function cmdCleanupDb() {
       `Backup:   ${backupPath}\n`,
   );
 
+  clearCleanShutdownMarker();
   try {
     runSqlite(databasePath, `.backup ${sqliteCliQuote(backupPath)}`);
     assertQuickCheckOk(backupPath, 'backup');
@@ -323,6 +339,7 @@ async function cmdCleanupDb() {
 
     const after = readDatabaseStats(databasePath);
     fs.rmSync(backupPath, { force: true });
+    writeCleanShutdownMarker(databasePath);
     cleanupSucceeded = true;
 
     process.stdout.write(
@@ -376,33 +393,32 @@ function verifyExistingDatabaseBeforeBootstrap() {
   if (!fs.existsSync(databasePath)) {
     return;
   }
-  if (!commandExists('sqlite3')) {
-    assertPrismaQuickCheck(databasePath, false);
+  if (hasCleanShutdownMarker(databasePath)) {
+    assertDatabaseReadable(databasePath);
+    process.stdout.write('SQLite database opened successfully after clean shutdown.\n');
     return;
   }
+
+  process.stdout.write('Previous clean shutdown was not recorded; recovering and checking SQLite.\n');
+  assertCheckpointComplete(databasePath);
   assertQuickCheckOk(databasePath, 'database before start');
+  process.stdout.write('SQLite recovery and integrity check passed.\n');
 }
 
 function verifyDatabaseAfterStop() {
   const databasePath = resolveDatabasePathForHome(dataHome);
   if (!fs.existsSync(databasePath)) {
+    clearCleanShutdownMarker();
     return;
   }
-  if (!commandExists('sqlite3')) {
-    assertPrismaQuickCheck(databasePath, true);
-    return;
-  }
-
-  runSqlite(databasePath, 'PRAGMA wal_checkpoint(TRUNCATE);');
-  assertQuickCheckOk(databasePath, 'database after stop');
-  process.stdout.write('SQLite WAL checkpoint and integrity check passed.\n');
+  assertCheckpointComplete(databasePath);
+  writeCleanShutdownMarker(databasePath);
+  process.stdout.write('SQLite WAL checkpoint completed.\n');
 }
 
-function assertPrismaQuickCheck(databasePath, checkpoint) {
+function runPrismaDatabaseCheck(databasePath, mode) {
   const args = ['pnpm', '--filter', '@agentwaypoint/api', 'exec', 'tsx', 'src/scripts/verify-sqlite.ts'];
-  if (checkpoint) {
-    args.push('--checkpoint');
-  }
+  args.push(`--${mode}`);
   const result = spawnSync('corepack', args, {
     cwd: REPO_ROOT,
     encoding: 'utf8',
@@ -410,12 +426,27 @@ function assertPrismaQuickCheck(databasePath, checkpoint) {
   });
   if (result.status !== 0) {
     const detail = [result.stderr, result.stdout].filter(Boolean).join('\n').trim();
-    throw new Error(`SQLite quick_check failed${detail ? `: ${detail}` : ''}`);
+    throw new Error(`SQLite ${mode} failed${detail ? `: ${detail}` : ''}`);
   }
-  process.stdout.write(
-    checkpoint
-      ? 'SQLite WAL checkpoint and integrity check passed.\n'
-      : 'SQLite integrity check passed.\n',
+}
+
+function hasCleanShutdownMarker(databasePath) {
+  try {
+    const marker = JSON.parse(fs.readFileSync(cleanShutdownFile, 'utf8'));
+    return marker.databasePath === path.resolve(databasePath);
+  } catch {
+    return false;
+  }
+}
+
+function clearCleanShutdownMarker() {
+  fs.rmSync(cleanShutdownFile, { force: true });
+}
+
+function writeCleanShutdownMarker(databasePath) {
+  fs.writeFileSync(
+    cleanShutdownFile,
+    `${JSON.stringify({ databasePath: path.resolve(databasePath), checkedAt: new Date().toISOString() }, null, 2)}\n`,
   );
 }
 
@@ -559,9 +590,42 @@ function runSqlite(databasePath, sql) {
 }
 
 function assertQuickCheckOk(databasePath, label) {
+  if (!commandExists('sqlite3')) {
+    runPrismaDatabaseCheck(databasePath, 'quick-check');
+    return;
+  }
   const output = runSqlite(databasePath, 'PRAGMA quick_check;').trim();
   if (output !== 'ok') {
     throw new Error(`SQLite quick_check failed for ${label}: ${output || '(no output)'}`);
+  }
+}
+
+function assertDatabaseReadable(databasePath) {
+  if (!commandExists('sqlite3')) {
+    runPrismaDatabaseCheck(databasePath, 'probe');
+    return;
+  }
+  runSqlite(databasePath, 'SELECT count(*) FROM sqlite_master;');
+}
+
+function assertCheckpointComplete(databasePath) {
+  if (!commandExists('sqlite3')) {
+    runPrismaDatabaseCheck(databasePath, 'checkpoint');
+    return;
+  }
+  const output = runSqlite(databasePath, 'PRAGMA wal_checkpoint(TRUNCATE);');
+  const values = output.split('|').map((value) => Number(value.trim()));
+  if (values.length !== 3 || values.some((value) => !Number.isInteger(value))) {
+    throw new Error(`Unexpected SQLite checkpoint result: ${output || '(no output)'}`);
+  }
+  const [busy, logPages, checkpointedPages] = values;
+  const truncated = busy === 0 && logPages === 0 && checkpointedPages === 0;
+  const notInWalMode = busy === 0 && logPages === -1 && checkpointedPages === -1;
+  if (!truncated && !notInWalMode) {
+    throw new Error(
+      `SQLite WAL checkpoint did not truncate completely ` +
+        `(busy=${busy}, log=${logPages}, checkpointed=${checkpointedPages})`,
+    );
   }
 }
 
