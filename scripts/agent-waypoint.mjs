@@ -30,6 +30,7 @@ const logsDir = path.join(dataHome, 'logs');
 const apiLog = path.join(logsDir, 'api.log');
 const webLog = path.join(logsDir, 'web.log');
 const STARTUP_TIMEOUT_MS = 60_000;
+const SHUTDOWN_TIMEOUT_MS = 60_000;
 
 switch (command) {
   case 'start':
@@ -128,6 +129,7 @@ async function cmdStart() {
 
   // Run bootstrap synchronously in the foreground so prompts work.
   ensureDirs();
+  verifyExistingDatabaseBeforeBootstrap();
   const config = await runBootstrapForeground();
 
   ensureWebBuild({ force: forceRebuild });
@@ -197,34 +199,55 @@ async function cmdStop() {
   }
   const pids = [record.apiPid, record.webPid].filter((pid) => Number.isInteger(pid));
   for (const pid of pids) {
-    if (isAlive(pid)) {
+    if (isProcessGroupAlive(pid) || isAlive(pid)) {
       try {
-        process.kill(pid, 'SIGTERM');
+        // start() creates a detached process group. Signal the group so
+        // pnpm's tsx/next children cannot survive their wrapper process.
+        process.kill(-pid, 'SIGTERM');
       } catch {
-        // ignore; process may have just exited
+        try {
+          process.kill(pid, 'SIGTERM');
+        } catch {
+          // ignore; process may have just exited
+        }
       }
     }
   }
 
-  // Wait up to 10s for graceful exit.
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (pids.every((pid) => !isAlive(pid))) {
-      break;
-    }
-    await sleep(200);
-  }
-  for (const pid of pids) {
-    if (isAlive(pid)) {
-      try {
-        process.kill(pid, 'SIGKILL');
-      } catch {
-        // ignore
+  // The PID belongs to the detached pnpm process group. Wait for the entire
+  // group: otherwise pnpm can exit while its API child still owns the DB.
+  if (!await waitForProcessGroupsToExit(pids, SHUTDOWN_TIMEOUT_MS)) {
+    for (const pid of pids) {
+      if (isProcessGroupAlive(pid)) {
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
+          try {
+            process.kill(pid, 'SIGKILL');
+          } catch {
+            // ignore
+          }
+        }
       }
     }
   }
+  if (!await waitForProcessGroupsToExit(pids, 5_000)) {
+    throw new Error('Timed out waiting for all AgentWaypoint processes to exit; database was not checked.');
+  }
   fs.rmSync(pidFile, { force: true });
+  verifyDatabaseAfterStop();
   process.stdout.write('Stopped.\n');
+}
+
+async function waitForProcessGroupsToExit(pids, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pids.every((pid) => !isProcessGroupAlive(pid))) {
+      return true;
+    }
+    await sleep(200);
+  }
+  return pids.every((pid) => !isProcessGroupAlive(pid));
 }
 
 function cmdStatus() {
@@ -337,6 +360,63 @@ function isAlive(pid) {
   } catch {
     return false;
   }
+}
+
+function isProcessGroupAlive(pid) {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
+function verifyExistingDatabaseBeforeBootstrap() {
+  const databasePath = resolveDatabasePathForHome(dataHome);
+  if (!fs.existsSync(databasePath)) {
+    return;
+  }
+  if (!commandExists('sqlite3')) {
+    assertPrismaQuickCheck(databasePath, false);
+    return;
+  }
+  assertQuickCheckOk(databasePath, 'database before start');
+}
+
+function verifyDatabaseAfterStop() {
+  const databasePath = resolveDatabasePathForHome(dataHome);
+  if (!fs.existsSync(databasePath)) {
+    return;
+  }
+  if (!commandExists('sqlite3')) {
+    assertPrismaQuickCheck(databasePath, true);
+    return;
+  }
+
+  runSqlite(databasePath, 'PRAGMA wal_checkpoint(TRUNCATE);');
+  assertQuickCheckOk(databasePath, 'database after stop');
+  process.stdout.write('SQLite WAL checkpoint and integrity check passed.\n');
+}
+
+function assertPrismaQuickCheck(databasePath, checkpoint) {
+  const args = ['pnpm', '--filter', '@agentwaypoint/api', 'exec', 'tsx', 'src/scripts/verify-sqlite.ts'];
+  if (checkpoint) {
+    args.push('--checkpoint');
+  }
+  const result = spawnSync('corepack', args, {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, DATABASE_URL: `file:${databasePath}` },
+  });
+  if (result.status !== 0) {
+    const detail = [result.stderr, result.stdout].filter(Boolean).join('\n').trim();
+    throw new Error(`SQLite quick_check failed${detail ? `: ${detail}` : ''}`);
+  }
+  process.stdout.write(
+    checkpoint
+      ? 'SQLite WAL checkpoint and integrity check passed.\n'
+      : 'SQLite integrity check passed.\n',
+  );
 }
 
 function ensureDirs() {

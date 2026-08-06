@@ -125,8 +125,9 @@ async function proxyRequest(request: NextRequest, context: Params): Promise<Resp
           status: upstream.status,
           headers: {
             'content-type': 'text/event-stream; charset=utf-8',
-            'cache-control': 'no-cache',
+            'cache-control': 'no-cache, no-transform',
             connection: 'keep-alive',
+            'x-accel-buffering': 'no',
           },
         },
       );

@@ -3391,16 +3391,29 @@ export default function HomePage() {
         }
 
         if (envelope.type === 'turn.approval.requested') {
-          void syncTurnState(turnId).catch(() => {
-            // Keep current UI state on transient sync failure.
-          });
+          const requestId = typeof envelope.payload.requestId === 'string' ? envelope.payload.requestId : '';
+          const kind = typeof envelope.payload.kind === 'string' ? envelope.payload.kind : '';
+          if (requestId && kind) {
+            // A delayed stream batch can contain both requested and
+            // auto-resolved events. Render from the durable request event
+            // instead of asking whether the approval is still pending now.
+            setPendingApproval({
+              id: requestId,
+              kind,
+              status: 'pending',
+              decision: null,
+              createdAt: envelope.createdAt,
+              resolvedAt: null,
+              payload: envelope.payload,
+            });
+            setTurnStatus('waiting_approval');
+          }
         }
 
         if (envelope.type === 'turn.approval.resolved') {
           setTurnStatus('running');
-          void syncTurnState(turnId).catch(() => {
-            // Keep current UI state on transient sync failure.
-          });
+          const requestId = typeof envelope.payload.requestId === 'string' ? envelope.payload.requestId : '';
+          setPendingApproval((current) => (current?.id === requestId ? null : current));
         }
 
         if (envelope.type === 'turn.approval.timer_paused' || envelope.type === 'turn.approval.timer_resumed') {
