@@ -59,6 +59,7 @@ For development or test runs, use an isolated home so you do not touch a real se
 - Status: `./agent-waypoint status`
 - Stop: `./agent-waypoint stop`
 - Restart: `./agent-waypoint restart`
+- Explicit SQLite integrity check: `./agent-waypoint check-db`
 - Force web rebuild before start/restart: `./agent-waypoint restart --rebuild`
 - Logs: `./agent-waypoint logs api` or `./agent-waypoint logs web`
 
