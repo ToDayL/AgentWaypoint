@@ -199,6 +199,11 @@ export class MockRunnerAdapter implements RunnerAdapter {
     return true;
   }
 
+  async resetWorkers(): Promise<void> {
+    // The mock runner has no child workers. Keeping this explicit lets tests
+    // exercise provider-switch lifecycle behavior without invoking cc-switch.
+  }
+
   async steerTurn(input: SteerTurnInput): Promise<void> {
     const turn = await this.prisma.turn.findUnique({
       where: { id: input.turnId },

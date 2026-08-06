@@ -182,20 +182,20 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
     const backend = runtime.backend;
     const backendConfig = runtime.backendConfig;
 
-    const activeTurn = await this.prisma.turn.findFirst({
-      where: {
-        sessionId,
-        status: { in: ACTIVE_TURN_STATUSES },
-      },
-      select: { id: true },
-    });
-    if (activeTurn) {
-      throw new ConflictException({
-        message: 'An active turn already exists for this session',
-      });
-    }
-
     const created = await this.prisma.$transaction(async (tx) => {
+      await this.settingsService.assertProviderSwitchAllowsTurn(tx);
+      const activeTurn = await tx.turn.findFirst({
+        where: {
+          sessionId,
+          status: { in: ACTIVE_TURN_STATUSES },
+        },
+        select: { id: true },
+      });
+      if (activeTurn) {
+        throw new ConflictException({
+          message: 'An active turn already exists for this session',
+        });
+      }
       const userMessage = await tx.message.create({
         data: {
           sessionId,

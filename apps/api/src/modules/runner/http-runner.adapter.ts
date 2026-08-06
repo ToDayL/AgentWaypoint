@@ -188,6 +188,10 @@ export class HttpRunnerAdapter implements RunnerAdapter {
     return true;
   }
 
+  async resetWorkers(): Promise<void> {
+    throw new Error('Provider switching requires an embedded runner on the cc-switch host');
+  }
+
   async resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void> {
     await this.request({
       method: 'POST',
