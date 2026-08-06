@@ -25,6 +25,14 @@ model User {
   botIntegrations      BotIntegration[]
 }
 
+model RuntimeControl {
+  id                         String    @id
+  providerSwitchInProgress   Boolean   @default(false)
+  providerSwitchOwner        String?
+  providerSwitchLeaseExpires DateTime?
+  updatedAt                  DateTime  @updatedAt
+}
+
 model AuthSession {
   id               String    @id @default(cuid())
   userId           String

@@ -25,6 +25,33 @@ function availableState(): CcSwitchState {
   };
 }
 
+function createProviderSwitchPrisma(activeTurn: { id: string } | null = null) {
+  const control = {
+    id: 'provider-switch',
+    providerSwitchInProgress: false,
+    providerSwitchOwner: null as string | null,
+    providerSwitchLeaseExpires: null as Date | null,
+  };
+  const runtimeControl = {
+    upsert: vi.fn().mockImplementation(async () => ({ ...control })),
+    update: vi.fn().mockImplementation(async ({ data }: { data: Partial<typeof control> }) => {
+      Object.assign(control, data);
+      return { ...control };
+    }),
+    updateMany: vi.fn().mockImplementation(async ({ data }: { data: Partial<typeof control> }) => {
+      Object.assign(control, data);
+      return { count: 1 };
+    }),
+  };
+  const turn = { findFirst: vi.fn().mockResolvedValue(activeTurn) };
+  const tx = { runtimeControl, turn };
+  return {
+    turn,
+    runtimeControl,
+    $transaction: vi.fn(async (callback: (transaction: typeof tx) => Promise<unknown>) => callback(tx)),
+  } as unknown as PrismaService;
+}
+
 describe('cc-switch integration', () => {
   it('parses provider tables without executing the CLI', () => {
     expect(parseProviderList(providerTable)).toEqual([
@@ -38,9 +65,7 @@ describe('cc-switch integration', () => {
     const switchProvider = vi.fn().mockResolvedValue(undefined);
     const resetWorkers = vi.fn().mockResolvedValue(undefined);
     const service = new SettingsService(
-      {
-        turn: { findFirst: vi.fn().mockResolvedValue(null) },
-      } as unknown as PrismaService,
+      createProviderSwitchPrisma(),
       { resetWorkers } as unknown as RunnerAdapter,
       { discover, switchProvider } as CcSwitchClient,
     );
@@ -60,9 +85,7 @@ describe('cc-switch integration', () => {
   it('does not invoke the fake client switch while any turn is active', async () => {
     const switchProvider = vi.fn();
     const service = new SettingsService(
-      {
-        turn: { findFirst: vi.fn().mockResolvedValue({ id: 'running-turn' }) },
-      } as unknown as PrismaService,
+      createProviderSwitchPrisma({ id: 'running-turn' }),
       { resetWorkers: vi.fn() } as unknown as RunnerAdapter,
       {
         discover: vi.fn().mockResolvedValue(availableState()),
@@ -84,7 +107,7 @@ describe('cc-switch integration', () => {
     state.providers.claude.push({ id: 'claude-internal', name: 'Claude Internal', current: false });
     const resetWorkers = vi.fn();
     const service = new SettingsService(
-      { turn: { findFirst: vi.fn().mockResolvedValue(null) } } as unknown as PrismaService,
+      createProviderSwitchPrisma(),
       { resetWorkers } as unknown as RunnerAdapter,
       {
         discover: vi.fn().mockResolvedValue(state),
@@ -103,7 +126,7 @@ describe('cc-switch integration', () => {
   it('rejects stale expected providers without overwriting an external change', async () => {
     const switchProvider = vi.fn();
     const service = new SettingsService(
-      { turn: { findFirst: vi.fn().mockResolvedValue(null) } } as unknown as PrismaService,
+      createProviderSwitchPrisma(),
       { resetWorkers: vi.fn() } as unknown as RunnerAdapter,
       { discover: vi.fn().mockResolvedValue(availableState()), switchProvider } as CcSwitchClient,
     );
@@ -115,5 +138,24 @@ describe('cc-switch integration', () => {
       }),
     ).rejects.toMatchObject({ status: 409 });
     expect(switchProvider).not.toHaveBeenCalled();
+  });
+
+  it('rejects turn creation while another API instance holds an unexpired switch lease', async () => {
+    const service = new SettingsService(
+      {} as PrismaService,
+      {} as RunnerAdapter,
+      {} as CcSwitchClient,
+    );
+    const tx = {
+      runtimeControl: {
+        upsert: vi.fn().mockResolvedValue({
+          providerSwitchInProgress: true,
+          providerSwitchLeaseExpires: new Date(Date.now() + 60_000),
+        }),
+        update: vi.fn(),
+      },
+    };
+
+    await expect(service.assertProviderSwitchAllowsTurn(tx as never)).rejects.toMatchObject({ status: 409 });
   });
 });

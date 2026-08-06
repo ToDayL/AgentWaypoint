@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 import { ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { hashPassword } from '../auth/auth.service';
@@ -11,6 +13,8 @@ import {
 import { CC_SWITCH_CLIENT, CcSwitchApp, CcSwitchClient, CcSwitchState } from './cc-switch.client';
 
 const ACTIVE_TURN_STATUSES = ['queued', 'running', 'waiting_approval'];
+const RUNTIME_CONTROL_ID = 'provider-switch';
+const PROVIDER_SWITCH_LEASE_MS = 2 * 60 * 1000;
 
 export type CcSwitchSettingsState = CcSwitchState & {
   hasActiveTurn: boolean;
@@ -27,8 +31,30 @@ export class SettingsService {
     @Inject(CC_SWITCH_CLIENT) private readonly ccSwitchClient: CcSwitchClient,
   ) {}
 
-  isProviderSwitchInProgress(): boolean {
-    return this.providerSwitchInProgress;
+  async assertProviderSwitchAllowsTurn(tx: Prisma.TransactionClient): Promise<void> {
+    const now = new Date();
+    const control = await tx.runtimeControl.upsert({
+      where: { id: RUNTIME_CONTROL_ID },
+      create: { id: RUNTIME_CONTROL_ID },
+      update: { updatedAt: now },
+    });
+    const leaseActive =
+      control.providerSwitchInProgress &&
+      control.providerSwitchLeaseExpires !== null &&
+      control.providerSwitchLeaseExpires.getTime() > now.getTime();
+    if (leaseActive) {
+      throw new ConflictException({ message: 'Provider switch in progress; try again shortly' });
+    }
+    if (control.providerSwitchInProgress) {
+      await tx.runtimeControl.update({
+        where: { id: RUNTIME_CONTROL_ID },
+        data: {
+          providerSwitchInProgress: false,
+          providerSwitchOwner: null,
+          providerSwitchLeaseExpires: null,
+        },
+      });
+    }
   }
 
   async getCcSwitchProviders(): Promise<CcSwitchSettingsState> {
@@ -47,7 +73,9 @@ export class SettingsService {
       throw new ConflictException({ message: 'A provider switch is already in progress' });
     }
     this.providerSwitchInProgress = true;
+    let switchOwner: string | null = null;
     try {
+      switchOwner = await this.acquireProviderSwitchLease();
       const state = await this.getCcSwitchProviders();
       if (!state.canSwitch) {
         throw new ConflictException({ message: state.reason ?? 'cc-switch is unavailable' });
@@ -55,10 +83,6 @@ export class SettingsService {
       const requested = requestedProviderUpdates(input);
       for (const [app, providerId] of requested) {
         assertRequestedProvider(state, app, providerId);
-      }
-
-      if (await this.hasActiveTurn()) {
-        throw new ConflictException({ message: 'Cannot switch providers while a turn is active' });
       }
 
       const previous: Record<CcSwitchApp, string> = {
@@ -94,8 +118,67 @@ export class SettingsService {
       }
       return this.getCcSwitchProviders();
     } finally {
+      if (switchOwner) {
+        try {
+          await this.releaseProviderSwitchLease(switchOwner);
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : 'unknown database error';
+          this.logger.error(`Failed to release provider switch lease: ${message}`);
+        }
+      }
       this.providerSwitchInProgress = false;
     }
+  }
+
+  private async acquireProviderSwitchLease(): Promise<string> {
+    const owner = randomUUID();
+    const now = new Date();
+    await this.prisma.$transaction(async (tx) => {
+      const control = await tx.runtimeControl.upsert({
+        where: { id: RUNTIME_CONTROL_ID },
+        create: { id: RUNTIME_CONTROL_ID },
+        update: { updatedAt: now },
+      });
+      const leaseActive =
+        control.providerSwitchInProgress &&
+        control.providerSwitchLeaseExpires !== null &&
+        control.providerSwitchLeaseExpires.getTime() > now.getTime();
+      if (leaseActive) {
+        throw new ConflictException({ message: 'A provider switch is already in progress' });
+      }
+
+      const activeTurn = await tx.turn.findFirst({
+        where: { status: { in: ACTIVE_TURN_STATUSES } },
+        select: { id: true },
+      });
+      if (activeTurn) {
+        throw new ConflictException({ message: 'Cannot switch providers while a turn is active' });
+      }
+
+      await tx.runtimeControl.update({
+        where: { id: RUNTIME_CONTROL_ID },
+        data: {
+          providerSwitchInProgress: true,
+          providerSwitchOwner: owner,
+          providerSwitchLeaseExpires: new Date(now.getTime() + PROVIDER_SWITCH_LEASE_MS),
+        },
+      });
+    });
+    return owner;
+  }
+
+  private async releaseProviderSwitchLease(owner: string): Promise<void> {
+    await this.prisma.runtimeControl.updateMany({
+      where: {
+        id: RUNTIME_CONTROL_ID,
+        providerSwitchOwner: owner,
+      },
+      data: {
+        providerSwitchInProgress: false,
+        providerSwitchOwner: null,
+        providerSwitchLeaseExpires: null,
+      },
+    });
   }
 
   private async hasActiveTurn(): Promise<boolean> {
