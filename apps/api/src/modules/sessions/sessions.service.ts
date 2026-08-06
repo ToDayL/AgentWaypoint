@@ -185,6 +185,17 @@ export class SessionsService {
     const rootMeta = normalizeJsonRecord(session.meta) ?? {};
     const currentOverride = normalizeJsonRecord(rootMeta.override) ?? {};
 
+    if (input.backendConfig) {
+      const currentModel = readOptionalString(runtime.backendConfig.model);
+      const requestedModel = readOptionalString(input.backendConfig.model);
+      if (currentModel && requestedModel && requestedModel !== currentModel) {
+        const models = await this.runnerAdapter.listModels({ backend: runtime.backend });
+        if (!models.some((model) => model.model === currentModel)) {
+          throw new ConflictException({ message: 'Cannot change a session model that is no longer available' });
+        }
+      }
+    }
+
     const runtimeBackendConfig = resolveRuntimeBackendConfig({
       backend: runtime.backend,
       inherited: runtime.backendConfig,
@@ -450,6 +461,10 @@ function normalizeJsonRecord(value: unknown): Record<string, unknown> | null {
     return null;
   }
   return value as Record<string, unknown>;
+}
+
+function readOptionalString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }
 
 function normalizeBackend(inputBackend: string | undefined | null): string {

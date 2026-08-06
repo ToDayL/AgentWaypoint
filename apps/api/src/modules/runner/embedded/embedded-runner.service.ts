@@ -251,6 +251,12 @@ export class EmbeddedRunnerService implements OnModuleInit {
     return true;
   }
 
+  async resetWorkers(): Promise<void> {
+    // Provider switching is permitted only when no durable turn is active.
+    // Claude creates its SDK query per turn; Codex retains one app-server.
+    await this.codexBackend.resetWorker();
+  }
+
   async resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void> {
     const turn = this.activeTurns.get(input.turnId);
     if (turn?.backend === 'claude') {

@@ -219,6 +219,8 @@ export interface RunnerAdapter {
   ): Promise<void>;
   steerTurn(input: SteerTurnInput): Promise<void>;
   cancelTurn(input: CancelTurnInput): Promise<boolean>;
+  /** Dispose process-local workers after a provider/authentication switch. */
+  resetWorkers(): Promise<void>;
   resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void>;
   readCodexRateLimits(): Promise<CodexRateLimits>;
   getHealth(): Promise<RunnerHealth>;

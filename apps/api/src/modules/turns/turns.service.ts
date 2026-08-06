@@ -177,6 +177,10 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
   ) {
     const sessionId = session.id;
 
+    if (this.settingsService.isProviderSwitchInProgress()) {
+      throw new ConflictException({ message: 'Provider switch in progress; try again shortly' });
+    }
+
     const runtime = readSessionRuntimeFromMeta(session.meta);
     const cwd = runtime.cwd;
     const backend = runtime.backend;
@@ -193,6 +197,10 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
       throw new ConflictException({
         message: 'An active turn already exists for this session',
       });
+    }
+
+    if (this.settingsService.isProviderSwitchInProgress()) {
+      throw new ConflictException({ message: 'Provider switch in progress; try again shortly' });
     }
 
     const created = await this.prisma.$transaction(async (tx) => {

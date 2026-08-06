@@ -119,6 +119,23 @@ export class CodexBackend {
     return items;
   }
 
+  async resetWorker(): Promise<void> {
+    const workerPromise = this.codexWorkerPromise;
+    if (!workerPromise) {
+      return;
+    }
+    try {
+      const worker = await workerPromise;
+      this.handleWorkerExit(worker, 'Codex worker reset after provider switch');
+      if (!worker.process.killed) {
+        worker.process.kill('SIGTERM');
+      }
+    } catch {
+      // A failed startup has no reusable worker. The next turn will create one.
+      this.codexWorkerPromise = null;
+    }
+  }
+
   async listSkills(cwd: string): Promise<SkillListItem[]> {
     const worker = await this.ensureCodexWorker();
     await worker.readyPromise;

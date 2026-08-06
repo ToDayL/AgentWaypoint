@@ -4,7 +4,12 @@ import { AuthGuard } from '../auth/auth.guard';
 import { CurrentUserDecorator } from '../auth/current-user.decorator';
 import { CurrentUser } from '../auth/auth.types';
 import { SettingsService } from './settings.service';
-import { AdminCreateUserBodySchema, AdminUpdateUserBodySchema, UpdateAppSettingsBodySchema } from './settings.schemas';
+import {
+  AdminCreateUserBodySchema,
+  AdminUpdateUserBodySchema,
+  UpdateAppSettingsBodySchema,
+  UpdateCcSwitchProvidersBodySchema,
+} from './settings.schemas';
 
 @Controller('/api/settings')
 @UseGuards(AuthGuard)
@@ -20,6 +25,18 @@ export class SettingsController {
   async updateSettings(@CurrentUserDecorator() user: CurrentUser, @Body() body: unknown) {
     const input = parseWithZod(UpdateAppSettingsBodySchema, body);
     return this.settingsService.updateAppSettings(user.id, input);
+  }
+
+  @Get('/cc-switch')
+  async getCcSwitchProviders() {
+    return this.settingsService.getCcSwitchProviders();
+  }
+
+  @Post('/cc-switch')
+  async updateCcSwitchProviders(@CurrentUserDecorator() user: CurrentUser, @Body() body: unknown) {
+    assertAdmin(user);
+    const input = parseWithZod(UpdateCcSwitchProvidersBodySchema, body);
+    return this.settingsService.updateCcSwitchProviders(input);
   }
 
   @Get('/codex/rate-limits')

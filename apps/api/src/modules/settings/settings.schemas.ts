@@ -11,6 +11,25 @@ export const UpdateAppSettingsBodySchema = z
 
 export type UpdateAppSettingsBody = z.infer<typeof UpdateAppSettingsBodySchema>;
 
+const CcSwitchProviderIdSchema = z.string().trim().min(1).max(120);
+
+export const UpdateCcSwitchProvidersBodySchema = z
+  .object({
+    codexProviderId: CcSwitchProviderIdSchema.optional(),
+    claudeProviderId: CcSwitchProviderIdSchema.optional(),
+    expectedCurrent: z
+      .object({
+        codex: CcSwitchProviderIdSchema.optional(),
+        claude: CcSwitchProviderIdSchema.optional(),
+      })
+      .optional(),
+  })
+  .refine((input) => !!input.codexProviderId || !!input.claudeProviderId, {
+    message: 'At least one provider is required',
+  });
+
+export type UpdateCcSwitchProvidersBody = z.infer<typeof UpdateCcSwitchProvidersBodySchema>;
+
 export const AdminCreateUserBodySchema = z.object({
   email: z.string().trim().email().max(320),
   displayName: z.string().trim().max(120).optional().nullable(),

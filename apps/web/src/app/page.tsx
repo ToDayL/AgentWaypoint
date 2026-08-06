@@ -222,6 +222,23 @@ type AppSettings = {
   supportedBackends: string[];
 };
 
+type CcSwitchProvider = {
+  id: string;
+  name: string;
+  current: boolean;
+};
+
+type CcSwitchSettings = {
+  available: boolean;
+  canSwitch: boolean;
+  reason: string | null;
+  hasActiveTurn: boolean;
+  providers: {
+    codex: CcSwitchProvider[];
+    claude: CcSwitchProvider[];
+  };
+};
+
 type BotIntegrationStatus = 'active' | 'paused' | 'error';
 
 type DiscordPluginConfig = {
@@ -398,6 +415,10 @@ function normalizeSupportedBackends(input: unknown): string[] {
     .filter((item) => item === 'codex' || item === 'claude');
   const unique = Array.from(new Set(normalized));
   return unique.length > 0 ? unique : ['codex'];
+}
+
+function currentCcSwitchProviderId(providers: CcSwitchProvider[] | undefined, fallback: string): string {
+  return providers?.find((provider) => provider.current)?.id ?? providers?.[0]?.id ?? fallback;
 }
 
 function parseIdListInput(input: string): string[] {
@@ -701,6 +722,9 @@ export default function HomePage() {
   const [accountRateLimitsBusy, setAccountRateLimitsBusy] = useState(false);
   const [turnSteerDraft, setTurnSteerDraft] = useState(false);
   const [defaultWorkspaceRootInput, setDefaultWorkspaceRootInput] = useState('');
+  const [ccSwitchSettings, setCcSwitchSettings] = useState<CcSwitchSettings | null>(null);
+  const [ccSwitchCodexDraft, setCcSwitchCodexDraft] = useState('codex-official');
+  const [ccSwitchClaudeDraft, setCcSwitchClaudeDraft] = useState('claude-official');
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
   const [newProjectName, setNewProjectName] = useState('My Workspace');
@@ -724,6 +748,7 @@ export default function HomePage() {
   const [sessionConfigDefaultModel, setSessionConfigDefaultModel] = useState(DEFAULT_CODEX_MODEL);
   const [sessionConfigExecutionMode, setSessionConfigExecutionMode] = useState(DEFAULT_CODEX_EXECUTION_MODE);
   const [sessionConfigEffort, setSessionConfigEffort] = useState('');
+  const [sessionConfigModelAvailable, setSessionConfigModelAvailable] = useState(true);
   const [sessionConfigAutoApprove, setSessionConfigAutoApprove] = useState(false);
   const [sessionConfigAutoApproveTimeout, setSessionConfigAutoApproveTimeout] = useState(10);
   const [sessionConfigTargetProjectId, setSessionConfigTargetProjectId] = useState('');
@@ -858,6 +883,14 @@ export default function HomePage() {
   const appSettingsDirty =
     turnSteerDraft !== appSettings.turnSteerEnabled ||
     normalizedDefaultWorkspaceRootDraft !== (appSettings.defaultWorkspaceRoot ?? null);
+  const ccSwitchDirty =
+    ccSwitchCodexDraft !== currentCcSwitchProviderId(ccSwitchSettings?.providers.codex, 'codex-official') ||
+    ccSwitchClaudeDraft !== currentCcSwitchProviderId(ccSwitchSettings?.providers.claude, 'claude-official');
+  const ccSwitchDisabled =
+    busy ||
+    currentUserRole !== 'admin' ||
+    !ccSwitchSettings?.canSwitch ||
+    ccSwitchSettings.hasActiveTurn;
   const selectedProject = useMemo(
     () => projects.find((item) => item.id === selectedProjectId),
     [projects, selectedProjectId],
@@ -1490,6 +1523,14 @@ export default function HomePage() {
       return;
     }
     void loadBotIntegrations({ preserveSelection: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mounted, authenticated, leftSidebarTab]);
+
+  useEffect(() => {
+    if (!mounted || !authenticated || leftSidebarTab !== 'config') {
+      return;
+    }
+    void loadCcSwitchSettings();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mounted, authenticated, leftSidebarTab]);
 
@@ -2335,7 +2376,11 @@ export default function HomePage() {
 
   async function loadAvailableModels(
     backend = 'codex',
-    options?: { target?: 'new' | 'config' | 'session' | 'sessionConfig' | 'both'; preferredModel?: string | null },
+    options?: {
+      target?: 'new' | 'config' | 'session' | 'sessionConfig' | 'both';
+      preferredModel?: string | null;
+      onLoaded?: (models: AvailableModel[]) => void;
+    },
   ): Promise<void> {
     // Show whatever was cached for this backend immediately so the panel
     // never appears with empty model/effort selectors during the network
@@ -2384,7 +2429,11 @@ export default function HomePage() {
         setNewSessionDefaultModel((current) => resolvePreferredModel(current));
       }
       if (target === 'sessionConfig') {
-        setSessionConfigDefaultModel((current) => resolvePreferredModel(current));
+        setSessionConfigDefaultModel((current) => {
+          const preferred = preferredModel ?? current.trim();
+          return preferred || modelDefault;
+        });
+        options?.onLoaded?.(models);
       }
     } catch (requestError) {
       setError(extractMessage(requestError));
@@ -2534,6 +2583,56 @@ export default function HomePage() {
       setDefaultWorkspaceRootInput(normalizedWorkspaceRoot ?? '');
     } catch (requestError) {
       setError(extractMessage(requestError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadCcSwitchSettings(): Promise<void> {
+    try {
+      const response = await apiRequest<CcSwitchSettings>('/api/settings/cc-switch', { method: 'GET' });
+      setCcSwitchSettings(response);
+      setCcSwitchCodexDraft(currentCcSwitchProviderId(response.providers.codex, 'codex-official'));
+      setCcSwitchClaudeDraft(currentCcSwitchProviderId(response.providers.claude, 'claude-official'));
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+    }
+  }
+
+  async function handleSaveCcSwitchProviders(): Promise<void> {
+    if (ccSwitchDisabled || !ccSwitchDirty) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const currentCodexProviderId = currentCcSwitchProviderId(ccSwitchSettings?.providers.codex, 'codex-official');
+      const currentClaudeProviderId = currentCcSwitchProviderId(ccSwitchSettings?.providers.claude, 'claude-official');
+      const body: {
+        codexProviderId?: string;
+        claudeProviderId?: string;
+        expectedCurrent: Partial<Record<'codex' | 'claude', string>>;
+      } = { expectedCurrent: {} };
+      if (ccSwitchCodexDraft !== currentCodexProviderId) {
+        body.codexProviderId = ccSwitchCodexDraft;
+        body.expectedCurrent.codex = currentCodexProviderId;
+      }
+      if (ccSwitchClaudeDraft !== currentClaudeProviderId) {
+        body.claudeProviderId = ccSwitchClaudeDraft;
+        body.expectedCurrent.claude = currentClaudeProviderId;
+      }
+      const response = await apiRequest<CcSwitchSettings>('/api/settings/cc-switch', {
+        method: 'POST',
+        body,
+      });
+      setCcSwitchSettings(response);
+      setCcSwitchCodexDraft(currentCcSwitchProviderId(response.providers.codex, 'codex-official'));
+      setCcSwitchClaudeDraft(currentCcSwitchProviderId(response.providers.claude, 'claude-official'));
+      setAvailableModelsByBackend({});
+      await loadAvailableModels('codex', { target: 'both' });
+    } catch (requestError) {
+      setError(extractMessage(requestError));
+      await loadCcSwitchSettings();
     } finally {
       setBusy(false);
     }
@@ -3691,9 +3790,14 @@ export default function HomePage() {
     setSessionConfigDefaultModel(sessionBackendConfig.model);
     setSessionConfigExecutionMode(sessionBackendConfig.executionMode);
     setSessionConfigEffort(sessionBackendConfig.effort ?? '');
+    setSessionConfigModelAvailable(true);
     setSessionConfigAutoApprove(sessionRuntime.autoApprove);
     setSessionConfigAutoApproveTimeout(sessionRuntime.autoApproveTimeoutSeconds);
-    void loadAvailableModels(resolvedBackend, { target: 'sessionConfig', preferredModel: sessionBackendConfig.model });
+    void loadAvailableModels(resolvedBackend, {
+      target: 'sessionConfig',
+      preferredModel: sessionBackendConfig.model,
+      onLoaded: (models) => setSessionConfigModelAvailable(models.some((model) => model.model === sessionBackendConfig.model)),
+    });
     openActionPanel('sessionConfig');
   }
 
@@ -4495,13 +4599,20 @@ export default function HomePage() {
                         setSessionConfigDefaultModel(nextModel);
                         setSessionConfigEffort((current) => retainSupportedEffort(availableModels, nextModel, current));
                       }}
+                      disabled={busy || !sessionConfigModelAvailable}
                     >
+                      {!sessionConfigModelAvailable ? (
+                        <option value={sessionConfigDefaultModel}>{sessionConfigDefaultModel} (unavailable)</option>
+                      ) : null}
                       {availableModels.map((model) => (
                         <option key={model.id} value={model.model}>
                           {model.displayName}
                         </option>
                       ))}
                     </select>
+                    {!sessionConfigModelAvailable ? (
+                      <span className="sim-input-hint">This session model is no longer available and cannot be changed.</span>
+                    ) : null}
                   </label>
                   <label>
                     Execution Mode
@@ -5150,6 +5261,58 @@ export default function HomePage() {
                     {leftSidebarTab === 'config' ? (
                       <div className="left-config-panel">
                         <h2>Config</h2>
+                        <h3>CLI Providers</h3>
+                        {ccSwitchSettings ? (
+                          <>
+                            <label>
+                              Codex provider
+                              <select
+                                value={ccSwitchCodexDraft}
+                                onChange={(event) => setCcSwitchCodexDraft(event.target.value)}
+                                disabled={ccSwitchDisabled}
+                              >
+                                {ccSwitchSettings.providers.codex.map((provider) => (
+                                  <option key={`cc-switch-codex-${provider.id}`} value={provider.id}>
+                                    {provider.name} ({provider.id})
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label>
+                              Claude provider
+                              <select
+                                value={ccSwitchClaudeDraft}
+                                onChange={(event) => setCcSwitchClaudeDraft(event.target.value)}
+                                disabled={ccSwitchDisabled}
+                              >
+                                {ccSwitchSettings.providers.claude.map((provider) => (
+                                  <option key={`cc-switch-claude-${provider.id}`} value={provider.id}>
+                                    {provider.name} ({provider.id})
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            {!ccSwitchSettings.canSwitch ? (
+                              <span className="sim-input-hint">{ccSwitchSettings.reason ?? 'cc-switch is unavailable.'}</span>
+                            ) : null}
+                            {ccSwitchSettings.hasActiveTurn ? (
+                              <span className="sim-input-hint">Provider switching is unavailable while any turn is running.</span>
+                            ) : null}
+                            {currentUserRole !== 'admin' ? (
+                              <span className="sim-input-hint">Only administrators can switch CLI providers.</span>
+                            ) : null}
+                            <button
+                              type="button"
+                              className="button-secondary"
+                              onClick={() => void handleSaveCcSwitchProviders()}
+                              disabled={ccSwitchDisabled || !ccSwitchDirty}
+                            >
+                              Save CLI Providers
+                            </button>
+                          </>
+                        ) : (
+                          <p>Loading CLI providers…</p>
+                        )}
                         <p>Signed in as: <strong>{currentUserEmail}</strong></p>
                         {codexBackendEnabled ? (
                           <>

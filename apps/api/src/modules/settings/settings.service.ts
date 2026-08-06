@@ -2,16 +2,108 @@ import { ConflictException, ForbiddenException, Inject, Injectable, Logger, NotF
 import { PrismaService } from '../prisma/prisma.service';
 import { hashPassword } from '../auth/auth.service';
 import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
-import { AdminCreateUserBody, AdminUpdateUserBody, UpdateAppSettingsBody } from './settings.schemas';
+import {
+  AdminCreateUserBody,
+  AdminUpdateUserBody,
+  UpdateAppSettingsBody,
+  UpdateCcSwitchProvidersBody,
+} from './settings.schemas';
+import { CC_SWITCH_CLIENT, CcSwitchApp, CcSwitchClient, CcSwitchState } from './cc-switch.client';
+
+const ACTIVE_TURN_STATUSES = ['queued', 'running', 'waiting_approval'];
+
+export type CcSwitchSettingsState = CcSwitchState & {
+  hasActiveTurn: boolean;
+};
 
 @Injectable()
 export class SettingsService {
   private readonly logger = new Logger(SettingsService.name);
+  private providerSwitchInProgress = false;
 
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(RUNNER_ADAPTER) private readonly runnerAdapter: RunnerAdapter,
+    @Inject(CC_SWITCH_CLIENT) private readonly ccSwitchClient: CcSwitchClient,
   ) {}
+
+  isProviderSwitchInProgress(): boolean {
+    return this.providerSwitchInProgress;
+  }
+
+  async getCcSwitchProviders(): Promise<CcSwitchSettingsState> {
+    const hasActiveTurn = await this.hasActiveTurn();
+    if ((process.env.RUNNER_MODE ?? 'embedded').trim().toLowerCase() === 'http') {
+      return {
+        ...unavailableCcSwitchState('Provider switching requires an embedded runner on the cc-switch host'),
+        hasActiveTurn,
+      };
+    }
+    return { ...(await this.ccSwitchClient.discover()), hasActiveTurn };
+  }
+
+  async updateCcSwitchProviders(input: UpdateCcSwitchProvidersBody): Promise<CcSwitchState> {
+    if (this.providerSwitchInProgress) {
+      throw new ConflictException({ message: 'A provider switch is already in progress' });
+    }
+    this.providerSwitchInProgress = true;
+    try {
+      const state = await this.getCcSwitchProviders();
+      if (!state.canSwitch) {
+        throw new ConflictException({ message: state.reason ?? 'cc-switch is unavailable' });
+      }
+      const requested = requestedProviderUpdates(input);
+      for (const [app, providerId] of requested) {
+        assertRequestedProvider(state, app, providerId);
+      }
+
+      if (await this.hasActiveTurn()) {
+        throw new ConflictException({ message: 'Cannot switch providers while a turn is active' });
+      }
+
+      const previous: Record<CcSwitchApp, string> = {
+        codex: selectedProviderId(state.providers.codex),
+        claude: selectedProviderId(state.providers.claude),
+      };
+      for (const [app] of requested) {
+        if (input.expectedCurrent?.[app] !== previous[app]) {
+          throw new ConflictException({ message: `${app} provider changed outside this settings page; refresh and try again` });
+        }
+      }
+      const switched: CcSwitchApp[] = [];
+      try {
+        for (const [app, providerId] of requested) {
+          if (providerId !== previous[app]) {
+            await this.ccSwitchClient.switchProvider(app, providerId);
+            switched.push(app);
+          }
+        }
+      } catch (error: unknown) {
+        for (const app of [...switched].reverse()) {
+          try {
+            await this.ccSwitchClient.switchProvider(app, previous[app]);
+          } catch {
+            this.logger.error(`Failed to roll back ${app} provider after unsuccessful switch`);
+          }
+        }
+        throw error;
+      }
+
+      if (switched.includes('codex')) {
+        await this.runnerAdapter.resetWorkers();
+      }
+      return this.getCcSwitchProviders();
+    } finally {
+      this.providerSwitchInProgress = false;
+    }
+  }
+
+  private async hasActiveTurn(): Promise<boolean> {
+    return !!(await this.prisma.turn.findFirst({
+      where: { status: { in: ACTIVE_TURN_STATUSES } },
+      select: { id: true },
+    }));
+  }
 
   async getAppSettings(userId: string) {
     const settings = await this.prisma.user.findUniqueOrThrow({
@@ -201,4 +293,41 @@ export class SettingsService {
       },
     });
   }
+}
+
+function assertRequestedProvider(state: CcSwitchState, app: CcSwitchApp, id: string): void {
+  if (!state.providers[app].some((provider) => provider.id === id)) {
+    throw new ConflictException({ message: `Unknown ${app} provider` });
+  }
+}
+
+function requestedProviderUpdates(input: UpdateCcSwitchProvidersBody): Array<[CcSwitchApp, string]> {
+  const updates: Array<[CcSwitchApp, string]> = [];
+  if (input.codexProviderId) {
+    updates.push(['codex', input.codexProviderId]);
+  }
+  if (input.claudeProviderId) {
+    updates.push(['claude', input.claudeProviderId]);
+  }
+  return updates;
+}
+
+function selectedProviderId(providers: CcSwitchState['providers'][CcSwitchApp]): string {
+  const current = providers.find((provider) => provider.current) ?? providers[0];
+  if (!current) {
+    throw new ConflictException({ message: 'cc-switch did not return a current provider' });
+  }
+  return current.id;
+}
+
+function unavailableCcSwitchState(reason: string): CcSwitchState {
+  return {
+    available: false,
+    canSwitch: false,
+    reason,
+    providers: {
+      codex: [{ id: 'codex-official', name: 'codex-official', current: true }],
+      claude: [{ id: 'claude-official', name: 'claude-official', current: true }],
+    },
+  };
 }

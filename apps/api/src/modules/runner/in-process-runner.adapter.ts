@@ -56,6 +56,10 @@ export class InProcessRunnerAdapter implements RunnerAdapter {
     return this.embedded.cancelTurn(input);
   }
 
+  resetWorkers(): Promise<void> {
+    return this.embedded.resetWorkers();
+  }
+
   resolveTurnApproval(input: ResolveTurnApprovalInput): Promise<void> {
     return this.embedded.resolveTurnApproval(input);
   }
