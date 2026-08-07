@@ -6911,7 +6911,29 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
     if (!delta) {
       return current;
     }
-    return appendOrMergeByKindWithoutDetails(current, 'reasoning', 'Reasoning', envelope);
+    const last = current.at(-1);
+    if (last?.kind === 'reasoning') {
+      return [
+        ...current.slice(0, -1),
+        {
+          ...last,
+          seqEnd: Math.max(last.seqEnd, envelope.seq),
+          details: appendOrMergeDetail(last.details, delta),
+        },
+      ];
+    }
+    return [
+      ...current,
+      {
+        id: `reasoning-${envelope.seq}`,
+        kind: 'reasoning',
+        title: 'Reasoning',
+        seqStart: envelope.seq,
+        seqEnd: envelope.seq,
+        createdAt: envelope.createdAt,
+        details: [delta],
+      },
+    ];
   }
 
   if (envelope.type === 'assistant.delta') {

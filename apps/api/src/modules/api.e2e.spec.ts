@@ -1143,6 +1143,89 @@ describe('API e2e', () => {
     expect(history.messages.some((message) => message.role === 'assistant' && message.content === 'ABC')).toBe(true);
   });
 
+  it('keeps reasoning out of assistant deltas and persisted chat messages', async () => {
+    const email = randomEmail('turn-reasoning-timeline');
+
+    const createProjectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: { name: 'Reasoning Timeline Project', repoPath: TEST_REPO_PATH },
+    });
+    expect(createProjectResponse.statusCode).toBe(201);
+    const project = createProjectResponse.json();
+
+    const createSessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Reasoning Timeline Session' },
+    });
+    expect(createSessionResponse.statusCode).toBe(201);
+    const session = createSessionResponse.json();
+
+    const userMessage = await prisma.message.create({
+      data: {
+        sessionId: session.id,
+        role: 'user',
+        content: 'keep reasoning in the timeline',
+      },
+    });
+    const turn = await prisma.turn.create({
+      data: {
+        sessionId: session.id,
+        userMessageId: userMessage.id,
+        status: 'running',
+      },
+      select: { id: true },
+    });
+
+    for (const delta of ['private ', 'reasoning']) {
+      const reasoningResponse = await app.inject({
+        method: 'POST',
+        url: `/internal/runner/turns/${turn.id}/events`,
+        payload: {
+          type: 'reasoning.delta',
+          payload: { delta },
+        },
+      });
+      expect(reasoningResponse.statusCode).toBe(201);
+    }
+
+    const completionResponse = await app.inject({
+      method: 'POST',
+      url: `/internal/runner/turns/${turn.id}/events`,
+      payload: {
+        type: 'turn.completed',
+        payload: { content: 'Visible answer' },
+      },
+    });
+    expect(completionResponse.statusCode).toBe(201);
+
+    const events = await prisma.event.findMany({
+      where: { turnId: turn.id },
+      orderBy: { seq: 'asc' },
+      select: { type: true, payload: true },
+    });
+    expect(events.filter((event) => event.type === 'reasoning.delta')).toEqual([
+      expect.objectContaining({ payload: expect.objectContaining({ delta: 'private reasoning' }) }),
+    ]);
+    expect(events.filter((event) => event.type === 'assistant.delta')).toHaveLength(0);
+
+    const historyResponse = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${session.id}/history`,
+      headers: { 'x-user-email': email },
+    });
+    expect(historyResponse.statusCode).toBe(200);
+    const history = historyResponse.json() as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(history.messages).toEqual(
+      expect.arrayContaining([expect.objectContaining({ role: 'assistant', content: 'Visible answer' })]),
+    );
+  });
+
   it('persists partial assistant history when a turn fails', async () => {
     const email = randomEmail('turn-failed-history');
 
