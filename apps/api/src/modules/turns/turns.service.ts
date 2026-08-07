@@ -85,7 +85,6 @@ const TEXT_COALESCED_EVENT_TYPES = new Set<RunnerEventType>(['assistant.delta', 
 export class TurnsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TurnsService.name);
   private readonly runnerConsumers = new Map<string, Promise<void>>();
-  private readonly reasoningOpenTurns = new Set<string>();
   private readonly pendingCoalescedEvents = new Map<string, PendingCoalescedEvent>();
   private readonly activeCoalescedFlushesByTurn = new Map<string, Set<Promise<void>>>();
   private readonly eventWriteQueues = new Map<string, Promise<void>>();
@@ -509,10 +508,6 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException({ message: 'Turn not found' });
     }
 
-    if (type !== 'reasoning.delta' && type !== 'turn.started') {
-      await this.closeReasoningBlockIfOpen(turnId);
-    }
-
     switch (type) {
       case 'turn.started': {
         const threadId = payload.threadId;
@@ -548,6 +543,9 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
         if (TERMINAL_STATUSES.includes(turn.status)) {
           return;
         }
+        if (payload.isReasoning === true) {
+          return;
+        }
         const text = payload.text;
         if (typeof text !== 'string' || text.length === 0) {
           throw new ConflictException({
@@ -568,17 +566,9 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
         if (delta.length === 0) {
           return;
         }
-        await this.openReasoningBlockIfNeeded(turnId);
         const reasoningPayload = this.normalizePayload({ delta });
-        const assistantPayload = this.normalizePayload({
-          text: delta,
-          isReasoning: true,
-        });
         if (!this.coalesceEvent(turnId, 'reasoning.delta', reasoningPayload)) {
           await this.appendEvent(turnId, 'reasoning.delta', reasoningPayload);
-        }
-        if (!this.coalesceEvent(turnId, 'assistant.delta', assistantPayload)) {
-          await this.appendEvent(turnId, 'assistant.delta', assistantPayload);
         }
         return;
       }
@@ -715,12 +705,8 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
         await this.flushPendingCoalescedEventsForTurn(turnId);
         const assistantContentFromEvents = await this.collectAssistantDeltaContent(turnId);
         const assistantContent =
-          assistantContentFromEvents.full.length > 0
-            ? assistantContentFromEvents.nonReasoning.length > 0
-              ? assistantContentFromEvents.full
-              : `${assistantContentFromEvents.full}${content}`
-            : content;
-        const normalizedAssistantContent = ensureBalancedThinkTags(assistantContent);
+          assistantContentFromEvents.length > 0 ? assistantContentFromEvents : content;
+        const normalizedAssistantContent = stripReasoningBlocks(assistantContent);
 
         await this.prisma.$transaction(async (tx) => {
           const assistantMessage = await tx.message.create({
@@ -767,7 +753,7 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
           return;
         }
         await this.flushPendingCoalescedEventsForTurn(turnId);
-        const assistantContent = ensureBalancedThinkTags(
+        const assistantContent = stripReasoningBlocks(
           resolveAssistantContent(
             await this.collectAssistantDeltaContent(turnId),
             typeof payload.content === 'string' ? payload.content : '',
@@ -1036,25 +1022,7 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
     return JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue;
   }
 
-  private async openReasoningBlockIfNeeded(turnId: string): Promise<void> {
-    if (this.reasoningOpenTurns.has(turnId)) {
-      return;
-    }
-    await this.flushPendingCoalescedEventsForTurn(turnId);
-    this.reasoningOpenTurns.add(turnId);
-    await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: '<think>', isReasoning: true }));
-  }
-
-  private async closeReasoningBlockIfOpen(turnId: string): Promise<void> {
-    if (!this.reasoningOpenTurns.has(turnId)) {
-      return;
-    }
-    await this.flushPendingCoalescedEventsForTurn(turnId);
-    this.reasoningOpenTurns.delete(turnId);
-    await this.appendEvent(turnId, 'assistant.delta', this.normalizePayload({ text: '</think>', isReasoning: true }));
-  }
-
-  private async collectAssistantDeltaContent(turnId: string): Promise<{ full: string; nonReasoning: string }> {
+  private async collectAssistantDeltaContent(turnId: string): Promise<string> {
     const deltaEvents = await this.prisma.event.findMany({
       where: {
         turnId,
@@ -1066,23 +1034,16 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
       },
     });
     if (deltaEvents.length === 0) {
-      return { full: '', nonReasoning: '' };
+      return '';
     }
-    const fullChunks: string[] = [];
-    const nonReasoningChunks: string[] = [];
+    const chunks: string[] = [];
     for (const event of deltaEvents) {
       const { text, isReasoning } = extractAssistantDelta(event.payload);
-      if (text.length > 0) {
-        fullChunks.push(text);
-        if (!isReasoning) {
-          nonReasoningChunks.push(text);
-        }
+      if (text.length > 0 && !isReasoning) {
+        chunks.push(text);
       }
     }
-    return {
-      full: fullChunks.join(''),
-      nonReasoning: nonReasoningChunks.join(''),
-    };
+    return chunks.join('');
   }
 
   private async reconcileInFlightTurnsOnStartup(): Promise<void> {
@@ -1234,7 +1195,7 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
     fallbackAssistantContent = '',
   ): Promise<void> {
     await this.flushPendingCoalescedEventsForTurn(turnId);
-    const assistantContent = ensureBalancedThinkTags(
+    const assistantContent = stripReasoningBlocks(
       resolveAssistantContent(await this.collectAssistantDeltaContent(turnId), fallbackAssistantContent),
     );
     const turn = await this.prisma.turn.findUnique({
@@ -1355,17 +1316,8 @@ function readFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function resolveAssistantContent(
-  eventContent: { full: string; nonReasoning: string },
-  fallbackContent: string,
-): string {
-  if (eventContent.full.length === 0) {
-    return fallbackContent;
-  }
-  if (eventContent.nonReasoning.length > 0 || fallbackContent.length === 0) {
-    return eventContent.full;
-  }
-  return `${eventContent.full}${fallbackContent}`;
+function resolveAssistantContent(eventContent: string, fallbackContent: string): string {
+  return eventContent.length > 0 ? eventContent : fallbackContent;
 }
 
 function formatErrorMessage(error: unknown): string {
@@ -1493,16 +1445,14 @@ function extractAssistantDelta(payload: Prisma.JsonValue): {
   };
 }
 
-function ensureBalancedThinkTags(content: string): string {
-  if (!content.includes('<think>')) {
+function stripReasoningBlocks(content: string): string {
+  if (!/<\/?think>/i.test(content)) {
     return content;
   }
-  const openCount = (content.match(/<think>/gi) ?? []).length;
-  const closeCount = (content.match(/<\/think>/gi) ?? []).length;
-  if (openCount <= closeCount) {
-    return content;
-  }
-  return `${content}${'</think>'.repeat(openCount - closeCount)}`;
+  return content
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<think>[\s\S]*$/gi, '')
+    .replace(/<\/think>/gi, '');
 }
 
 function normalizeJsonRecord(value: Prisma.JsonValue | null): Record<string, unknown> | null {
