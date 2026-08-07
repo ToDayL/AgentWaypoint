@@ -1,6 +1,15 @@
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { SettingsService } from './settings.service.js';
-import { CcSwitchClient, CcSwitchState, parseProviderList } from './cc-switch.client.js';
+import {
+  CcSwitchClient,
+  CcSwitchState,
+  ensureCodexModelCatalogJson,
+  ensureCodexModelCatalogJsonInText,
+  parseProviderList,
+} from './cc-switch.client.js';
 import type { PrismaService } from '../prisma/prisma.service.js';
 import type { RunnerAdapter } from '../runner/runner.types.js';
 
@@ -53,6 +62,41 @@ function createProviderSwitchPrisma(activeTurn: { id: string } | null = null) {
 }
 
 describe('cc-switch integration', () => {
+  it('adds the Codex model catalog reference at the top of a third-party config', () => {
+    const config = '# cc-switch config\nmodel_provider = "custom"\n';
+
+    expect(ensureCodexModelCatalogJsonInText(config)).toBe(
+      'model_catalog_json = "cc-switch-model-catalog.json"\n# cc-switch config\nmodel_provider = "custom"\n',
+    );
+  });
+
+  it('does not duplicate an existing top-level Codex model catalog reference', () => {
+    const config = 'model_catalog_json = "cc-switch-model-catalog.json"\nmodel_provider = "custom"\n';
+
+    expect(ensureCodexModelCatalogJsonInText(config)).toBe(config);
+  });
+
+  it('adds the reference when a same-named key only exists inside a TOML table', () => {
+    const config = '[model_providers.custom]\nmodel_catalog_json = "old.json"\n';
+
+    expect(ensureCodexModelCatalogJsonInText(config)).toBe(
+      'model_catalog_json = "cc-switch-model-catalog.json"\n[model_providers.custom]\nmodel_catalog_json = "old.json"\n',
+    );
+  });
+
+  it('creates a missing Codex config file when the catalog reference is needed', async () => {
+    const testDir = await mkdtemp(path.join(tmpdir(), 'agentwaypoint-cc-switch-'));
+    const configPath = path.join(testDir, 'config.toml');
+    try {
+      await ensureCodexModelCatalogJson(configPath);
+      await expect(readFile(configPath, 'utf8')).resolves.toBe(
+        'model_catalog_json = "cc-switch-model-catalog.json"\n',
+      );
+    } finally {
+      await rm(testDir, { recursive: true, force: true });
+    }
+  });
+
   it('parses provider tables without executing the CLI', () => {
     expect(parseProviderList(providerTable)).toEqual([
       { id: 'codex-official', name: 'OpenAI Official', current: true },
