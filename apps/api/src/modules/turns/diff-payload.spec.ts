@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { summarizeDiffPayload } from './diff-payload';
 
 describe('summarizeDiffPayload', () => {
-  it('keeps metadata and removes cumulative diff text', () => {
+  it('keeps bounded metadata and removes cumulative diff text and file lists', () => {
     expect(
       summarizeDiffPayload({
         diffAvailable: true,
@@ -11,20 +11,19 @@ describe('summarizeDiffPayload', () => {
       }),
     ).toEqual({
       diffAvailable: true,
-      files: ['new.ts'],
       snapshotAvailable: true,
       diffStat: { filesChanged: 1 },
     });
   });
 
-  it('normalizes structured file entries to paths', () => {
+  it('drops structured file entries', () => {
     expect(
       summarizeDiffPayload({
         files: [{ oldPath: 'old.ts', newPath: 'new.ts' }, 'other.ts'],
         unifiedDiff: 'large diff omitted from summary',
       }),
-    ).toMatchObject({
-      files: ['new.ts', 'other.ts'],
+    ).toEqual({
+      diffAvailable: true,
       snapshotAvailable: true,
     });
   });

@@ -50,6 +50,7 @@ import {
   Send,
   Settings,
   SlidersHorizontal,
+  SquareTerminal,
   Trash2,
   UserCog,
   X,
@@ -60,7 +61,12 @@ import { Diff, Hunk, parseDiff } from 'react-diff-view';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
-import { findTargetToolTimelineIndex, resolveToolKey } from './timeline-tool-routing';
+import {
+  findTargetToolTimelineIndex,
+  isCommandToolKind,
+  resolveToolDetailRef,
+  resolveToolKey,
+} from './timeline-tool-routing';
 
 type Project = {
   id: string;
@@ -170,20 +176,40 @@ type TimelineEvent = {
   seqEnd: number;
   createdAt: string;
   details: string[];
-  diffFiles?: string[];
   status?: 'running' | 'completed';
   toolKey?: string;
+  detailRef?: string;
+  toolKind?: string;
+  command?: string;
+  hasOutput?: boolean;
 };
 type TurnEventSnapshot = {
   timelineEvents: TimelineEvent[];
-  latestDiffSummary: string;
   latestPlan: string;
   assistantText: string;
   reasoningText: string;
-  toolOutput: string;
   contextRemainingRatio: number | null;
   latestSeq: number;
   sawNonReasoningAssistantDelta: boolean;
+};
+type TurnDiffDetailResponse = {
+  turnId: string;
+  eventSeq: number;
+  unifiedDiff: string;
+  updatedAt: string;
+};
+type CommandOutputDetailResponse = {
+  turnId: string;
+  detailRef: string;
+  firstEventSeq: number;
+  lastEventSeq: number;
+  title: string;
+  command: string | null;
+  status: string | null;
+  exitCode: number | null;
+  durationMs: number | null;
+  output: string;
+  outputBytes: number;
 };
 type ParsedDiffFile = ReturnType<typeof parseDiff>[number];
 
@@ -650,7 +676,7 @@ const RIGHT_PANE_POP_CHAT_CLEARANCE = 320;
 const FILE_NODE_LONG_PRESS_MS = 500;
 const SESSION_DEBUG_INFO_ENABLED = process.env.NODE_ENV === 'development';
 type LeftSidebarTab = 'explorer' | 'fileBrowser' | 'config';
-type InsightsTab = 'preview' | 'diff' | 'events';
+type InsightsTab = 'preview' | 'diff' | 'events' | 'detail';
 type SidebarMode = 'closed' | 'pop' | 'pin';
 type ActionPanelMode =
   | 'closed'
@@ -774,8 +800,13 @@ export default function HomePage() {
   const [assistantText, setAssistantText] = useState('');
   const [reasoningText, setReasoningText] = useState('');
   const [latestPlan, setLatestPlan] = useState('');
-  const [toolOutput, setToolOutput] = useState('');
   const [latestDiffSummary, setLatestDiffSummary] = useState('');
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState('');
+  const [diffStale, setDiffStale] = useState(false);
+  const [commandDetail, setCommandDetail] = useState<CommandOutputDetailResponse | null>(null);
+  const [commandDetailLoading, setCommandDetailLoading] = useState(false);
+  const [commandDetailError, setCommandDetailError] = useState('');
   const [activeTurnId, setActiveTurnId] = useState('');
   const [resumedTurnHint, setResumedTurnHint] = useState('');
   const [turnStatus, setTurnStatus] = useState('idle');
@@ -826,6 +857,8 @@ export default function HomePage() {
   const pendingTimelineEventsRef = useRef<StreamEnvelope[]>([]);
   const timelineFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const systemTimelineEventCounterRef = useRef(0);
+  const diffRequestIdRef = useRef(0);
+  const commandDetailRequestIdRef = useRef(0);
   const pendingAssistantTextChunksRef = useRef<string[]>([]);
   const assistantTextFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingTurnCreateAbortRef = useRef<AbortController | null>(null);
@@ -1326,7 +1359,12 @@ export default function HomePage() {
   const diffPanelView = useMemo(
     () => (
       <article className="sim-output sim-output-diff">
-        {!renderedDiff ? <pre>No diff updates yet.</pre> : null}
+        {diffLoading ? <pre>Loading latest diff...</pre> : null}
+        {!diffLoading && diffError ? <pre>{diffError}</pre> : null}
+        {!diffLoading && !diffError && diffStale ? (
+          <p className="sim-input-hint">A newer diff is available. Click the Diff tab again to refresh.</p>
+        ) : null}
+        {!diffLoading && !diffError && !renderedDiff ? <pre>No diff updates yet.</pre> : null}
         {renderedDiff ? (
           <div className="diff-list">
             {renderedDiff.files.length === 0 ? (
@@ -1358,8 +1396,47 @@ export default function HomePage() {
         ) : null}
       </article>
     ),
-    [renderedDiff, rawDiffLineCount],
+    [diffError, diffLoading, diffStale, renderedDiff, rawDiffLineCount],
   );
+  const commandDetailPanelView = useMemo(
+    () => (
+      <article className="sim-output command-detail-panel">
+        {commandDetailLoading ? <pre>Loading command output...</pre> : null}
+        {!commandDetailLoading && commandDetailError ? <pre>{commandDetailError}</pre> : null}
+        {!commandDetailLoading && !commandDetailError && !commandDetail ? (
+          <pre>Select the output icon on a command in Timeline.</pre>
+        ) : null}
+        {!commandDetailLoading && !commandDetailError && commandDetail ? (
+          <>
+            <header className="command-detail-head">
+              <strong>{commandDetail.title}</strong>
+              <span>{formatByteCount(commandDetail.outputBytes)}</span>
+            </header>
+            {commandDetail.command ? <pre className="command-detail-command">$ {commandDetail.command}</pre> : null}
+            <div className="command-detail-meta">
+              {commandDetail.status ? <span>Status: {commandDetail.status}</span> : null}
+              {commandDetail.exitCode !== null ? <span>Exit: {commandDetail.exitCode}</span> : null}
+              {commandDetail.durationMs !== null ? <span>Duration: {commandDetail.durationMs} ms</span> : null}
+            </div>
+            <pre className="command-detail-output">{commandDetail.output}</pre>
+          </>
+        ) : null}
+      </article>
+    ),
+    [commandDetail, commandDetailError, commandDetailLoading],
+  );
+
+  useEffect(() => {
+    diffRequestIdRef.current += 1;
+    commandDetailRequestIdRef.current += 1;
+    setLatestDiffSummary('');
+    setDiffLoading(false);
+    setDiffError('');
+    setDiffStale(false);
+    setCommandDetail(null);
+    setCommandDetailLoading(false);
+    setCommandDetailError('');
+  }, [inspectedTurnId]);
 
   useEffect(() => {
     const element = timelineListRef.current;
@@ -2007,7 +2084,6 @@ export default function HomePage() {
       replaceAssistantText('');
       setReasoningText('');
       setLatestPlan('');
-      setToolOutput('');
       setLatestDiffSummary('');
       setActiveTurnId('');
       setResumedTurnHint('');
@@ -2563,7 +2639,6 @@ export default function HomePage() {
           replaceAssistantText('');
           setReasoningText('');
           setLatestPlan('');
-          setToolOutput('');
           setLatestDiffSummary('');
           setActiveTurnId('');
           setResumedTurnHint('');
@@ -2694,7 +2769,6 @@ export default function HomePage() {
         replaceAssistantText('');
         setReasoningText('');
         setLatestPlan('');
-        setToolOutput('');
         setLatestDiffSummary('');
         setActiveTurnId('');
         setResumedTurnHint('');
@@ -3111,7 +3185,6 @@ export default function HomePage() {
       replaceAssistantText('');
       setReasoningText('');
       setLatestPlan('');
-      setToolOutput('');
       setLatestDiffSummary('');
       setResumedTurnHint('');
       setTurnStatus('queued');
@@ -3307,7 +3380,6 @@ export default function HomePage() {
       replaceAssistantText('');
       setReasoningText('');
       setLatestPlan('');
-      setToolOutput('');
       setLatestDiffSummary('');
       setActiveTurnId('');
       setResumedTurnHint('');
@@ -3355,7 +3427,6 @@ export default function HomePage() {
         replaceAssistantText('');
         setReasoningText('');
         setLatestPlan('');
-        setToolOutput('');
         setLatestDiffSummary('');
         const nextInspectedTurnId = history.activeTurnId ?? latestTurn?.id ?? '';
         setInspectedTurnId(nextInspectedTurnId);
@@ -3379,8 +3450,6 @@ export default function HomePage() {
             replaceAssistantText(snapshot.assistantText);
             setReasoningText(snapshot.reasoningText);
             setLatestPlan(snapshot.latestPlan);
-            setToolOutput(snapshot.toolOutput);
-            setLatestDiffSummary(snapshot.latestDiffSummary);
           }
           if (snapshot.contextRemainingRatio !== null) {
             setContextRemainingRatio(snapshot.contextRemainingRatio);
@@ -3424,6 +3493,76 @@ export default function HomePage() {
     setPendingApproval(status.pendingApproval);
     if (status.status === 'failed' && status.failureMessage) {
       setError(status.failureMessage);
+    }
+  }
+
+  async function loadLatestDiff(turnId: string): Promise<void> {
+    const normalizedTurnId = turnId.trim();
+    if (!normalizedTurnId) {
+      setLatestDiffSummary('');
+      setDiffError('No turn selected.');
+      return;
+    }
+    const requestId = diffRequestIdRef.current + 1;
+    diffRequestIdRef.current = requestId;
+    setDiffLoading(true);
+    setDiffError('');
+    try {
+      const detail = await apiRequest<TurnDiffDetailResponse | null>(
+        `/api/channels/plugins/web/app/turns/${normalizedTurnId}/diff`,
+        { method: 'GET' },
+      );
+      if (diffRequestIdRef.current !== requestId || inspectedTurnIdRef.current !== normalizedTurnId) {
+        return;
+      }
+      setLatestDiffSummary(detail?.unifiedDiff ?? '');
+      setDiffStale(false);
+    } catch (requestError) {
+      if (diffRequestIdRef.current !== requestId || inspectedTurnIdRef.current !== normalizedTurnId) {
+        return;
+      }
+      setLatestDiffSummary('');
+      setDiffError(extractMessage(requestError));
+    } finally {
+      if (diffRequestIdRef.current === requestId) {
+        setDiffLoading(false);
+      }
+    }
+  }
+
+  async function openCommandDetail(event: TimelineEvent): Promise<void> {
+    const turnId = inspectedTurnIdRef.current.trim();
+    const detailRef = event.detailRef?.trim() ?? '';
+    if (!turnId || !detailRef || !event.hasOutput || !isCommandToolKind(event.toolKind)) {
+      return;
+    }
+    openInsightsPanel('detail');
+    const requestId = commandDetailRequestIdRef.current + 1;
+    commandDetailRequestIdRef.current = requestId;
+    setCommandDetail(null);
+    setCommandDetailLoading(true);
+    setCommandDetailError('');
+    try {
+      const query = new URLSearchParams({
+        detailRef,
+      });
+      const detail = await apiRequest<CommandOutputDetailResponse>(
+        `/api/channels/plugins/web/app/turns/${turnId}/command-output?${query.toString()}`,
+        { method: 'GET' },
+      );
+      if (commandDetailRequestIdRef.current !== requestId || inspectedTurnIdRef.current !== turnId) {
+        return;
+      }
+      setCommandDetail(detail);
+    } catch (requestError) {
+      if (commandDetailRequestIdRef.current !== requestId || inspectedTurnIdRef.current !== turnId) {
+        return;
+      }
+      setCommandDetailError(extractMessage(requestError));
+    } finally {
+      if (commandDetailRequestIdRef.current === requestId) {
+        setCommandDetailLoading(false);
+      }
     }
   }
 
@@ -3513,18 +3652,8 @@ export default function HomePage() {
           }
         }
 
-        if (envelope.type === 'tool.output' && shouldUpdateInspectPanel) {
-          const delta = envelope.payload.text;
-          if (typeof delta === 'string') {
-            setToolOutput((current) => current + delta);
-          }
-        }
-
         if (envelope.type === 'diff.updated' && shouldUpdateInspectPanel) {
-          const summary = formatDiffPayload(envelope.payload);
-          if (summary) {
-            setLatestDiffSummary(summary);
-          }
+          setDiffStale(true);
         }
 
         if (envelope.type === 'turn.started') {
@@ -3535,19 +3664,13 @@ export default function HomePage() {
           const requestId = typeof envelope.payload.requestId === 'string' ? envelope.payload.requestId : '';
           const kind = typeof envelope.payload.kind === 'string' ? envelope.payload.kind : '';
           if (requestId && kind) {
-            // A delayed stream batch can contain both requested and
-            // auto-resolved events. Render from the durable request event
-            // instead of asking whether the approval is still pending now.
-            setPendingApproval({
-              id: requestId,
-              kind,
-              status: 'pending',
-              decision: null,
-              createdAt: envelope.createdAt,
-              resolvedAt: null,
-              payload: envelope.payload,
-            });
             setTurnStatus('waiting_approval');
+            // The timeline event is intentionally metadata-only. Fetch the
+            // durable approval record separately so file-change details never
+            // travel inside the timeline stream.
+            void syncTurnState(envelope.turnId).catch((requestError: unknown) => {
+              setError(extractMessage(requestError));
+            });
           }
         }
 
@@ -3931,6 +4054,9 @@ export default function HomePage() {
 
   function openInsightsPanel(tab: InsightsTab): void {
     setInsightsTab(tab);
+    if (tab === 'diff') {
+      void loadLatestDiff(inspectedTurnIdRef.current);
+    }
     if (typeof window !== 'undefined' && window.matchMedia('(max-width: 860px)').matches) {
       setMobileInsightsOpen(true);
       return;
@@ -3956,7 +4082,6 @@ export default function HomePage() {
         return;
       }
       replaceTimelineEvents(snapshot.timelineEvents);
-      setLatestDiffSummary(snapshot.latestDiffSummary);
     } catch (requestError) {
       if (inspectedTurnIdRef.current !== normalizedTurnId) {
         return;
@@ -5818,19 +5943,23 @@ export default function HomePage() {
                   </button>
                 </div>
                 <div className="insights-tabs">
-                  <button type="button" className={insightsTab === 'preview' ? 'tab-active' : ''} onClick={() => setInsightsTab('preview')}>
+                  <button type="button" className={insightsTab === 'preview' ? 'tab-active' : ''} onClick={() => openInsightsPanel('preview')}>
                     Preview
                   </button>
-                  <button type="button" className={insightsTab === 'diff' ? 'tab-active' : ''} onClick={() => setInsightsTab('diff')}>
+                  <button type="button" className={insightsTab === 'diff' ? 'tab-active' : ''} onClick={() => openInsightsPanel('diff')}>
                     Diff
                   </button>
-                  <button type="button" className={insightsTab === 'events' ? 'tab-active' : ''} onClick={() => setInsightsTab('events')}>
+                  <button type="button" className={insightsTab === 'events' ? 'tab-active' : ''} onClick={() => openInsightsPanel('events')}>
                     Timeline
+                  </button>
+                  <button type="button" className={insightsTab === 'detail' ? 'tab-active' : ''} onClick={() => openInsightsPanel('detail')}>
+                    Detail
                   </button>
                 </div>
                 <div className="insights-content">
                   {insightsTab === 'preview' ? previewPanelView : null}
                   {insightsTab === 'diff' ? diffPanelView : null}
+                  {insightsTab === 'detail' ? commandDetailPanelView : null}
                   {insightsTab === 'events' ? (
                     <div className="timeline-list" ref={timelineListRef} onScroll={handleTimelineScroll}>
                       {SESSION_DEBUG_INFO_ENABLED && inspectedTurnId ? (
@@ -5856,9 +5985,25 @@ export default function HomePage() {
                                     <button
                                       type="button"
                                       className="timeline-inline-button"
-                                      onClick={() => setInsightsTab('diff')}
+                                      onClick={() => openInsightsPanel('diff')}
                                     >
                                       View Diff
+                                    </button>
+                                  ) : null}
+                                  {event.kind === 'tool' &&
+                                  event.detailRef &&
+                                  event.hasOutput &&
+                                  isCommandToolKind(event.toolKind) ? (
+                                    <button
+                                      type="button"
+                                      className="icon-button timeline-command-detail-button"
+                                      onClick={() => {
+                                        void openCommandDetail(event);
+                                      }}
+                                      title="View command output"
+                                      aria-label="View command output"
+                                    >
+                                      <SquareTerminal />
                                     </button>
                                   ) : null}
                                   <span className="timeline-event-seq">
@@ -5869,43 +6014,37 @@ export default function HomePage() {
                                       : 'system'}
                                   </span>
                                 </header>
-                                {event.details.length > 0 || (event.kind === 'diff' && Array.isArray(event.diffFiles) && event.diffFiles.length > 0) ? (
+                                {event.details.length > 0 ? (
                                   <div className="timeline-event-details">
-                                    {event.kind === 'diff' && Array.isArray(event.diffFiles) && event.diffFiles.length > 0
-                                      ? (
-                                          <article className="timeline-diff-file">
-                                            <header className="timeline-diff-file-title">{event.diffFiles.join('\n')}</header>
-                                          </article>
-                                        )
-                                      : event.details.map((detail, index) => {
-                                          const detailKey = `${event.id}-${index}`;
-                                          const normalizedDetail = typeof detail === 'string' ? detail : String(detail ?? '');
-                                          const isToolDetail = event.kind === 'tool';
-                                          const lineCount = normalizedDetail.length === 0 ? 0 : normalizedDetail.split('\n').length;
-                                          const canToggle = isToolDetail && lineCount > 5;
-                                          const expanded = expandedToolDetailKeys[detailKey] === true;
-                                          return (
-                                            <div key={detailKey} className="timeline-detail-box">
-                                              {canToggle ? (
-                                                <button
-                                                  type="button"
-                                                  className="icon-button timeline-detail-toggle"
-                                                  onClick={() =>
-                                                    setExpandedToolDetailKeys((current) => ({
-                                                      ...current,
-                                                      [detailKey]: current[detailKey] !== true,
-                                                    }))
-                                                  }
-                                                  title={expanded ? 'Collapse details' : 'Expand details'}
-                                                  aria-label={expanded ? 'Collapse details' : 'Expand details'}
-                                                >
-                                                  <ChevronDown className={expanded ? 'timeline-toggle-icon is-open' : 'timeline-toggle-icon'} />
-                                                </button>
-                                              ) : null}
-                                              <pre>{canToggle && !expanded ? tailLines(normalizedDetail, 5) : normalizedDetail}</pre>
-                                            </div>
-                                          );
-                                        })}
+                                    {event.details.map((detail, index) => {
+                                      const detailKey = `${event.id}-${index}`;
+                                      const normalizedDetail = typeof detail === 'string' ? detail : String(detail ?? '');
+                                      const isToolDetail = event.kind === 'tool';
+                                      const lineCount = normalizedDetail.length === 0 ? 0 : normalizedDetail.split('\n').length;
+                                      const canToggle = isToolDetail && lineCount > 5;
+                                      const expanded = expandedToolDetailKeys[detailKey] === true;
+                                      return (
+                                        <div key={detailKey} className="timeline-detail-box">
+                                          {canToggle ? (
+                                            <button
+                                              type="button"
+                                              className="icon-button timeline-detail-toggle"
+                                              onClick={() =>
+                                                setExpandedToolDetailKeys((current) => ({
+                                                  ...current,
+                                                  [detailKey]: current[detailKey] !== true,
+                                                }))
+                                              }
+                                              title={expanded ? 'Collapse details' : 'Expand details'}
+                                              aria-label={expanded ? 'Collapse details' : 'Expand details'}
+                                            >
+                                              <ChevronDown className={expanded ? 'timeline-toggle-icon is-open' : 'timeline-toggle-icon'} />
+                                            </button>
+                                          ) : null}
+                                          <pre>{canToggle && !expanded ? tailLines(normalizedDetail, 5) : normalizedDetail}</pre>
+                                        </div>
+                                      );
+                                    })}
                                   </div>
                                 ) : null}
                               </article>
@@ -6772,11 +6911,9 @@ function normalizeHistoryEventItem(item: TurnEventHistoryItem, fallbackTurnId: s
 
 function buildTurnEventSnapshot(events: StreamEnvelope[]): TurnEventSnapshot {
   let timelineEvents: TimelineEvent[] = [];
-  let latestDiffSummary = '';
   let latestPlan = '';
   let assistantText = '';
   let reasoningText = '';
-  let toolOutput = '';
   let contextRemainingRatio: number | null = null;
   let latestSeq = 0;
   let sawNonReasoningAssistantDelta = false;
@@ -6809,18 +6946,6 @@ function buildTurnEventSnapshot(events: StreamEnvelope[]): TurnEventSnapshot {
         contextRemainingRatio = ratio;
       }
     }
-    if (event.type === 'tool.output') {
-      const delta = event.payload.text;
-      if (typeof delta === 'string') {
-        toolOutput += delta;
-      }
-    }
-    if (event.type === 'diff.updated') {
-      const formatted = formatDiffPayload(event.payload);
-      if (formatted) {
-        latestDiffSummary = formatted;
-      }
-    }
     if (event.type === 'turn.completed' && !sawNonReasoningAssistantDelta) {
       const completedContent = typeof event.payload.content === 'string' ? event.payload.content : '';
       if (completedContent.length > 0) {
@@ -6830,11 +6955,9 @@ function buildTurnEventSnapshot(events: StreamEnvelope[]): TurnEventSnapshot {
   });
   return {
     timelineEvents,
-    latestDiffSummary,
     latestPlan,
     assistantText,
     reasoningText,
-    toolOutput,
     contextRemainingRatio,
     latestSeq,
     sawNonReasoningAssistantDelta,
@@ -6867,7 +6990,9 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
 
   if (envelope.type === 'tool.started') {
     const toolKey = resolveToolKey(envelope);
+    const detailRef = resolveToolDetailRef(envelope);
     const title = resolveToolTitle(envelope.payload);
+    const toolKind = resolveToolKind(envelope.payload);
     return [
       ...current,
       {
@@ -6880,17 +7005,25 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
         details: [],
         status: 'running',
         toolKey,
+        detailRef,
+        toolKind,
+        command: resolveToolCommand(envelope.payload),
+        hasOutput: envelope.payload.outputAvailable === true,
       },
     ];
   }
 
   if (envelope.type === 'tool.output') {
     const toolKey = resolveToolKey(envelope);
+    const detailRef = resolveToolDetailRef(envelope);
     const output = resolveToolOutputText(envelope.payload);
-    if (!output) {
+    const toolKind = resolveToolKind(envelope.payload);
+    const commandOutput = isCommandToolKind(toolKind);
+    const hasOutput = envelope.payload.outputAvailable === true || output.length > 0;
+    if (!hasOutput) {
       return current;
     }
-    const toolIndex = findTargetToolTimelineIndex(current, toolKey);
+    const toolIndex = findTargetToolTimelineIndex(current, toolKey, detailRef);
     if (toolIndex >= 0) {
       return current.map((item, index) => {
         if (index !== toolIndex) {
@@ -6899,7 +7032,10 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
         return {
           ...item,
           seqEnd: Math.max(item.seqEnd, envelope.seq),
-          details: appendOrMergeDetail(item.details, output),
+          toolKind: item.toolKind ?? toolKind,
+          detailRef: item.detailRef ?? detailRef,
+          hasOutput: item.hasOutput === true || hasOutput,
+          details: commandOutput || !output ? item.details : appendOrMergeDetail(item.details, output),
         };
       });
     }
@@ -6912,16 +7048,22 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
         seqStart: envelope.seq,
         seqEnd: envelope.seq,
         createdAt: envelope.createdAt,
-        details: [output],
+        details: commandOutput || !output ? [] : [output],
         status: 'running',
         toolKey,
+        detailRef,
+        toolKind,
+        hasOutput,
       },
     ];
   }
 
   if (envelope.type === 'tool.completed') {
     const toolKey = resolveToolKey(envelope);
-    const toolIndex = findTargetToolTimelineIndex(current, toolKey);
+    const detailRef = resolveToolDetailRef(envelope);
+    const toolKind = resolveToolKind(envelope.payload);
+    const hasOutput = envelope.payload.outputAvailable === true;
+    const toolIndex = findTargetToolTimelineIndex(current, toolKey, detailRef);
     if (toolIndex >= 0) {
       return current.map((item, index) => {
         if (index !== toolIndex) {
@@ -6932,6 +7074,10 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
           ...item,
           seqEnd: Math.max(item.seqEnd, envelope.seq),
           status: 'completed',
+          toolKind: item.toolKind ?? toolKind,
+          detailRef: item.detailRef ?? detailRef,
+          command: item.command ?? resolveToolCommand(envelope.payload),
+          hasOutput: item.hasOutput === true || hasOutput,
           details: completedNote ? appendOrMergeDetail(item.details, completedNote) : item.details,
         };
       });
@@ -6948,6 +7094,10 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
         details: resolveToolCompletedNote(envelope.payload) ? [resolveToolCompletedNote(envelope.payload) as string] : [],
         status: 'completed',
         toolKey,
+        detailRef,
+        toolKind,
+        command: resolveToolCommand(envelope.payload),
+        hasOutput,
       },
     ];
   }
@@ -7006,8 +7156,6 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
   }
 
   if (envelope.type === 'diff.updated') {
-    const files = extractDiffFilesFromPayload(envelope.payload);
-    const details = files.length > 0 ? [files.join('\n')] : ['Diff updated'];
     return [
       ...current,
       {
@@ -7017,8 +7165,7 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
         seqStart: envelope.seq,
         seqEnd: envelope.seq,
         createdAt: envelope.createdAt,
-        details,
-        diffFiles: files,
+        details: [],
       },
     ];
   }
@@ -7221,6 +7368,16 @@ function resolveToolTitle(payload: Record<string, unknown>): string {
   );
 }
 
+function resolveToolKind(payload: Record<string, unknown>): string {
+  return typeof payload.kind === 'string' ? payload.kind.trim() : '';
+}
+
+function resolveToolCommand(payload: Record<string, unknown>): string | undefined {
+  return typeof payload.command === 'string' && payload.command.trim().length > 0
+    ? payload.command.trim()
+    : undefined;
+}
+
 function resolveToolOutputText(payload: Record<string, unknown>): string {
   if (typeof payload.text === 'string' && payload.text.length > 0) {
     return payload.text;
@@ -7239,48 +7396,6 @@ function resolveToolCompletedNote(payload: Record<string, unknown>): string {
     return payload.result.trim();
   }
   return '';
-}
-
-function extractDiffFilesFromPayload(payload: Record<string, unknown>): string[] {
-  const fromFiles = payload.files;
-  if (Array.isArray(fromFiles)) {
-    const resolved = fromFiles
-      .map((entry) => {
-        if (typeof entry === 'string' && entry.trim().length > 0) {
-          return entry.trim();
-        }
-        if (!entry || typeof entry !== 'object') {
-          return '';
-        }
-        const record = entry as Record<string, unknown>;
-        const pathCandidate =
-          (typeof record.path === 'string' && record.path.trim()) ||
-          (typeof record.newPath === 'string' && record.newPath.trim()) ||
-          (typeof record.oldPath === 'string' && record.oldPath.trim()) ||
-          '';
-        return pathCandidate;
-      })
-      .filter((item) => item.length > 0);
-    if (resolved.length > 0) {
-      return Array.from(new Set(resolved));
-    }
-  }
-
-  const diffText =
-    (typeof payload.unifiedDiff === 'string' && payload.unifiedDiff) ||
-    (typeof payload.diff === 'string' && payload.diff) ||
-    '';
-  if (!diffText) {
-    return [];
-  }
-  const files: string[] = [];
-  diffText.split('\n').forEach((line) => {
-    const match = line.match(/^\+\+\+\s+b\/(.+)$/);
-    if (match?.[1]) {
-      files.push(match[1].trim());
-    }
-  });
-  return Array.from(new Set(files));
 }
 
 function resolveRemainingContextRatio(payload: Record<string, unknown>): number | null {
@@ -7665,27 +7780,24 @@ function formatPlanPayload(payload: Record<string, unknown>): string {
   return lines.join('\n');
 }
 
-function formatDiffPayload(payload: Record<string, unknown>): string {
-  if (typeof payload.unifiedDiff === 'string' && payload.unifiedDiff.length > 0) {
-    return payload.unifiedDiff;
-  }
-  if (typeof payload.diff === 'string' && payload.diff.length > 0) {
-    return payload.diff;
-  }
-  if (payload.diffStat && typeof payload.diffStat === 'object') {
-    return JSON.stringify(payload.diffStat, null, 2);
-  }
-  if (payload.diffAvailable === true) {
-    return 'Diff update available.';
-  }
-  return '';
-}
-
 function countDiffTextLines(diffText: string): number {
   if (diffText.length === 0) {
     return 0;
   }
   return diffText.split(/\r?\n/).length;
+}
+
+function formatByteCount(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return '0 B';
+  }
+  if (bytes < 1024) {
+    return `${Math.round(bytes)} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KiB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function countDiffFileLines(file: ParsedDiffFile): number {

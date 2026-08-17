@@ -9,7 +9,8 @@ import {
   WorkspaceUploadResult,
 } from '../../../runner/runner.types';
 import { CreateSessionBody, ForkSessionBody, UpdateSessionBody } from '../../../sessions/sessions.schemas';
-import { CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from '../../../turns/turns.schemas';
+import { CommandOutputQuery, CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from '../../../turns/turns.schemas';
+import { summarizeTimelineEventPayload } from '../../../turns/timeline-event-payload';
 import { GatewayApprovalBody, GatewayInboundBody } from '../../gateway.schemas';
 import { ChannelPlugin, ChannelPluginContext, PluginBindingPolicy, PluginDispatchContext } from '../plugin.types';
 
@@ -210,6 +211,14 @@ export class WebPlugin implements ChannelPlugin {
     return this.requireContext().getEventsForTurn(userId, turnId, sinceSeq, limit);
   }
 
+  async getLatestDiffForTurn(userId: string, turnId: string): Promise<unknown> {
+    return this.requireContext().getLatestDiffForTurn(userId, turnId);
+  }
+
+  async getCommandOutputForTurn(userId: string, turnId: string, input: CommandOutputQuery): Promise<unknown> {
+    return this.requireContext().getCommandOutputForTurn(userId, turnId, input);
+  }
+
   getDispatchedEventsForSessionTurn(
     sessionId: string,
     turnId: string,
@@ -239,7 +248,7 @@ export class WebPlugin implements ChannelPlugin {
         return;
       }
       const seq = readNumber(raw.seq) ?? this.nextFallbackSeq();
-      const payload = raw.payload ?? {};
+      const payload = summarizeTimelineEventPayload(type, raw.payload ?? {});
       const createdAt = readDate(raw.createdAt) ?? new Date();
       this.pushDispatchedEvent(turnId, {
         seq,

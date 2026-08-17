@@ -1,6 +1,7 @@
 type ToolTimelineEvent = {
   kind: string;
   toolKey?: string;
+  detailRef?: string;
 };
 
 type ToolEnvelope = {
@@ -26,12 +27,34 @@ export function resolveToolKey(envelope: ToolEnvelope): string {
   return `seq-${envelope.seq}`;
 }
 
-export function findTargetToolTimelineIndex(events: ToolTimelineEvent[], toolKey: string): number {
+export function findTargetToolTimelineIndex(
+  events: ToolTimelineEvent[],
+  toolKey: string,
+  detailRef?: string,
+): number {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
-    if (event?.kind === 'tool' && event.toolKey === toolKey) {
+    if (
+      event?.kind === 'tool' &&
+      (detailRef ? event.detailRef === detailRef : event.toolKey === toolKey)
+    ) {
       return index;
     }
   }
   return -1;
+}
+
+export function resolveToolDetailRef(envelope: ToolEnvelope): string | undefined {
+  const detailRef = envelope.payload.detailRef;
+  return typeof detailRef === 'string' && detailRef.trim().length > 0
+    ? detailRef.trim()
+    : undefined;
+}
+
+export function isCommandToolKind(kind: string | undefined): boolean {
+  if (!kind) {
+    return false;
+  }
+  const normalized = kind.replace(/[^a-z0-9]+/gi, '').toLowerCase();
+  return ['bash', 'command', 'commandexecution', 'localcommand', 'shell'].includes(normalized);
 }

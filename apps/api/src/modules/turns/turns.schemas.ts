@@ -52,6 +52,15 @@ export const StreamTurnQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(1000).optional(),
 });
 
+export const CommandOutputQuerySchema = z.object({
+  detailRef: z
+    .string()
+    .trim()
+    .min(1)
+    .max(512)
+    .regex(/^(call|item|tool|event):.+$/, 'Invalid command detail reference'),
+});
+
 export type SessionIdParams = z.infer<typeof SessionIdParamsSchema>;
 export type TurnIdParams = z.infer<typeof TurnIdParamsSchema>;
 export type CreateTurnBody = z.infer<typeof CreateTurnBodySchema>;
@@ -59,3 +68,4 @@ export type SteerTurnBody = z.infer<typeof SteerTurnBodySchema>;
 export type ResolveTurnApprovalBody = z.infer<typeof ResolveTurnApprovalBodySchema>;
 export type ApprovalTimerAction = z.infer<typeof ApprovalTimerActionSchema>;
 export type StreamTurnQuery = z.infer<typeof StreamTurnQuerySchema>;
+export type CommandOutputQuery = z.infer<typeof CommandOutputQuerySchema>;

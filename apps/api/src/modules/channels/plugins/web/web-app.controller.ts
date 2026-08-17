@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Headers,
   Inject,
   Logger,
@@ -27,6 +28,7 @@ import {
   ProjectIdOnlyParamsSchema,
   ProjectIdParamsSchema,
   ApprovalTimerActionSchema,
+  CommandOutputQuerySchema,
   ResolveTurnApprovalBodySchema,
   SessionIdParamsSchema,
   SkillsQuerySchema,
@@ -308,6 +310,25 @@ export class WebPluginAppController {
     const persistedEvents = await this.webPlugin.getEventsForTurn(user.id, id, cursor, limit);
     const dispatchedEvents = this.webPlugin.getDispatchedEventsForSessionTurn(turn.sessionId, id, cursor);
     return mergeBySeq(persistedEvents, dispatchedEvents).slice(0, limit);
+  }
+
+  @Get('turns/:id/diff')
+  @Header('Cache-Control', 'private, no-store')
+  async getLatestTurnDiff(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown) {
+    const { id } = parseWithZod(TurnIdParamsSchema, params);
+    return this.webPlugin.getLatestDiffForTurn(user.id, id);
+  }
+
+  @Get('turns/:id/command-output')
+  @Header('Cache-Control', 'private, no-store')
+  async getTurnCommandOutput(
+    @CurrentUserDecorator() user: CurrentUser,
+    @Param() params: unknown,
+    @Query() query: unknown,
+  ) {
+    const { id } = parseWithZod(TurnIdParamsSchema, params);
+    const input = parseWithZod(CommandOutputQuerySchema, query);
+    return this.webPlugin.getCommandOutputForTurn(user.id, id, input);
   }
 
   @Get('turns/:id/stream')

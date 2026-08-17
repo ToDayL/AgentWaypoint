@@ -157,6 +157,9 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
     getTurnForUser: async (userId, turnId) => this.turnsService.getTurnForUser(userId, turnId),
     getEventsForTurn: async (userId, turnId, sinceSeq, limit) =>
       this.turnsService.getEventsForTurn(userId, turnId, sinceSeq, limit),
+    getLatestDiffForTurn: async (userId, turnId) => this.turnsService.getLatestDiffForTurn(userId, turnId),
+    getCommandOutputForTurn: async (userId, turnId, input) =>
+      this.turnsService.getCommandOutputForTurn(userId, turnId, input),
   };
 
   constructor(
