@@ -198,7 +198,15 @@ export class WebPlugin implements ChannelPlugin {
     return this.requireContext().uploadWorkspaceFile(input);
   }
 
-  async getTurnForUser(userId: string, turnId: string): Promise<{ status: string; sessionId: string }> {
+  async getTurnForUser(
+    userId: string,
+    turnId: string,
+  ): Promise<{
+    status: string;
+    sessionId: string;
+    contextRemainingRatio: number | null;
+    contextUpdatedAt: Date | null;
+  }> {
     return this.requireContext().getTurnForUser(userId, turnId);
   }
 
@@ -245,6 +253,9 @@ export class WebPlugin implements ChannelPlugin {
       const turnId = readString(raw.turnId);
       const type = readString(raw.type);
       if (!turnId || !type) {
+        return;
+      }
+      if (type === 'thread.token_usage.updated') {
         return;
       }
       const seq = readNumber(raw.seq) ?? this.nextFallbackSeq();

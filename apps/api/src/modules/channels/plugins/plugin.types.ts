@@ -109,7 +109,15 @@ export interface ChannelPluginContext {
     contentType: string;
     contentLength?: string | null;
   }): Promise<WorkspaceUploadResult>;
-  getTurnForUser(userId: string, turnId: string): Promise<{ status: string; sessionId: string }>;
+  getTurnForUser(
+    userId: string,
+    turnId: string,
+  ): Promise<{
+    status: string;
+    sessionId: string;
+    contextRemainingRatio: number | null;
+    contextUpdatedAt: Date | null;
+  }>;
   getEventsForTurn(
     userId: string,
     turnId: string,

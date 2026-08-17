@@ -21,6 +21,7 @@ import { AuthGuard } from '../../../auth/auth.guard';
 import { CurrentUserDecorator } from '../../../auth/current-user.decorator';
 import { CurrentUser } from '../../../auth/auth.types';
 import { WebPlugin } from './web.plugin';
+import { ContextUpdatePayload, ContextUpdateStreamTracker } from '../../../turns/context-update-stream';
 import {
   CreateSessionBodySchema,
   CreateTurnBodySchema,
@@ -359,6 +360,7 @@ export class WebPluginAppController {
     let closed = false;
     let inFlight = false;
     let terminalIdlePolls = 0;
+    const contextUpdateTracker = new ContextUpdateStreamTracker();
 
     const writeEvent = (event: {
       seq: number;
@@ -378,6 +380,16 @@ export class WebPluginAppController {
       reply.raw.write(`event: ${event.type}\n`);
       reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
+
+    const writeContextUpdate = (payload: ContextUpdatePayload): void => {
+      reply.raw.write('event: context.updated\n');
+      reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    const initialContextUpdate = contextUpdateTracker.next(id, turn);
+    if (initialContextUpdate) {
+      writeContextUpdate(initialContextUpdate);
+    }
 
     const writeStreamError = (error: unknown): void => {
       if (closed) {
@@ -432,12 +444,17 @@ export class WebPluginAppController {
         const persistedEvents = await this.webPlugin.getEventsForTurn(user.id, id, cursor, queryInput.limit);
         const dispatchedEvents = this.webPlugin.getDispatchedEventsForSessionTurn(turn.sessionId, id, cursor);
         const events = mergeBySeq(persistedEvents, dispatchedEvents);
+        const latestTurn = await this.webPlugin.getTurnForUser(user.id, id);
+        const contextUpdate = contextUpdateTracker.next(id, latestTurn, {
+          force: TERMINAL_STATUSES.has(latestTurn.status),
+        });
+        if (contextUpdate) {
+          writeContextUpdate(contextUpdate);
+        }
         for (const event of events) {
           cursor = event.seq;
           writeEvent(event);
         }
-
-        const latestTurn = await this.webPlugin.getTurnForUser(user.id, id);
         if (events.length === 0 && TERMINAL_STATUSES.has(latestTurn.status)) {
           terminalIdlePolls += 1;
         } else {

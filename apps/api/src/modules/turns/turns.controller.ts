@@ -25,6 +25,7 @@ import {
   StreamTurnQuerySchema,
   TurnIdParamsSchema,
 } from './turns.schemas';
+import { ContextUpdatePayload, ContextUpdateStreamTracker } from './context-update-stream';
 import { TurnsService } from './turns.service';
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
@@ -121,7 +122,7 @@ export class TurnsController {
   ): Promise<void> {
     const { id } = parseWithZod(TurnIdParamsSchema, params);
     const queryInput = parseWithZod(StreamTurnQuerySchema, query);
-    await this.turnsService.getTurnForUser(user.id, id);
+    const initialTurn = await this.turnsService.getTurnForUser(user.id, id);
 
     const headerSeq = Number.parseInt(lastEventIdHeader ?? '', 10);
     let cursor = Math.max(queryInput.since ?? 0, Number.isFinite(headerSeq) ? headerSeq : 0);
@@ -136,6 +137,7 @@ export class TurnsController {
     let closed = false;
     let inFlight = false;
     let terminalIdlePolls = 0;
+    const contextUpdateTracker = new ContextUpdateStreamTracker();
 
     const writeEvent = (event: {
       seq: number;
@@ -155,6 +157,16 @@ export class TurnsController {
       reply.raw.write(`event: ${event.type}\n`);
       reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
+
+    const writeContextUpdate = (payload: ContextUpdatePayload): void => {
+      reply.raw.write('event: context.updated\n');
+      reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    const initialContextUpdate = contextUpdateTracker.next(id, initialTurn);
+    if (initialContextUpdate) {
+      writeContextUpdate(initialContextUpdate);
+    }
 
     const writeStreamError = (error: unknown): void => {
       if (closed) {
@@ -207,12 +219,17 @@ export class TurnsController {
       inFlight = true;
       try {
         const events = await this.turnsService.getEventsForTurn(user.id, id, cursor, queryInput.limit);
+        const turn = await this.turnsService.getTurnForUser(user.id, id);
+        const contextUpdate = contextUpdateTracker.next(id, turn, {
+          force: TERMINAL_STATUSES.has(turn.status),
+        });
+        if (contextUpdate) {
+          writeContextUpdate(contextUpdate);
+        }
         for (const event of events) {
           cursor = event.seq;
           writeEvent(event);
         }
-
-        const turn = await this.turnsService.getTurnForUser(user.id, id);
         if (events.length === 0 && TERMINAL_STATUSES.has(turn.status)) {
           terminalIdlePolls += 1;
         } else {

@@ -170,7 +170,7 @@ type PanelLayoutPersistence = {
 };
 type TimelineEvent = {
   id: string;
-  kind: 'tool' | 'reasoning' | 'plan' | 'diff' | 'approval' | 'token' | 'assistant' | 'event' | 'system';
+  kind: 'tool' | 'reasoning' | 'plan' | 'diff' | 'approval' | 'assistant' | 'event' | 'system';
   title: string;
   seqStart: number;
   seqEnd: number;
@@ -188,7 +188,6 @@ type TurnEventSnapshot = {
   latestPlan: string;
   assistantText: string;
   reasoningText: string;
-  contextRemainingRatio: number | null;
   latestSeq: number;
   sawNonReasoningAssistantDelta: boolean;
 };
@@ -210,6 +209,11 @@ type CommandOutputDetailResponse = {
   durationMs: number | null;
   output: string;
   outputBytes: number;
+};
+type ContextUpdatePayload = {
+  turnId: string;
+  remainingRatio: number;
+  updatedAt: string | null;
 };
 type ParsedDiffFile = ReturnType<typeof parseDiff>[number];
 
@@ -636,7 +640,6 @@ const STREAM_EVENTS = [
   'turn.approval.auto_review',
   'turn.approval.timer_paused',
   'turn.approval.timer_resumed',
-  'thread.token_usage.updated',
   'plan.updated',
   'reasoning.delta',
   'diff.updated',
@@ -3451,9 +3454,6 @@ export default function HomePage() {
             setReasoningText(snapshot.reasoningText);
             setLatestPlan(snapshot.latestPlan);
           }
-          if (snapshot.contextRemainingRatio !== null) {
-            setContextRemainingRatio(snapshot.contextRemainingRatio);
-          }
         }
         const currentTurnState = await fetchTurnState(history.activeTurnId);
         if (!isCurrentRequest()) {
@@ -3645,13 +3645,6 @@ export default function HomePage() {
           setLatestPlan(formatPlanPayload(envelope.payload));
         }
 
-        if (envelope.type === 'thread.token_usage.updated') {
-          const ratio = resolveRemainingContextRatio(envelope.payload);
-          if (ratio !== null) {
-            setContextRemainingRatio(ratio);
-          }
-        }
-
         if (envelope.type === 'diff.updated' && shouldUpdateInspectPanel) {
           setDiffStale(true);
         }
@@ -3715,6 +3708,21 @@ export default function HomePage() {
           finishStream(envelope.type.replace('turn.', ''));
         }
       });
+    });
+
+    source.addEventListener('context.updated', (evt) => {
+      if (eventSourceRef.current !== source) {
+        return;
+      }
+      try {
+        const payload = JSON.parse((evt as MessageEvent<string>).data) as ContextUpdatePayload;
+        const ratio = readFiniteNumber(payload.remainingRatio);
+        if (payload.turnId === turnId && ratio !== null) {
+          setContextRemainingRatio(clamp01(ratio));
+        }
+      } catch {
+        // The durable Turn snapshot remains authoritative after reconnect.
+      }
     });
 
     source.addEventListener('stream.end', (evt) => {
@@ -6914,7 +6922,6 @@ function buildTurnEventSnapshot(events: StreamEnvelope[]): TurnEventSnapshot {
   let latestPlan = '';
   let assistantText = '';
   let reasoningText = '';
-  let contextRemainingRatio: number | null = null;
   let latestSeq = 0;
   let sawNonReasoningAssistantDelta = false;
   const sortedEvents = [...events].sort((a, b) => a.seq - b.seq);
@@ -6940,12 +6947,6 @@ function buildTurnEventSnapshot(events: StreamEnvelope[]): TurnEventSnapshot {
     if (event.type === 'plan.updated') {
       latestPlan = formatPlanPayload(event.payload);
     }
-    if (event.type === 'thread.token_usage.updated') {
-      const ratio = resolveRemainingContextRatio(event.payload);
-      if (ratio !== null) {
-        contextRemainingRatio = ratio;
-      }
-    }
     if (event.type === 'turn.completed' && !sawNonReasoningAssistantDelta) {
       const completedContent = typeof event.payload.content === 'string' ? event.payload.content : '';
       if (completedContent.length > 0) {
@@ -6958,7 +6959,6 @@ function buildTurnEventSnapshot(events: StreamEnvelope[]): TurnEventSnapshot {
     latestPlan,
     assistantText,
     reasoningText,
-    contextRemainingRatio,
     latestSeq,
     sawNonReasoningAssistantDelta,
   };
@@ -7166,23 +7166,6 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
         seqEnd: envelope.seq,
         createdAt: envelope.createdAt,
         details: [],
-      },
-    ];
-  }
-
-  if (envelope.type === 'thread.token_usage.updated') {
-    const ratio = resolveRemainingContextRatio(envelope.payload);
-    const detail = ratio === null ? '' : `${formatPercent(ratio)} left`;
-    return [
-      ...current,
-      {
-        id: `token-${envelope.seq}`,
-        kind: 'token',
-        title: 'Context Usage Updated',
-        seqStart: envelope.seq,
-        seqEnd: envelope.seq,
-        createdAt: envelope.createdAt,
-        details: detail ? [detail] : [],
       },
     ];
   }
@@ -7396,20 +7379,6 @@ function resolveToolCompletedNote(payload: Record<string, unknown>): string {
     return payload.result.trim();
   }
   return '';
-}
-
-function resolveRemainingContextRatio(payload: Record<string, unknown>): number | null {
-  const directRatio = readFiniteNumber(payload.remainingRatio);
-  if (directRatio !== null) {
-    return clamp01(directRatio);
-  }
-
-  const modelContextWindow = readFiniteNumber(payload.modelContextWindow);
-  const totalTokens = readFiniteNumber(payload.totalTokens);
-  if (modelContextWindow === null || totalTokens === null || modelContextWindow <= 0) {
-    return null;
-  }
-  return clamp01((modelContextWindow - totalTokens) / modelContextWindow);
 }
 
 function formatPercent(value: number): string {
