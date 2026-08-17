@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { CodexBackend } from './codex-backend.js';
-import type { ActiveCodexTurn, ActiveTurn, RunnerEventType } from './types.js';
+import type { ActiveCodexTurn, ActiveTurn, CodexWorker, RunnerEventType } from './types.js';
 
 type NotificationHandler = {
   handleCodexNotification(method: string, params: Record<string, unknown>): Promise<void>;
+};
+
+type WorkerMessageHandler = {
+  handleWorkerMessage(worker: CodexWorker, line: string): void;
 };
 
 function createHarness() {
@@ -166,6 +170,39 @@ describe('CodexBackend reasoning effort', () => {
       ]),
     );
     expect(harness.failed).toEqual([]);
+  });
+});
+
+describe('CodexBackend worker message routing', () => {
+  it('resolves request responses without waiting for queued notification persistence', async () => {
+    const harness = createHarness();
+    const blockedNotifications = new Promise<void>(() => undefined);
+    let resolveResponse: ((value: unknown) => void) | undefined;
+    const response = new Promise<unknown>((resolve) => {
+      resolveResponse = resolve;
+    });
+    const timeout = setTimeout(() => undefined, 60_000);
+    const worker = {
+      notificationQueue: blockedNotifications,
+      pendingRequests: new Map([
+        [
+          7,
+          {
+            resolve: (value: unknown) => resolveResponse?.(value),
+            reject: () => undefined,
+            timeout,
+          },
+        ],
+      ]),
+    } as unknown as CodexWorker;
+
+    (harness.backend as unknown as WorkerMessageHandler).handleWorkerMessage(
+      worker,
+      JSON.stringify({ id: 7, result: { ok: true } }),
+    );
+
+    await expect(response).resolves.toEqual({ ok: true });
+    expect(worker.pendingRequests.size).toBe(0);
   });
 });
 

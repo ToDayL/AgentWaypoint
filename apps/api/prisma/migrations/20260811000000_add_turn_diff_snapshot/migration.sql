@@ -1,0 +1,8 @@
+CREATE TABLE "TurnDiffSnapshot" (
+    "turnId" TEXT NOT NULL PRIMARY KEY,
+    "eventSeq" INTEGER NOT NULL,
+    "payload" JSONB NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "TurnDiffSnapshot_turnId_fkey" FOREIGN KEY ("turnId") REFERENCES "Turn" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);

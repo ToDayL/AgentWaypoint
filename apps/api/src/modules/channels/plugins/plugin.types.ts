@@ -114,6 +114,7 @@ export interface ChannelPluginContext {
     userId: string,
     turnId: string,
     sinceSeq: number,
+    limit?: number,
   ): Promise<Array<{ seq: number; type: string; payload: unknown; turnId: string; createdAt: Date }>>;
 }
 

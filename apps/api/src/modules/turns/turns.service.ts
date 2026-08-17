@@ -14,6 +14,7 @@ import { SettingsService } from '../settings/settings.service';
 import { CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from './turns.schemas';
 import { QueueSignalService } from '../queue-signal/queue-signal.service';
 import { ApprovalQueueService } from './approval-queue.service';
+import { summarizeDiffPayload } from './diff-payload';
 
 const ACTIVE_TURN_STATUSES = ['queued', 'running', 'waiting_approval'];
 const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
@@ -72,6 +73,7 @@ type PendingCoalescedEvent = {
 };
 
 const COALESCED_EVENT_FLUSH_MS = 250;
+const DEFAULT_EVENT_PAGE_SIZE = 500;
 const RUNNER_CONSUMER_RETRY_MS = 1_000;
 const RUNNER_RECONCILE_INTERVAL_MS = 15_000;
 const LAST_WRITE_WINS_EVENT_TYPES = new Set<RunnerEventType>([
@@ -425,9 +427,14 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async getEventsForTurn(userId: string, turnId: string, sinceSeq: number) {
+  async getEventsForTurn(
+    userId: string,
+    turnId: string,
+    sinceSeq: number,
+    limit = DEFAULT_EVENT_PAGE_SIZE,
+  ) {
     await this.getTurnForUser(userId, turnId);
-    return this.prisma.event.findMany({
+    const events = await this.prisma.event.findMany({
       where: {
         turnId,
         seq: {
@@ -435,7 +442,34 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
         },
       },
       orderBy: { seq: 'asc' },
+      take: Math.min(Math.max(limit, 1), 1000),
     });
+    if (!events.some((event) => event.type === 'diff.updated')) {
+      return events;
+    }
+
+    let snapshot = await this.prisma.turnDiffSnapshot.findUnique({
+      where: { turnId },
+      select: { eventSeq: true, payload: true },
+    });
+    if (!snapshot) {
+      snapshot = await this.prisma.event.findFirst({
+        where: { turnId, type: 'diff.updated' },
+        orderBy: { seq: 'desc' },
+        select: { seq: true, payload: true },
+      }).then((event) => event ? { eventSeq: event.seq, payload: event.payload } : null);
+    }
+    return events.map((event) =>
+      event.type !== 'diff.updated'
+        ? event
+        : {
+            ...event,
+            payload:
+              snapshot && event.seq === snapshot.eventSeq
+                ? snapshot.payload
+                : summarizeDiffPayload(event.payload as Prisma.InputJsonValue),
+          },
+    );
   }
 
   async getTurnForUser(userId: string, turnId: string) {
@@ -980,14 +1014,30 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
         select: { seq: true },
       });
 
+      const storedPayload = type === 'diff.updated' ? summarizeDiffPayload(payload) : payload;
       const event = await tx.event.create({
         data: {
           turnId,
           seq: (latest?.seq ?? 0) + 1,
           type,
-          payload,
+          payload: storedPayload,
         },
       });
+
+      if (type === 'diff.updated') {
+        await tx.turnDiffSnapshot.upsert({
+          where: { turnId },
+          create: {
+            turnId,
+            eventSeq: event.seq,
+            payload,
+          },
+          update: {
+            eventSeq: event.seq,
+            payload,
+          },
+        });
+      }
 
       const turn = await tx.turn.findUnique({
         where: { id: turnId },

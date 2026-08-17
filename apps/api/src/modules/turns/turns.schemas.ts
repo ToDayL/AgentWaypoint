@@ -49,6 +49,7 @@ export const ApprovalTimerActionSchema = z.object({
 
 export const StreamTurnQuerySchema = z.object({
   since: z.coerce.number().int().min(0).optional(),
+  limit: z.coerce.number().int().min(1).max(1000).optional(),
 });
 
 export type SessionIdParams = z.infer<typeof SessionIdParamsSchema>;

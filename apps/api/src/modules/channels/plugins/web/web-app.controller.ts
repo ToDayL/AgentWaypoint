@@ -304,9 +304,10 @@ export class WebPluginAppController {
     const queryInput = parseWithZod(StreamTurnQuerySchema, query);
     const turn = await this.webPlugin.getTurnForUser(user.id, id);
     const cursor = queryInput.since ?? 0;
-    const persistedEvents = await this.webPlugin.getEventsForTurn(user.id, id, cursor);
+    const limit = queryInput.limit ?? 500;
+    const persistedEvents = await this.webPlugin.getEventsForTurn(user.id, id, cursor, limit);
     const dispatchedEvents = this.webPlugin.getDispatchedEventsForSessionTurn(turn.sessionId, id, cursor);
-    return mergeBySeq(persistedEvents, dispatchedEvents);
+    return mergeBySeq(persistedEvents, dispatchedEvents).slice(0, limit);
   }
 
   @Get('turns/:id/stream')
@@ -407,7 +408,7 @@ export class WebPluginAppController {
       }
       inFlight = true;
       try {
-        const persistedEvents = await this.webPlugin.getEventsForTurn(user.id, id, cursor);
+        const persistedEvents = await this.webPlugin.getEventsForTurn(user.id, id, cursor, queryInput.limit);
         const dispatchedEvents = this.webPlugin.getDispatchedEventsForSessionTurn(turn.sessionId, id, cursor);
         const events = mergeBySeq(persistedEvents, dispatchedEvents);
         for (const event of events) {

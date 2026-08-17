@@ -14,7 +14,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "prisma:push": "prisma db push",
-    "auth:bootstrap-admin": "tsx src/scripts/bootstrap-admin.ts"
+    "auth:bootstrap-admin": "tsx src/scripts/bootstrap-admin.ts",
+    "events:compact-diffs": "tsx src/scripts/compact-diff-events.ts"
   },
   "dependencies": {
     "@agentwaypoint/shared": "workspace:*",

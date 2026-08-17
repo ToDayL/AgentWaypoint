@@ -205,8 +205,9 @@ export class WebPlugin implements ChannelPlugin {
     userId: string,
     turnId: string,
     sinceSeq: number,
+    limit?: number,
   ): Promise<Array<{ seq: number; type: string; payload: unknown; turnId: string; createdAt: Date }>> {
-    return this.requireContext().getEventsForTurn(userId, turnId, sinceSeq);
+    return this.requireContext().getEventsForTurn(userId, turnId, sinceSeq, limit);
   }
 
   getDispatchedEventsForSessionTurn(

@@ -1093,7 +1093,33 @@ describe('API e2e', () => {
     expect(assistantDeltas).toHaveLength(1);
     expect(assistantDeltas[0]?.payload).toMatchObject({ text: 'ABC' });
     expect(diffUpdates).toHaveLength(1);
-    expect(diffUpdates[0]?.payload).toMatchObject({ unifiedDiff: 'diff-v2' });
+    expect(diffUpdates[0]?.payload).toMatchObject({
+      diffAvailable: true,
+      snapshotAvailable: true,
+    });
+    expect(diffUpdates[0]?.payload).not.toHaveProperty('unifiedDiff');
+    const diffSnapshot = await prisma.turnDiffSnapshot.findUnique({ where: { turnId } });
+    expect(diffSnapshot).toMatchObject({
+      eventSeq: diffUpdates[0]?.seq,
+      payload: { unifiedDiff: 'diff-v2' },
+    });
+    const diffSeq = diffUpdates[0]?.seq;
+    if (typeof diffSeq !== 'number') {
+      throw new Error('Expected a persisted diff.updated event');
+    }
+    const pagedEventsResponse = await app.inject({
+      method: 'GET',
+      url: `/api/channels/plugins/web/app/turns/${turnId}/events?since=${diffSeq - 1}&limit=1`,
+      headers: { 'x-user-email': email },
+    });
+    expect(pagedEventsResponse.statusCode).toBe(200);
+    expect(pagedEventsResponse.json()).toEqual([
+      expect.objectContaining({
+        seq: diffSeq,
+        type: 'diff.updated',
+        payload: expect.objectContaining({ unifiedDiff: 'diff-v2' }),
+      }),
+    ]);
     expect(toolOutputs).toHaveLength(1);
     expect(toolOutputs[0]?.payload).toMatchObject({ text: 'out-1out-2' });
     expect(events.map((event) => event.type)).toContain('turn.completed');

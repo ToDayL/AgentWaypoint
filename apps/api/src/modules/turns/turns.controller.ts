@@ -206,7 +206,7 @@ export class TurnsController {
       }
       inFlight = true;
       try {
-        const events = await this.turnsService.getEventsForTurn(user.id, id, cursor);
+        const events = await this.turnsService.getEventsForTurn(user.id, id, cursor, queryInput.limit);
         for (const event of events) {
           cursor = event.seq;
           writeEvent(event);

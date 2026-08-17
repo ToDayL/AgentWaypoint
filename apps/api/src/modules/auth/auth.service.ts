@@ -1,5 +1,5 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-import { ForbiddenException, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import { ForbiddenException, Inject, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { AuthSession, User } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthenticatedRequest, RequestPrincipal } from './auth.types';
@@ -9,9 +9,13 @@ const SCRYPT_N = 16384;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const SCRYPT_KEYLEN = 64;
+const SESSION_LAST_SEEN_UPDATE_INTERVAL_MS = 5 * 60 * 1000;
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+  private readonly sessionLastSeenUpdateAttempts = new Map<string, number>();
+
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
   async getOrCreateUserByEmail(email: string): Promise<User> {
@@ -173,10 +177,7 @@ export class AuthService {
       return null;
     }
 
-    await this.prisma.authSession.update({
-      where: { id: session.id },
-      data: { lastSeenAt: new Date() },
-    });
+    this.touchSessionLastSeen(session);
 
     return {
       type: 'user',
@@ -185,6 +186,31 @@ export class AuthService {
       role: session.user.role === 'admin' ? 'admin' : 'user',
       authMethod: 'session',
     };
+  }
+
+  private touchSessionLastSeen(session: Pick<AuthSession, 'id' | 'lastSeenAt'>): void {
+    const now = Date.now();
+    const lastAttemptAt = this.sessionLastSeenUpdateAttempts.get(session.id) ?? 0;
+    if (
+      now - Math.max(session.lastSeenAt.getTime(), lastAttemptAt) <
+      SESSION_LAST_SEEN_UPDATE_INTERVAL_MS
+    ) {
+      return;
+    }
+
+    // lastSeenAt is activity metadata, not part of the authentication decision.
+    // Coalesce concurrent touches in memory and do not hold up authenticated
+    // requests while SQLite waits for its single writer lock.
+    this.sessionLastSeenUpdateAttempts.set(session.id, now);
+    void this.prisma.authSession
+      .update({
+        where: { id: session.id },
+        data: { lastSeenAt: new Date(now) },
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Failed to update lastSeenAt for auth session ${session.id}: ${message}`);
+      });
   }
 
   private async resolveDevHeaderPrincipal(request: AuthenticatedRequest): Promise<RequestPrincipal | null> {
