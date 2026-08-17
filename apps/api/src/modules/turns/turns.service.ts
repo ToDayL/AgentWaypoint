@@ -82,14 +82,25 @@ type PendingCoalescedEvent = {
   timer: ReturnType<typeof setTimeout>;
 };
 
+type ContextUsageSnapshot = {
+  contextRemainingRatio?: number;
+  contextRemainingTokens?: number;
+  contextWindowTokens?: number;
+};
+
+type PendingContextUsageSnapshot = {
+  snapshot: ContextUsageSnapshot;
+  timer: ReturnType<typeof setTimeout>;
+};
+
 const COALESCED_EVENT_FLUSH_MS = 250;
+const CONTEXT_USAGE_SNAPSHOT_FLUSH_MS = 1_000;
 const DEFAULT_EVENT_PAGE_SIZE = 500;
 const RUNNER_CONSUMER_RETRY_MS = 1_000;
 const RUNNER_RECONCILE_INTERVAL_MS = 15_000;
 const LAST_WRITE_WINS_EVENT_TYPES = new Set<RunnerEventType>([
   'diff.updated',
   'plan.updated',
-  'thread.token_usage.updated',
 ]);
 const TEXT_COALESCED_EVENT_TYPES = new Set<RunnerEventType>(['assistant.delta', 'reasoning.delta', 'tool.output']);
 
@@ -99,6 +110,8 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
   private readonly runnerConsumers = new Map<string, Promise<void>>();
   private readonly pendingCoalescedEvents = new Map<string, PendingCoalescedEvent>();
   private readonly activeCoalescedFlushesByTurn = new Map<string, Set<Promise<void>>>();
+  private readonly pendingContextUsageSnapshots = new Map<string, PendingContextUsageSnapshot>();
+  private readonly activeContextUsageFlushesByTurn = new Map<string, Set<Promise<void>>>();
   private readonly eventWriteQueues = new Map<string, Promise<void>>();
   private readonly runnerEventCursors = new Map<string, number>();
   private readonly runnerConsumerRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -137,6 +150,7 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
       clearTimeout(timer);
     }
     this.runnerConsumerRetryTimers.clear();
+    await this.flushAllContextUsageSnapshots();
     await this.flushAllPendingCoalescedEvents();
     await Promise.allSettled(this.eventWriteQueues.values());
   }
@@ -447,6 +461,7 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
     const events = await this.prisma.event.findMany({
       where: {
         turnId,
+        type: { not: 'thread.token_usage.updated' },
         seq: {
           gt: sinceSeq,
         },
@@ -797,29 +812,12 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
         return;
       }
       case 'thread.token_usage.updated': {
-        const ratio = readFiniteNumber(payload.remainingRatio);
-        const remainingTokens = readFiniteNumber(payload.remainingTokens);
-        const windowTokens = readFiniteNumber(payload.modelContextWindow);
-        const hasAnyUsageSignal = ratio !== null || remainingTokens !== null || windowTokens !== null;
-        if (!hasAnyUsageSignal) {
-          const normalizedPayload = this.normalizePayload(payload);
-          if (!this.coalesceEvent(turnId, type, normalizedPayload)) {
-            await this.appendEvent(turnId, type, normalizedPayload);
-          }
+        if (TERMINAL_STATUSES.includes(turn.status)) {
           return;
         }
-        await this.prisma.turn.update({
-          where: { id: turnId },
-          data: {
-            contextRemainingRatio: ratio === null ? undefined : ratio,
-            contextRemainingTokens: remainingTokens === null ? undefined : Math.max(0, Math.round(remainingTokens)),
-            contextWindowTokens: windowTokens === null ? undefined : Math.max(0, Math.round(windowTokens)),
-            contextUpdatedAt: new Date(),
-          },
-        });
-        const normalizedPayload = this.normalizePayload(payload);
-        if (!this.coalesceEvent(turnId, type, normalizedPayload)) {
-          await this.appendEvent(turnId, type, normalizedPayload);
+        const snapshot = buildContextUsageSnapshot(payload);
+        if (snapshot) {
+          this.queueContextUsageSnapshot(turnId, snapshot);
         }
         return;
       }
@@ -834,6 +832,7 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
           });
         }
 
+        await this.flushContextUsageSnapshotsForTurn(turnId);
         await this.flushPendingCoalescedEventsForTurn(turnId);
         const assistantContentFromEvents = await this.collectAssistantDeltaContent(turnId);
         const assistantContent =
@@ -884,6 +883,7 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
         if (TERMINAL_STATUSES.includes(turn.status)) {
           return;
         }
+        await this.flushContextUsageSnapshotsForTurn(turnId);
         await this.flushPendingCoalescedEventsForTurn(turnId);
         const assistantContent = stripReasoningBlocks(
           resolveAssistantContent(
@@ -985,6 +985,90 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
 
     this.upsertCoalescedEvent(key, turnId, type, payload);
     return true;
+  }
+
+  private queueContextUsageSnapshot(turnId: string, snapshot: ContextUsageSnapshot): void {
+    const existing = this.pendingContextUsageSnapshots.get(turnId);
+    if (existing) {
+      existing.snapshot = { ...existing.snapshot, ...snapshot };
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      const flush = this.flushPendingContextUsageSnapshot(turnId);
+      this.trackContextUsageFlush(turnId, flush);
+      void flush.catch((error: unknown) => {
+        this.logger.error(
+          `Failed to flush context usage snapshot for turn ${turnId}: ${formatErrorMessage(error)}`,
+          error instanceof Error ? error.stack : undefined,
+        );
+      });
+    }, CONTEXT_USAGE_SNAPSHOT_FLUSH_MS);
+    timer.unref?.();
+    this.pendingContextUsageSnapshots.set(turnId, { snapshot, timer });
+  }
+
+  private async flushPendingContextUsageSnapshot(turnId: string): Promise<void> {
+    const pending = this.pendingContextUsageSnapshots.get(turnId);
+    if (!pending) {
+      return;
+    }
+    this.pendingContextUsageSnapshots.delete(turnId);
+    clearTimeout(pending.timer);
+
+    await this.prisma.turn.update({
+      where: { id: turnId },
+      data: {
+        ...pending.snapshot,
+        contextUpdatedAt: new Date(),
+      },
+    });
+  }
+
+  private trackContextUsageFlush(turnId: string, flush: Promise<void>): void {
+    let active = this.activeContextUsageFlushesByTurn.get(turnId);
+    if (!active) {
+      active = new Set();
+      this.activeContextUsageFlushesByTurn.set(turnId, active);
+    }
+    active.add(flush);
+    void flush
+      .finally(() => {
+        const current = this.activeContextUsageFlushesByTurn.get(turnId);
+        current?.delete(flush);
+        if (current?.size === 0) {
+          this.activeContextUsageFlushesByTurn.delete(turnId);
+        }
+      })
+      .catch(() => {
+        // The timer logs the original flush rejection; this only handles the cleanup promise.
+      });
+  }
+
+  private async flushContextUsageSnapshotsForTurn(turnId: string): Promise<void> {
+    while (true) {
+      if (this.pendingContextUsageSnapshots.has(turnId)) {
+        await this.flushPendingContextUsageSnapshot(turnId);
+        continue;
+      }
+      const active = Array.from(this.activeContextUsageFlushesByTurn.get(turnId) ?? []);
+      if (active.length === 0) {
+        return;
+      }
+      await Promise.all(active);
+    }
+  }
+
+  private async flushAllContextUsageSnapshots(): Promise<void> {
+    for (const turnId of Array.from(this.pendingContextUsageSnapshots.keys())) {
+      await this.flushPendingContextUsageSnapshot(turnId);
+    }
+    const active = Array.from(this.activeContextUsageFlushesByTurn.values()).flatMap((flushes) =>
+      Array.from(flushes),
+    );
+    if (active.length > 0) {
+      await Promise.all(active);
+    }
   }
 
   private upsertCoalescedEvent(
@@ -1342,6 +1426,7 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
     eventPayload: Prisma.InputJsonValue,
     fallbackAssistantContent = '',
   ): Promise<void> {
+    await this.flushContextUsageSnapshotsForTurn(turnId);
     await this.flushPendingCoalescedEventsForTurn(turnId);
     const assistantContent = stripReasoningBlocks(
       resolveAssistantContent(await this.collectAssistantDeltaContent(turnId), fallbackAssistantContent),
@@ -1462,6 +1547,32 @@ function normalizeApprovalDecisionInput(decision: ResolveTurnApprovalBody['decis
 
 function readFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function buildContextUsageSnapshot(payload: Record<string, unknown>): ContextUsageSnapshot | null {
+  const windowTokens = readFiniteNumber(payload.modelContextWindow);
+  const totalTokens = readFiniteNumber(payload.totalTokens);
+  let remainingTokens = readFiniteNumber(payload.remainingTokens);
+  if (remainingTokens === null && windowTokens !== null && totalTokens !== null) {
+    remainingTokens = Math.max(windowTokens - totalTokens, 0);
+  }
+
+  let remainingRatio = readFiniteNumber(payload.remainingRatio);
+  if (remainingRatio === null && windowTokens !== null && windowTokens > 0 && remainingTokens !== null) {
+    remainingRatio = remainingTokens / windowTokens;
+  }
+
+  const snapshot: ContextUsageSnapshot = {};
+  if (remainingRatio !== null) {
+    snapshot.contextRemainingRatio = Math.max(0, Math.min(1, remainingRatio));
+  }
+  if (remainingTokens !== null) {
+    snapshot.contextRemainingTokens = Math.max(0, Math.round(remainingTokens));
+  }
+  if (windowTokens !== null) {
+    snapshot.contextWindowTokens = Math.max(0, Math.round(windowTokens));
+  }
+  return Object.keys(snapshot).length > 0 ? snapshot : null;
 }
 
 function resolveAssistantContent(eventContent: string, fallbackContent: string): string {

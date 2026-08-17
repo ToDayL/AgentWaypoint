@@ -1277,6 +1277,171 @@ describe('API e2e', () => {
     expect(history.messages.some((message) => message.role === 'assistant' && message.content === 'ABC')).toBe(true);
   });
 
+  it('streams context usage as snapshot state without persisting timeline events', async () => {
+    const email = randomEmail('context-state');
+    const createProjectResponse = await app.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { 'x-user-email': email },
+      payload: { name: 'Context State Project', repoPath: TEST_REPO_PATH },
+    });
+    expect(createProjectResponse.statusCode).toBe(201);
+    const project = createProjectResponse.json();
+
+    const createSessionResponse = await app.inject({
+      method: 'POST',
+      url: `/api/projects/${project.id}/sessions`,
+      headers: { 'x-user-email': email },
+      payload: { title: 'Context State Session' },
+    });
+    expect(createSessionResponse.statusCode).toBe(201);
+    const session = createSessionResponse.json();
+
+    const userMessage = await prisma.message.create({
+      data: {
+        sessionId: session.id,
+        role: 'user',
+        content: 'track context without timeline events',
+      },
+    });
+    const turn = await prisma.turn.create({
+      data: {
+        sessionId: session.id,
+        userMessageId: userMessage.id,
+        status: 'running',
+      },
+      select: { id: true },
+    });
+
+    for (const usage of [
+      { totalTokens: 38_000, remainingTokens: 220_400, remainingRatio: 0.8529411764705882 },
+      { totalTokens: 39_886, remainingTokens: 218_514, remainingRatio: 0.8456424148606811 },
+    ]) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/internal/runner/turns/${turn.id}/events`,
+        payload: {
+          type: 'thread.token_usage.updated',
+          payload: {
+            threadId: 'runner-thread-id',
+            turnId: 'runner-turn-id',
+            modelContextWindow: 258_400,
+            ...usage,
+          },
+        },
+      });
+      expect(response.statusCode).toBe(201);
+    }
+
+    await sleep(1_100);
+    expect(await prisma.turn.findUnique({ where: { id: turn.id } })).toMatchObject({
+      contextRemainingRatio: 0.8456424148606811,
+      contextRemainingTokens: 218_514,
+      contextWindowTokens: 258_400,
+    });
+
+    const finalUsageResponse = await app.inject({
+      method: 'POST',
+      url: `/internal/runner/turns/${turn.id}/events`,
+      payload: {
+        type: 'thread.token_usage.updated',
+        payload: {
+          threadId: 'runner-thread-id',
+          turnId: 'runner-turn-id',
+          modelContextWindow: 258_400,
+          totalTokens: 51_680,
+          remainingTokens: 206_720,
+          remainingRatio: 0.8,
+        },
+      },
+    });
+    expect(finalUsageResponse.statusCode).toBe(201);
+
+    const completionResponse = await app.inject({
+      method: 'POST',
+      url: `/internal/runner/turns/${turn.id}/events`,
+      payload: {
+        type: 'turn.completed',
+        payload: { content: 'Context snapshot stored' },
+      },
+    });
+    expect(completionResponse.statusCode).toBe(201);
+
+    const storedTurn = await prisma.turn.findUnique({ where: { id: turn.id } });
+    expect(storedTurn).toMatchObject({
+      contextRemainingRatio: 0.8,
+      contextRemainingTokens: 206_720,
+      contextWindowTokens: 258_400,
+    });
+    expect(storedTurn?.contextUpdatedAt).toBeInstanceOf(Date);
+
+    const persistedEvents = await prisma.event.findMany({
+      where: { turnId: turn.id },
+      orderBy: { seq: 'asc' },
+    });
+    expect(persistedEvents.some((event) => event.type === 'thread.token_usage.updated')).toBe(false);
+
+    const latestSeq = persistedEvents.at(-1)?.seq ?? 0;
+    await prisma.event.create({
+      data: {
+        turnId: turn.id,
+        seq: latestSeq + 1,
+        type: 'thread.token_usage.updated',
+        payload: {
+          threadId: 'legacy-thread-id',
+          modelContextWindow: 258_400,
+          totalTokens: 39_886,
+          remainingTokens: 218_514,
+          remainingRatio: 0.8456424148606811,
+        },
+      },
+    });
+
+    const timelineResponse = await app.inject({
+      method: 'GET',
+      url: `/api/channels/plugins/web/app/turns/${turn.id}/events?since=0`,
+      headers: { 'x-user-email': email },
+    });
+    expect(timelineResponse.statusCode).toBe(200);
+    expect(
+      (timelineResponse.json() as Array<{ type: string }>).some(
+        (event) => event.type === 'thread.token_usage.updated',
+      ),
+    ).toBe(false);
+
+    const streamResponse = await app.inject({
+      method: 'GET',
+      url: `/api/turns/${turn.id}/stream`,
+      headers: { 'x-user-email': email },
+    });
+    expect(streamResponse.statusCode).toBe(200);
+    const contextFrame = streamResponse.payload
+      .split('\n\n')
+      .find((frame) => frame.startsWith('event: context.updated\n'));
+    expect(contextFrame).toBeDefined();
+    const contextDataLine = contextFrame?.split('\n').find((line) => line.startsWith('data: '));
+    expect(JSON.parse(contextDataLine?.slice('data: '.length) ?? '{}')).toEqual({
+      turnId: turn.id,
+      remainingRatio: 0.8,
+      updatedAt: storedTurn?.contextUpdatedAt?.toISOString(),
+    });
+    expect(contextFrame).not.toContain('threadId');
+    expect(contextFrame).not.toContain('modelContextWindow');
+    expect(streamResponse.payload).not.toContain('event: thread.token_usage.updated');
+    expect(streamResponse.payload.indexOf('event: context.updated')).toBeLessThan(
+      streamResponse.payload.indexOf('event: turn.completed'),
+    );
+
+    const webStreamResponse = await app.inject({
+      method: 'GET',
+      url: `/api/channels/plugins/web/app/turns/${turn.id}/stream`,
+      headers: { 'x-user-email': email },
+    });
+    expect(webStreamResponse.statusCode).toBe(200);
+    expect(webStreamResponse.payload).toContain('event: context.updated');
+    expect(webStreamResponse.payload).not.toContain('event: thread.token_usage.updated');
+  });
+
   it('keeps reasoning out of assistant deltas and persisted chat messages', async () => {
     const email = randomEmail('turn-reasoning-timeline');
 
