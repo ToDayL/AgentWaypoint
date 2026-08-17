@@ -800,6 +800,7 @@ describe('API e2e', () => {
       payload: { content: 'start and keep active briefly' },
     });
     expect(turnResponse.statusCode).toBe(201);
+    const { turnId } = turnResponse.json() as { turnId: string };
 
     const deleteResponse = await app.inject({
       method: 'DELETE',
@@ -811,6 +812,17 @@ describe('API e2e', () => {
       error: {
         code: 'CONFLICT',
       },
+    });
+
+    const cancelResponse = await app.inject({
+      method: 'POST',
+      url: `/api/turns/${turnId}/cancel`,
+      headers: { 'x-user-email': email },
+    });
+    expect(cancelResponse.statusCode).toBe(201);
+    expect(cancelResponse.json()).toMatchObject({
+      id: turnId,
+      status: 'cancelled',
     });
   });
 
