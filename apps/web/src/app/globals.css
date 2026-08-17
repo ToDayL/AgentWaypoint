@@ -1857,6 +1857,19 @@ button:disabled {
   background: #2c3340;
 }
 
+.timeline-command-detail-button {
+  width: 1.45rem;
+  min-width: 1.45rem;
+  height: 1.45rem;
+  margin-top: 0;
+  border-radius: 999px;
+}
+
+.timeline-command-detail-button svg {
+  width: 0.8rem;
+  height: 0.8rem;
+}
+
 .timeline-event-details {
   margin-top: 0.25rem;
   display: grid;
@@ -1921,6 +1934,51 @@ button:disabled {
   font-family: 'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace;
   text-size-adjust: 100%;
   -webkit-text-size-adjust: 100%;
+}
+
+.command-detail-panel {
+  min-width: 0;
+}
+
+.command-detail-head,
+.command-detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.command-detail-head {
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.command-detail-head span,
+.command-detail-meta {
+  color: var(--fg-muted);
+  font-size: 0.72rem;
+}
+
+.sim-output .command-detail-command,
+.sim-output .command-detail-output {
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+  font-family: 'Consolas', 'SF Mono', 'Menlo', 'IBM Plex Mono', monospace;
+}
+
+.sim-output .command-detail-command {
+  flex: 0 0 auto;
+  margin-bottom: 0.45rem;
+}
+
+.sim-output .command-detail-output {
+  flex: 1 1 auto;
+  min-height: 8rem;
+  max-height: calc(100vh - 15rem);
+  margin-top: 0.55rem;
 }
 
 

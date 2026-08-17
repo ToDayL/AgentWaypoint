@@ -1,6 +1,6 @@
 import { BotMessage } from '@prisma/client';
 import { CreateSessionBody, ForkSessionBody, UpdateSessionBody } from '../../sessions/sessions.schemas';
-import { CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from '../../turns/turns.schemas';
+import { CommandOutputQuery, CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from '../../turns/turns.schemas';
 import {
   AvailableModel,
   AvailableSkill,
@@ -116,6 +116,8 @@ export interface ChannelPluginContext {
     sinceSeq: number,
     limit?: number,
   ): Promise<Array<{ seq: number; type: string; payload: unknown; turnId: string; createdAt: Date }>>;
+  getLatestDiffForTurn(userId: string, turnId: string): Promise<unknown>;
+  getCommandOutputForTurn(userId: string, turnId: string, input: CommandOutputQuery): Promise<unknown>;
 }
 
 export interface ChannelPlugin {

@@ -15,6 +15,16 @@ import { CreateTurnBody, ResolveTurnApprovalBody, SteerTurnBody } from './turns.
 import { QueueSignalService } from '../queue-signal/queue-signal.service';
 import { ApprovalQueueService } from './approval-queue.service';
 import { summarizeDiffPayload } from './diff-payload';
+import {
+  attachEventToolDetailRef,
+  isCommandToolKind,
+  parseEventToolDetailRef,
+  readAggregatedToolOutput,
+  readToolOutputText,
+  resolveEventToolDetailRef,
+  resolveEventToolKind,
+  summarizeTimelineEventPayload,
+} from './timeline-event-payload';
 
 const ACTIVE_TURN_STATUSES = ['queued', 'running', 'waiting_approval'];
 const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
@@ -444,32 +454,118 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
       orderBy: { seq: 'asc' },
       take: Math.min(Math.max(limit, 1), 1000),
     });
-    if (!events.some((event) => event.type === 'diff.updated')) {
-      return events;
+    return events.map((event) => ({
+      ...event,
+      payload: summarizeTimelineEventPayload(event.type, event.payload),
+    }));
+  }
+
+  async getLatestDiffForTurn(userId: string, turnId: string) {
+    await this.getTurnForUser(userId, turnId);
+    const snapshot = await this.prisma.turnDiffSnapshot.findUnique({
+      where: { turnId },
+      select: { eventSeq: true, payload: true, updatedAt: true },
+    });
+    if (snapshot) {
+      return {
+        turnId,
+        eventSeq: snapshot.eventSeq,
+        unifiedDiff: readDiffDetailText(snapshot.payload),
+        updatedAt: snapshot.updatedAt,
+      };
     }
 
-    let snapshot = await this.prisma.turnDiffSnapshot.findUnique({
-      where: { turnId },
-      select: { eventSeq: true, payload: true },
+    const latest = await this.prisma.event.findFirst({
+      where: { turnId, type: 'diff.updated' },
+      orderBy: { seq: 'desc' },
+      select: { seq: true, payload: true, createdAt: true },
     });
-    if (!snapshot) {
-      snapshot = await this.prisma.event.findFirst({
-        where: { turnId, type: 'diff.updated' },
-        orderBy: { seq: 'desc' },
-        select: { seq: true, payload: true },
-      }).then((event) => event ? { eventSeq: event.seq, payload: event.payload } : null);
+    return latest
+      ? {
+          turnId,
+          eventSeq: latest.seq,
+          unifiedDiff: readDiffDetailText(latest.payload),
+          updatedAt: latest.createdAt,
+        }
+      : null;
+  }
+
+  async getCommandOutputForTurn(
+    userId: string,
+    turnId: string,
+    input: { detailRef: string },
+  ) {
+    await this.getTurnForUser(userId, turnId);
+    if (!parseEventToolDetailRef(input.detailRef)) {
+      throw new NotFoundException({ message: 'Command output not found' });
     }
-    return events.map((event) =>
-      event.type !== 'diff.updated'
-        ? event
-        : {
-            ...event,
-            payload:
-              snapshot && event.seq === snapshot.eventSeq
-                ? snapshot.payload
-                : summarizeDiffPayload(event.payload as Prisma.InputJsonValue),
-          },
-    );
+    const events = await this.prisma.event.findMany({
+      where: {
+        turnId,
+        type: { in: ['tool.started', 'tool.output', 'tool.completed'] },
+        OR: buildToolDetailRefEventFilters(input.detailRef),
+      },
+      orderBy: { seq: 'asc' },
+      select: { seq: true, type: true, payload: true },
+    });
+
+    let title: string | null = null;
+    let command: string | null = null;
+    let status: string | null = null;
+    let exitCode: number | null = null;
+    let durationMs: number | null = null;
+    let commandMatched = false;
+    let aggregateFallback = '';
+    let firstEventSeq: number | null = null;
+    let lastEventSeq: number | null = null;
+    const outputParts: string[] = [];
+
+    for (const event of events) {
+      if (resolveEventToolDetailRef(event.payload) !== input.detailRef) {
+        continue;
+      }
+      firstEventSeq ??= event.seq;
+      lastEventSeq = event.seq;
+      const kind = resolveEventToolKind(event.payload);
+      if (isCommandToolKind(kind)) {
+        commandMatched = true;
+      }
+      const record = readCommandDetailRecord(event.payload);
+      const item = readCommandDetailRecord(record?.item);
+      title ??= readCommandDetailString(record?.title) ?? readCommandDetailString(item?.command) ?? kind;
+      command ??= readCommandDetailString(record?.command) ?? readCommandDetailString(item?.command);
+      status = readCommandDetailString(record?.status) ?? readCommandDetailString(item?.status) ?? status;
+      exitCode = readCommandDetailNumber(record?.exitCode) ?? readCommandDetailNumber(item?.exitCode) ?? exitCode;
+      durationMs = readCommandDetailNumber(record?.durationMs) ?? readCommandDetailNumber(item?.durationMs) ?? durationMs;
+
+      if (event.type === 'tool.output') {
+        const output = readToolOutputText(event.payload);
+        if (output.length > 0) {
+          outputParts.push(output);
+        }
+      } else if (event.type === 'tool.completed') {
+        aggregateFallback = readAggregatedToolOutput(event.payload) || aggregateFallback;
+      }
+    }
+
+    const output = outputParts.length > 0 ? outputParts.join('') : aggregateFallback;
+    if (!commandMatched || output.length === 0) {
+      throw new NotFoundException({ message: 'Command output not found' });
+    }
+
+    return {
+      turnId,
+      detailRef: input.detailRef,
+      firstEventSeq,
+      lastEventSeq,
+      title: title ?? command ?? 'Command execution',
+      command,
+      status,
+      exitCode,
+      durationMs,
+      output,
+      outputBytes: Buffer.byteLength(output, 'utf8'),
+    };
   }
 
   async getTurnForUser(userId: string, turnId: string) {
@@ -683,7 +779,9 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
         if (TERMINAL_STATUSES.includes(turn.status)) {
           return;
         }
-        const normalizedPayload = this.normalizePayload(payload);
+        const normalizedPayload = this.normalizePayload(
+          type === 'tool.output' ? attachEventToolDetailRef(payload) : payload,
+        );
         if (!this.coalesceEvent(turnId, type, normalizedPayload)) {
           await this.appendEvent(turnId, type, normalizedPayload);
         }
@@ -695,7 +793,7 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
           return;
         }
         await this.flushPendingCoalescedEventsForTurn(turnId);
-        await this.appendEvent(turnId, type, this.normalizePayload(payload));
+        await this.appendEvent(turnId, type, this.normalizePayload(attachEventToolDetailRef(payload)));
         return;
       }
       case 'thread.token_usage.updated': {
@@ -1708,4 +1806,52 @@ function normalizeTriggerProvider(input: string | undefined): string {
 function normalizeTriggerIntegrationId(input: string | undefined): string | null {
   const normalized = input?.trim();
   return normalized && normalized.length > 0 ? normalized : null;
+}
+
+function buildToolDetailRefEventFilters(detailRef: string): Prisma.EventWhereInput[] {
+  const parsed = parseEventToolDetailRef(detailRef);
+  if (!parsed) {
+    return [];
+  }
+
+  const pathsByKind: Record<typeof parsed.kind, string[]> = {
+    call: ['$.toolCallId', '$.tool_call_id', '$.callId'],
+    item: ['$.itemId', '$.item_id', '$.item.id'],
+    tool: ['$.toolId'],
+    event: ['$.id'],
+  };
+  return [
+    { payload: { path: '$.detailRef', equals: detailRef } },
+    ...pathsByKind[parsed.kind].map((path) => ({
+      payload: { path, equals: parsed.value },
+    })),
+  ];
+}
+
+function readCommandDetailRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function readCommandDetailString(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function readCommandDetailNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function readDiffDetailText(value: unknown): string {
+  const record = readCommandDetailRecord(value);
+  if (!record) {
+    return '';
+  }
+  return typeof record.unifiedDiff === 'string'
+    ? record.unifiedDiff
+    : typeof record.diff === 'string'
+      ? record.diff
+      : '';
 }

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+import { Prisma } from '@prisma/client';
 import { AppModule } from '../app.module';
 import { HttpExceptionFilter } from '../common/filters/http-exception.filter';
 import { PrismaService } from './prisma/prisma.service';
@@ -1073,6 +1074,8 @@ describe('API e2e', () => {
           type: 'tool.output',
           payload: {
             itemId: 'tool-1',
+            title: 'Bash',
+            kind: 'command_execution',
             stream: 'stdout',
             text,
           },
@@ -1080,6 +1083,22 @@ describe('API e2e', () => {
       });
       expect(response.statusCode).toBe(201);
     }
+
+    const secondCommandOutputResponse = await app.inject({
+      method: 'POST',
+      url: `/internal/runner/turns/${turnId}/events`,
+      payload: {
+        type: 'tool.output',
+        payload: {
+          itemId: 'tool-2',
+          title: 'Bash',
+          kind: 'command_execution',
+          stream: 'stdout',
+          text: 'other-output',
+        },
+      },
+    });
+    expect(secondCommandOutputResponse.statusCode).toBe(201);
 
     const completionResponse = await app.inject({
       method: 'POST',
@@ -1129,11 +1148,88 @@ describe('API e2e', () => {
       expect.objectContaining({
         seq: diffSeq,
         type: 'diff.updated',
-        payload: expect.objectContaining({ unifiedDiff: 'diff-v2' }),
+        payload: {
+          diffAvailable: true,
+          snapshotAvailable: true,
+        },
       }),
     ]);
-    expect(toolOutputs).toHaveLength(1);
-    expect(toolOutputs[0]?.payload).toMatchObject({ text: 'out-1out-2' });
+    const diffDetailResponse = await app.inject({
+      method: 'GET',
+      url: `/api/channels/plugins/web/app/turns/${turnId}/diff`,
+      headers: { 'x-user-email': email },
+    });
+    expect(diffDetailResponse.statusCode).toBe(200);
+    expect(diffDetailResponse.json()).toMatchObject({
+      turnId,
+      eventSeq: diffSeq,
+      unifiedDiff: 'diff-v2',
+    });
+    expect(diffDetailResponse.json()).not.toHaveProperty('payload');
+    expect(toolOutputs).toHaveLength(2);
+    const toolOutput = toolOutputs.find(
+      (event) => (event.payload as Record<string, unknown>).itemId === 'tool-1',
+    );
+    expect(toolOutput?.payload).toMatchObject({
+      detailRef: 'item:tool-1',
+      kind: 'command_execution',
+      text: 'out-1out-2',
+    });
+    if (!toolOutput) {
+      throw new Error('Expected a persisted tool.output event');
+    }
+    const legacyToolPayload = { ...(toolOutput.payload as Record<string, unknown>) };
+    delete legacyToolPayload.detailRef;
+    await prisma.event.update({
+      where: { id: toolOutput.id },
+      data: { payload: legacyToolPayload as Prisma.InputJsonValue },
+    });
+    const timelineToolResponse = await app.inject({
+      method: 'GET',
+      url: `/api/channels/plugins/web/app/turns/${turnId}/events?since=${toolOutput.seq - 1}&limit=1`,
+      headers: { 'x-user-email': email },
+    });
+    expect(timelineToolResponse.statusCode).toBe(200);
+    expect(timelineToolResponse.json()).toEqual([
+      expect.objectContaining({
+        seq: toolOutput.seq,
+        type: 'tool.output',
+        payload: expect.objectContaining({
+          itemId: 'tool-1',
+          kind: 'command_execution',
+          detailRef: 'item:tool-1',
+          outputAvailable: true,
+        }),
+      }),
+    ]);
+    expect(JSON.stringify(timelineToolResponse.json())).not.toContain('out-1out-2');
+    const commandOutputResponse = await app.inject({
+      method: 'GET',
+      url: `/api/channels/plugins/web/app/turns/${turnId}/command-output?${new URLSearchParams({
+        detailRef: 'item:tool-1',
+      }).toString()}`,
+      headers: { 'x-user-email': email },
+    });
+    expect(commandOutputResponse.statusCode).toBe(200);
+    expect(commandOutputResponse.json()).toMatchObject({
+      turnId,
+      detailRef: 'item:tool-1',
+      output: 'out-1out-2',
+    });
+    const secondCommandDetailResponse = await app.inject({
+      method: 'GET',
+      url: `/api/channels/plugins/web/app/turns/${turnId}/command-output?${new URLSearchParams({
+        detailRef: 'item:tool-2',
+      }).toString()}`,
+      headers: { 'x-user-email': email },
+    });
+    expect(secondCommandDetailResponse.statusCode).toBe(200);
+    expect(secondCommandDetailResponse.json()).toMatchObject({
+      turnId,
+      detailRef: 'item:tool-2',
+      title: 'Bash',
+      output: 'other-output',
+    });
     expect(events.map((event) => event.type)).toContain('turn.completed');
 
     const assistantDelta = assistantDeltas[0];
