@@ -155,7 +155,8 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
         contentLength: input.contentLength,
       }),
     getTurnForUser: async (userId, turnId) => this.turnsService.getTurnForUser(userId, turnId),
-    getEventsForTurn: async (userId, turnId, sinceSeq) => this.turnsService.getEventsForTurn(userId, turnId, sinceSeq),
+    getEventsForTurn: async (userId, turnId, sinceSeq, limit) =>
+      this.turnsService.getEventsForTurn(userId, turnId, sinceSeq, limit),
   };
 
   constructor(
@@ -198,8 +199,8 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
     return this.turnsService.getTurnForUser(userId, turnId);
   }
 
-  async getEventsForTurn(userId: string, turnId: string, sinceSeq: number) {
-    return this.turnsService.getEventsForTurn(userId, turnId, sinceSeq);
+  async getEventsForTurn(userId: string, turnId: string, sinceSeq: number, limit?: number) {
+    return this.turnsService.getEventsForTurn(userId, turnId, sinceSeq, limit);
   }
 
   async listProjectsForUser(userId: string) {

@@ -60,6 +60,7 @@ import { Diff, Hunk, parseDiff } from 'react-diff-view';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
+import { findTargetToolTimelineIndex, resolveToolKey } from './timeline-tool-routing';
 
 type Project = {
   id: string;
@@ -819,6 +820,8 @@ export default function HomePage() {
   const sessionHistoryRequestRef = useRef(0);
   const timelineListRef = useRef<HTMLDivElement | null>(null);
   const timelineRowHeightsRef = useRef<Record<string, number>>({});
+  const timelineRowElementsRef = useRef<Record<string, HTMLDivElement>>({});
+  const timelineRowResizeObserverRef = useRef<ResizeObserver | null>(null);
   const timelineStickToBottomRef = useRef(true);
   const pendingTimelineEventsRef = useRef<StreamEnvelope[]>([]);
   const timelineFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1026,10 +1029,7 @@ export default function HomePage() {
     });
     setTimelineScrollTop((current) => (Math.abs(current - nextScrollTop) < 1 ? current : nextScrollTop));
   }, []);
-  const measureTimelineRow = useCallback((eventId: string, element: HTMLDivElement | null): void => {
-    if (!element) {
-      return;
-    }
+  const recordTimelineRowHeight = useCallback((eventId: string, element: HTMLDivElement): void => {
     const nextHeight = Math.ceil(element.getBoundingClientRect().height);
     if (!Number.isFinite(nextHeight) || nextHeight <= 0) {
       return;
@@ -1041,6 +1041,33 @@ export default function HomePage() {
     timelineRowHeightsRef.current[eventId] = nextHeight;
     setTimelineMeasureVersion((current) => current + 1);
   }, []);
+  const measureTimelineRow = useCallback((eventId: string, element: HTMLDivElement | null): void => {
+    const previousElement = timelineRowElementsRef.current[eventId];
+    if (!element) {
+      if (previousElement) {
+        timelineRowResizeObserverRef.current?.unobserve(previousElement);
+        delete timelineRowElementsRef.current[eventId];
+      }
+      return;
+    }
+    if (previousElement && previousElement !== element) {
+      timelineRowResizeObserverRef.current?.unobserve(previousElement);
+    }
+    timelineRowElementsRef.current[eventId] = element;
+    if (!timelineRowResizeObserverRef.current) {
+      timelineRowResizeObserverRef.current = new ResizeObserver((entries) => {
+        entries.forEach((entry) => {
+          const target = entry.target as HTMLDivElement;
+          const targetEventId = target.dataset.timelineEventId;
+          if (targetEventId) {
+            recordTimelineRowHeight(targetEventId, target);
+          }
+        });
+      });
+    }
+    timelineRowResizeObserverRef.current.observe(element);
+    recordTimelineRowHeight(eventId, element);
+  }, [recordTimelineRowHeight]);
   const clearPendingTimelineBatch = useCallback((): void => {
     pendingTimelineEventsRef.current = [];
     if (timelineFlushTimerRef.current) {
@@ -1361,6 +1388,7 @@ export default function HomePage() {
 
   useEffect(() => {
     timelineRowHeightsRef.current = {};
+    setExpandedToolDetailKeys({});
     timelineStickToBottomRef.current = true;
     setTimelineMeasureVersion((current) => current + 1);
     const element = timelineListRef.current;
@@ -1393,6 +1421,9 @@ export default function HomePage() {
     return () => {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
+      timelineRowResizeObserverRef.current?.disconnect();
+      timelineRowResizeObserverRef.current = null;
+      timelineRowElementsRef.current = {};
       clearPendingTimelineBatch();
       clearPendingAssistantTextBatch();
       pendingTurnCreateAbortRef.current?.abort();
@@ -1893,22 +1924,19 @@ export default function HomePage() {
         setAuthenticated(true);
         setCurrentUserEmail(userEmail);
         setCurrentUserRole(response.principal.role);
-        const settings = await loadAppSettings();
+        await loadAppSettings();
         if (response.principal.role === 'admin') {
-          await loadAdminUsers();
+          void loadAdminUsers();
         } else {
           setAdminUsers([]);
         }
-        const initialBackend =
-          settings?.supportedBackends.find((backend) => backend === 'codex' || backend === 'claude') ?? 'codex';
-        await loadAvailableModels(initialBackend, { target: 'both' });
         const preferredProjectId = readLastProjectId(userEmail) ?? undefined;
         await loadProjects({
           preferredProjectId,
           preferredSessionId: preferredProjectId ? readLastSessionId(userEmail, preferredProjectId) ?? undefined : undefined,
           hydrateAllSessions: true,
         });
-        await loadBotIntegrations();
+        void loadBotIntegrations();
         return;
       }
       setAuthenticated(false);
@@ -3235,15 +3263,29 @@ export default function HomePage() {
 
   async function fetchTurnEventSnapshot(turnId: string): Promise<TurnEventSnapshot> {
     const normalizedTurnId = turnId.trim();
-    const events = await apiRequest<TurnEventHistoryItem[]>(
-      `/api/channels/plugins/web/app/turns/${normalizedTurnId}/events?${new URLSearchParams({ since: '0' }).toString()}`,
-      {
-        method: 'GET',
-      },
-    );
-    const normalizedEvents = events
-      .map((event) => normalizeHistoryEventItem(event, normalizedTurnId))
-      .filter((event): event is StreamEnvelope => event !== null);
+    const pageSize = 250;
+    const normalizedEvents: StreamEnvelope[] = [];
+    let cursor = 0;
+    while (true) {
+      const events = await apiRequest<TurnEventHistoryItem[]>(
+        `/api/channels/plugins/web/app/turns/${normalizedTurnId}/events?${new URLSearchParams({
+          since: String(cursor),
+          limit: String(pageSize),
+        }).toString()}`,
+        {
+          method: 'GET',
+        },
+      );
+      const page = events
+        .map((event) => normalizeHistoryEventItem(event, normalizedTurnId))
+        .filter((event): event is StreamEnvelope => event !== null);
+      normalizedEvents.push(...page);
+      const nextCursor = page.reduce((latest, event) => Math.max(latest, event.seq), cursor);
+      if (events.length < pageSize || nextCursor <= cursor) {
+        break;
+      }
+      cursor = nextCursor;
+    }
     const snapshot = buildTurnEventSnapshot(normalizedEvents);
     rememberTurnStreamCursor(normalizedTurnId, snapshot.latestSeq);
     return snapshot;
@@ -5801,6 +5843,7 @@ export default function HomePage() {
                           {timelineVirtualView.rows.map(({ event, top }) => (
                             <div
                               key={event.id}
+                              data-timeline-event-id={event.id}
                               ref={(element) => measureTimelineRow(event.id, element)}
                               className="timeline-virtual-row"
                               style={{ transform: `translateY(${top}px)` }}
@@ -5848,7 +5891,10 @@ export default function HomePage() {
                                                   type="button"
                                                   className="icon-button timeline-detail-toggle"
                                                   onClick={() =>
-                                                    setExpandedToolDetailKeys((current) => ({ ...current, [detailKey]: !expanded }))
+                                                    setExpandedToolDetailKeys((current) => ({
+                                                      ...current,
+                                                      [detailKey]: current[detailKey] !== true,
+                                                    }))
                                                   }
                                                   title={expanded ? 'Collapse details' : 'Expand details'}
                                                   aria-label={expanded ? 'Collapse details' : 'Expand details'}
@@ -7165,16 +7211,6 @@ const ChatMessageMarkdown = memo(function ChatMessageMarkdown({ content }: { con
   return <ReactMarkdown remarkPlugins={CHAT_MARKDOWN_REMARK_PLUGINS}>{rendered}</ReactMarkdown>;
 });
 
-function resolveToolKey(envelope: StreamEnvelope): string {
-  const payload = envelope.payload;
-  const keyCandidate =
-    payload.toolCallId ?? payload.tool_call_id ?? payload.toolId ?? payload.callId ?? payload.id ?? payload.title ?? payload.kind;
-  if (typeof keyCandidate === 'string' && keyCandidate.trim().length > 0) {
-    return keyCandidate.trim();
-  }
-  return `seq-${envelope.seq}`;
-}
-
 function resolveToolTitle(payload: Record<string, unknown>): string {
   return (
     typeof payload.title === 'string' && payload.title.trim().length > 0
@@ -7245,25 +7281,6 @@ function extractDiffFilesFromPayload(payload: Record<string, unknown>): string[]
     }
   });
   return Array.from(new Set(files));
-}
-
-function findTargetToolTimelineIndex(events: TimelineEvent[], toolKey: string): number {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (!event) {
-      continue;
-    }
-    if (event.kind !== 'tool') {
-      continue;
-    }
-    if (event.toolKey === toolKey) {
-      return index;
-    }
-    if (event.status === 'running') {
-      return index;
-    }
-  }
-  return -1;
 }
 
 function resolveRemainingContextRatio(payload: Record<string, unknown>): number | null {

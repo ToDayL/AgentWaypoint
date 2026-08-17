@@ -414,14 +414,7 @@ export class CodexBackend {
 
       const stdoutReader = createInterface({ input: child.stdout });
       stdoutReader.on('line', (line) => {
-        worker.notificationQueue = worker.notificationQueue
-          .then(async () => {
-            await this.handleWorkerMessage(worker, line);
-          })
-          .catch((error: unknown) => {
-            const message = error instanceof Error ? error.message : 'unknown worker message error';
-            console.error(`[agentwaypoint-runner] worker notification error: ${message}`);
-          });
+        this.handleWorkerMessage(worker, line);
       });
 
       child.stderr.on('data', (chunk) => {
@@ -514,7 +507,7 @@ export class CodexBackend {
     return threadId;
   }
 
-  private async handleWorkerMessage(worker: CodexWorker, line: string): Promise<void> {
+  private handleWorkerMessage(worker: CodexWorker, line: string): void {
     const trimmed = line.trim();
     if (!trimmed) {
       return;
@@ -538,6 +531,17 @@ export class CodexBackend {
       return;
     }
 
+    worker.notificationQueue = worker.notificationQueue
+      .then(async () => {
+        await this.handleQueuedWorkerMessage(worker, record);
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : 'unknown worker message error';
+        console.error(`[agentwaypoint-runner] worker notification error: ${message}`);
+      });
+  }
+
+  private async handleQueuedWorkerMessage(worker: CodexWorker, record: Record<string, unknown>): Promise<void> {
     if ((typeof record.id === 'number' || typeof record.id === 'string') && typeof record.method === 'string') {
       await this.handleServerRequest(worker, record);
       return;

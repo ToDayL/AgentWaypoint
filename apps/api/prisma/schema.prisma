@@ -120,8 +120,18 @@ model Turn {
   session                Session        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   events                 Event[]
   approvals              TurnApproval[]
+  diffSnapshot           TurnDiffSnapshot?
 
   @@index([sessionId])
+}
+
+model TurnDiffSnapshot {
+  turnId    String   @id
+  eventSeq  Int
+  payload   Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  turn      Turn     @relation(fields: [turnId], references: [id], onDelete: Cascade)
 }
 
 model TurnApproval {
