@@ -3,28 +3,8 @@ name: CI
 on:
   workflow_dispatch:
   pull_request:
-    paths:
-      - 'apps/api/**'
-      - 'apps/web/**'
-      - 'packages/**'
-      - 'scripts/test-api-e2e.sh'
-      - '.github/workflows/api-e2e.yml'
-      - 'pnpm-lock.yaml'
-      - 'pnpm-workspace.yaml'
-      - 'package.json'
+    types: [opened]
   push:
-    branches:
-      - main
-      - feat/lightweight
-    paths:
-      - 'apps/api/**'
-      - 'apps/web/**'
-      - 'packages/**'
-      - 'scripts/test-api-e2e.sh'
-      - '.github/workflows/api-e2e.yml'
-      - 'pnpm-lock.yaml'
-      - 'pnpm-workspace.yaml'
-      - 'package.json'
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -45,7 +25,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: "22"
 
       - name: Enable Corepack
         run: corepack enable
@@ -64,5 +44,5 @@ jobs:
 
       - name: Run API E2E
         env:
-          CI: 'true'
+          CI: "true"
         run: ./scripts/test-api-e2e.sh
