@@ -63,7 +63,7 @@ For development or test runs, use an isolated home so you do not touch a real se
 - Force web rebuild before start/restart: `./agent-waypoint restart --rebuild`
 - Logs: `./agent-waypoint logs api` or `./agent-waypoint logs web`
 
-`start` and `restart` automatically rebuild the web app when the existing `.next` build is missing or older than the web source/config inputs.
+`start` and `restart` automatically regenerate Prisma Client before database bootstrap. They also rebuild the web app when the existing `.next` build is missing or older than the web source/config inputs.
 
 Compatibility wrappers are also available:
 - `./scripts/dev-up.sh` uses `./.agentwaypoint-dev` unless `AGENTWAYPOINT_DEV_HOME` is set.

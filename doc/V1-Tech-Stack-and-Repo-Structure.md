@@ -129,4 +129,4 @@ corepack pnpm --filter @agentwaypoint/web typecheck
 ./scripts/test-api-e2e.sh
 ```
 
-`./agent-waypoint start` builds the web app when `.next/BUILD_ID` is missing or older than tracked web/shared inputs.
+`./agent-waypoint start` regenerates Prisma Client before database bootstrap, then builds the web app when `.next/BUILD_ID` is missing or older than tracked web/shared inputs.

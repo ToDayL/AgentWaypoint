@@ -134,6 +134,7 @@ async function cmdStart() {
 
   // Run bootstrap synchronously in the foreground so prompts work.
   ensureDirs();
+  generatePrismaClient();
   verifyExistingDatabaseBeforeBootstrap();
   clearCleanShutdownMarker();
   const config = await runBootstrapForeground();
@@ -453,6 +454,21 @@ function writeCleanShutdownMarker(databasePath) {
 function ensureDirs() {
   fs.mkdirSync(dataHome, { recursive: true });
   fs.mkdirSync(logsDir, { recursive: true });
+}
+
+function generatePrismaClient() {
+  process.stdout.write('Generating Prisma Client...\n');
+  const [command, ...args] = pnpmCommand(['--filter', '@agentwaypoint/api', 'prisma:generate']);
+  const result = spawnSync(command, args, {
+    cwd: REPO_ROOT,
+    stdio: 'inherit',
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(`Prisma Client generation failed with status ${result.status}`);
+  }
 }
 
 function ensureWebBuild(options = {}) {
