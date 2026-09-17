@@ -113,6 +113,9 @@ function readConfig(configPath: string): AgentWaypointConfig {
 
 function applyToEnv(config: AgentWaypointConfig): void {
   for (const [key, value] of Object.entries(config)) {
+    // These settings are hot-reloaded from the file; do not turn file values
+    // into permanent environment overrides.
+    if (['TERMINAL_ORIGIN_POLICY', 'TERMINAL_ALLOWED_ORIGINS', 'PUBLIC_WEB_ORIGIN'].includes(key)) continue;
     if (process.env[key] === undefined || process.env[key] === '') {
       process.env[key] = value;
     }

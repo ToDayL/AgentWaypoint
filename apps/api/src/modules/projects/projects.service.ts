@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
 import { buildCodexBackendConfig, readCodexBackendConfigWithFallback } from './project-backend-config';
 import { CreateProjectBody, UpdateProjectBody } from './projects.schemas';
+import { terminalLifecycle } from '../terminals/terminal-lifecycle';
 
 const ACTIVE_TURN_STATUSES = ['queued', 'running', 'waiting_approval'] as const;
 const DEFAULT_WORKSPACE_ROOT_LITERAL = '$HOME/AgentWaypoint/workspaces';
@@ -143,6 +144,15 @@ export class ProjectsService {
   }
 
   async deleteByIdForUser(userId: string, projectId: string) {
+    return terminalLifecycle.withProject(projectId, async () => {
+      await this.getByIdForUser(userId, projectId);
+      terminalLifecycle.assertDeletable(projectId);
+      await this.deleteUnlocked(userId, projectId);
+      terminalLifecycle.discard(projectId);
+    });
+  }
+
+  private async deleteUnlocked(userId: string, projectId: string) {
     const project = await this.prisma.project.findFirst({
       where: {
         id: projectId,

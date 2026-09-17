@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { getApiBaseUrl } from '../_lib';
 import { relayEventStream } from '../_stream-proxy';
+import { isTerminalPath, terminalProxyHeaders } from '../_terminal-proxy';
 
 export const dynamic = 'force-dynamic';
 
@@ -96,6 +97,7 @@ async function proxyRequest(request: NextRequest, context: Params): Promise<Resp
     const upstream = await fetch(`${getApiBaseUrl()}${upstreamPath}`, {
       method,
       headers: {
+        ...(isTerminalPath(upstreamPath) ? terminalProxyHeaders(request) : {}),
         ...(cookieHeader ? { cookie: cookieHeader } : {}),
         ...(devEmailHeader ? { 'x-user-email': devEmailHeader } : {}),
         ...(acceptHeader ? { accept: acceptHeader } : {}),

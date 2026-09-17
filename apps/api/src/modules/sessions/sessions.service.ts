@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ProjectsService } from '../projects/projects.service';
 import { RUNNER_ADAPTER, RunnerAdapter } from '../runner/runner.types';
 import { CreateSessionBody, ForkSessionBody, UpdateSessionBody } from './sessions.schemas';
+import { terminalLifecycle } from '../terminals/terminal-lifecycle';
 
 const ACTIVE_TURN_STATUSES = new Set(['queued', 'running', 'waiting_approval']);
 const EXECUTION_MODES = new Set(['read-only', 'safe-write', 'auto-review', 'yolo']);
@@ -319,6 +320,16 @@ export class SessionsService {
   }
 
   async deleteByIdForUser(userId: string, sessionId: string) {
+    const owned = await this.prisma.session.findFirst({ where: { id: sessionId, project: { ownerUserId: userId } }, select: { projectId: true } });
+    if (!owned) throw new NotFoundException({ message: 'Session not found' });
+    return terminalLifecycle.withProject(owned.projectId, async () => {
+      terminalLifecycle.assertDeletable(owned.projectId, sessionId);
+      await this.deleteUnlocked(userId, sessionId);
+      terminalLifecycle.discard(owned.projectId, sessionId);
+    });
+  }
+
+  private async deleteUnlocked(userId: string, sessionId: string) {
     const session = await this.prisma.session.findFirst({
       where: {
         id: sessionId,

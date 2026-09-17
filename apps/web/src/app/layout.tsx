@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import 'react-diff-view/style/index.css';
+import '@xterm/xterm/css/xterm.css';
 import './globals.css';
 
 export const metadata: Metadata = {

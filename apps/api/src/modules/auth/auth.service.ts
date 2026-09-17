@@ -15,8 +15,19 @@ const SESSION_LAST_SEEN_UPDATE_INTERVAL_MS = 5 * 60 * 1000;
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
   private readonly sessionLastSeenUpdateAttempts = new Map<string, number>();
+  private readonly sessionRevocationListeners = new Set<{ hash: string; notify: () => void }>();
 
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+
+  onSessionRevoked(request: AuthenticatedRequest, notify: () => void): () => void {
+    const token = readSessionTokenFromRequest(request);
+    if (!token) return () => {};
+    const listener = { hash: hashToken(token), notify };
+    this.sessionRevocationListeners.add(listener);
+    return () => {
+      this.sessionRevocationListeners.delete(listener);
+    };
+  }
 
   async getOrCreateUserByEmail(email: string): Promise<User> {
     const normalizedEmail = email.trim().toLowerCase();
@@ -114,6 +125,10 @@ export class AuthService {
       where: { id: session.id },
       data: { revokedAt: new Date() },
     });
+    const hash = hashToken(sessionToken);
+    for (const listener of this.sessionRevocationListeners) {
+      if (listener.hash === hash) listener.notify();
+    }
   }
 
   async revokeSessionFromRequest(request: AuthenticatedRequest): Promise<void> {

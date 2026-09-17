@@ -5,6 +5,7 @@ AgentWaypoint offers a WebUI for backend-driven coding agents. The lightweight r
 Currently supported backends: `codex`, `claude`.
 
 ## What It Offers
+
 - WebUI chat interface with streaming responses for Codex and Claude backends.
 - Project and session management for organized workspaces.
 - Multi-user support with role-based access.
@@ -12,15 +13,17 @@ Currently supported backends: `codex`, `claude`.
 - Workspace file browser, file previews, and uploads.
 - Web and Discord channel plugins backed by an in-process channel gateway.
 - Embedded runner mode for a single bare-metal service stack.
+- Session-bound terminal tabs with real remote shells, HTTP/WebSocket support, and automatic cleanup after 12 hours without a connection (checked hourly).
 
 ## Quick Start
 Prerequisites:
 - Bash
-- Node.js `22.x` recommended
+- Node.js `22.15+` within the `22.x` release line
 - `corepack` available for `pnpm`
 - Codex CLI installed on host (`codex` in `PATH`) when using the Codex backend
 - Claude runtime dependencies installed on host when using the Claude backend
 - Login on host before startup for enabled backends
+- Native build tools for `node-pty` if no prebuilt binary is available (C/C++ compiler and Python on Linux)
 
 Install dependencies and build:
 ```bash
@@ -70,9 +73,11 @@ Compatibility wrappers are also available:
 - `./scripts/prod-up.sh` uses `~/.agentwaypoint` unless `AGENTWAYPOINT_HOME` is set.
 
 ## Developer Docs
+
 - [Developer Guide](./doc/Developer-Guide.md)
 - [Architecture](./doc/Architecture-Initial.md)
 - [Web/API/Runner Contract Inventory](./doc/Web-API-Runner-Contract-Inventory.md)
+- [Session Terminal Design and platform notes](./doc/Terminal-Design.md)
 - [AGENTS runbook](./AGENTS.md)
 
 ## Screenshots
