@@ -142,18 +142,7 @@ async function cmdStart() {
   ensureWebBuild({ force: forceRebuild });
 
   const apiCmd = pnpmCommand(['--filter', '@agentwaypoint/api', 'start']);
-  // Skip web's package.json `start` script (it hardcodes -p 3000); call next directly.
-  const webCmd = pnpmCommand([
-    '--filter',
-    '@agentwaypoint/web',
-    'exec',
-    'next',
-    'start',
-    '-p',
-    String(config.WEB_PORT),
-    '-H',
-    String(config.LISTEN_IP),
-  ]);
+  const webCmd = [process.execPath, path.join(REPO_ROOT, 'apps', 'web', 'server.mjs')];
 
   const apiChild = spawnDetached(apiCmd, apiLog, {
     ...process.env,
@@ -173,6 +162,7 @@ async function cmdStart() {
     API_BASE_URL: apiUrl(config.LISTEN_IP, config.API_PORT),
     NEXT_PUBLIC_API_BASE_URL: apiUrl(config.LISTEN_IP, config.API_PORT),
     PORT: String(config.WEB_PORT),
+    LISTEN_IP: String(config.LISTEN_IP),
   });
 
   const record = {

@@ -6,6 +6,8 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import { AppModule } from './app.module';
 import { ensureBootstrap } from './bootstrap/local-bootstrap';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
+import { TerminalsGateway } from './modules/terminals/terminals.gateway';
+import { TerminalsService } from './modules/terminals/terminals.service';
 
 async function bootstrap(): Promise<void> {
   await ensureBootstrap();
@@ -21,6 +23,7 @@ async function bootstrap(): Promise<void> {
     },
   });
   app.useGlobalFilters(new HttpExceptionFilter());
+  app.get(TerminalsGateway).install(app.getHttpServer());
 
   const logger = new Logger('Bootstrap');
   let shutdownPromise: Promise<void> | null = null;
@@ -28,6 +31,8 @@ async function bootstrap(): Promise<void> {
     if (!shutdownPromise) {
       shutdownPromise = (async () => {
         logger.log(`Received ${signal}; shutting down gracefully.`);
+        app.get(TerminalsGateway).onModuleDestroy();
+        await app.get(TerminalsService).onModuleDestroy();
         await app.close();
       })();
     }

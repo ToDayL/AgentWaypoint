@@ -61,6 +61,7 @@ import { Diff, Hunk, parseDiff } from 'react-diff-view';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
+import { TerminalPanel } from '../components/terminal/TerminalPanel';
 import {
   findTargetToolTimelineIndex,
   isCommandToolKind,
@@ -757,6 +758,7 @@ export default function HomePage() {
   const [ccSwitchClaudeDraft, setCcSwitchClaudeDraft] = useState('claude-official');
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState('My Workspace');
   const [newProjectRepoPath, setNewProjectRepoPath] = useState('');
   const [newProjectBackend, setNewProjectBackend] = useState('codex');
@@ -4368,6 +4370,9 @@ export default function HomePage() {
           </div>
           {authenticated ? (
             <div className="header-mobile-side header-mobile-right">
+              <button type="button" className={`icon-button terminal-toggle ${terminalOpen ? 'is-active' : ''}`} disabled={!selectedSessionId} aria-label="Toggle Terminal" aria-expanded={terminalOpen} title={selectedSessionId ? 'Toggle Terminal' : 'Select a session first'} onClick={() => setTerminalOpen((open) => !open)}>
+                <SquareTerminal /><span>Terminal</span>
+              </button>
               {rightSidebarMode !== 'closed' ? (
                 <button
                   type="button"
@@ -6114,6 +6119,8 @@ export default function HomePage() {
             ) : null}
           </div>
         ) : null}
+
+        {authenticated && terminalOpen && selectedSessionId ? <TerminalPanel key={`${currentUserEmail}:${selectedSessionId}`} sessionId={selectedSessionId} userKey={currentUserEmail} onHide={() => setTerminalOpen(false)} /> : null}
 
         {error ? (
           <div
