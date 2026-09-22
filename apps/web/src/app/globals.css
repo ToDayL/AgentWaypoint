@@ -2404,9 +2404,9 @@ button:disabled {
 .terminal-toolbar { display: flex; align-items: center; min-height: 30px; gap: 4px; padding: 2px 6px; flex-shrink: 0; }
 .terminal-toolbar .terminal-back { display: none; }
 .terminal-tabs { display: flex; flex: 1; overflow-x: auto; min-width: 0; gap: 4px; }
-.terminal-tab { display: flex; align-items: center; border-bottom: 2px solid transparent; white-space: nowrap; }
+.terminal-tab { display: flex; flex: 0 0 auto; align-items: center; border-bottom: 2px solid transparent; white-space: nowrap; }
 .terminal-tab.is-active { border-color: #6aa9dc; background: #1c2938; }
-.terminal-tab button { background: transparent; border: 0; color: #c7d3e1; padding: 4px 7px; font-size: 12px; }
+.terminal-tab button { flex: 0 0 auto; width: auto; margin: 0; background: transparent; border: 0; color: #c7d3e1; padding: 4px 7px; font-size: 12px; }
 .terminal-panel button { font-family: inherit; }
 .terminal-tab .terminal-tab-close { padding: 4px; display: flex; }
 .terminal-status { display: flex; align-items: center; gap: 10px; color: #93a7bd; font-size: 11px; padding: 3px 10px; flex-shrink: 0; }

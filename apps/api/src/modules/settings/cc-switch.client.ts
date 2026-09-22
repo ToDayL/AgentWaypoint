@@ -61,7 +61,7 @@ export class LocalCcSwitchClient implements CcSwitchClient {
 
   async switchProvider(app: CcSwitchApp, id: string): Promise<void> {
     await this.run(['provider', 'switch', '--app', app, id]);
-    if (app === 'codex' && !id.trim().startsWith('codex-official')) {
+    if (app === 'codex' && shouldEnsureCodexModelCatalog(id)) {
       await ensureCodexModelCatalogJson();
     }
   }
@@ -91,6 +91,15 @@ export class LocalCcSwitchClient implements CcSwitchClient {
     );
     return command;
   }
+}
+
+/**
+ * OpenAI and Codex provider configs already provide their own model setup.
+ * Third-party configs still need the generated catalog reference.
+ */
+export function shouldEnsureCodexModelCatalog(providerId: string): boolean {
+  const normalizedId = providerId.trim().toLowerCase();
+  return !normalizedId.startsWith('openai') && !normalizedId.startsWith('codex');
 }
 
 /**

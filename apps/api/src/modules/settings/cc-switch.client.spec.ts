@@ -9,6 +9,7 @@ import {
   ensureCodexModelCatalogJson,
   ensureCodexModelCatalogJsonInText,
   parseProviderList,
+  shouldEnsureCodexModelCatalog,
 } from './cc-switch.client.js';
 import type { PrismaService } from '../prisma/prisma.service.js';
 import type { RunnerAdapter } from '../runner/runner.types.js';
@@ -62,6 +63,17 @@ function createProviderSwitchPrisma(activeTurn: { id: string } | null = null) {
 }
 
 describe('cc-switch integration', () => {
+  it.each([
+    ['openai-official', false],
+    ['openai-compatible', false],
+    ['codex-official', false],
+    ['codex-compatible', false],
+    ['internal', true],
+    [' custom-provider ', true],
+  ])('applies the model catalog policy for provider ID %j', (providerId, shouldEnsure) => {
+    expect(shouldEnsureCodexModelCatalog(providerId)).toBe(shouldEnsure);
+  });
+
   it('adds the Codex model catalog reference at the top of a third-party config', () => {
     const config = '# cc-switch config\nmodel_provider = "custom"\n';
 
