@@ -79,7 +79,7 @@ export interface ChannelPluginContext {
   listSessionsForProject(userId: string, projectId: string): Promise<unknown>;
   createSessionForProject(userId: string, projectId: string, input: CreateSessionBody): Promise<unknown>;
   updateSessionForUser(userId: string, sessionId: string, input: UpdateSessionBody): Promise<unknown>;
-  getSessionHistoryForUser(userId: string, sessionId: string): Promise<unknown>;
+  getSessionHistoryForUser(userId: string, sessionId: string, query?: { before?: number; limit?: number }): Promise<unknown>;
   deleteSessionForUser(userId: string, sessionId: string): Promise<void>;
   forkSessionForUser(userId: string, sessionId: string, input: ForkSessionBody): Promise<unknown>;
   compactSessionForUser(userId: string, sessionId: string): Promise<unknown>;
@@ -123,6 +123,7 @@ export interface ChannelPluginContext {
     turnId: string,
     sinceSeq: number,
     limit?: number,
+    untilSeq?: number,
   ): Promise<Array<{ seq: number; type: string; payload: unknown; turnId: string; createdAt: Date }>>;
   getLatestDiffForTurn(userId: string, turnId: string): Promise<unknown>;
   getCommandOutputForTurn(userId: string, turnId: string, input: CommandOutputQuery): Promise<unknown>;

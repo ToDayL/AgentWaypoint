@@ -10,6 +10,10 @@ const RunnerEventParamsSchema = z.object({
 const RunnerEventBodySchema = z.object({
   type: z.enum([
     'turn.started',
+    'assistant.message.started',
+    'assistant.message.completed',
+    'user.message.accepted',
+    'turn.input.updated',
     'assistant.delta',
     'turn.approval.requested',
     'turn.approval.resolved',

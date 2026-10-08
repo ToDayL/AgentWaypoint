@@ -1,5 +1,9 @@
 export type StreamEventType =
   | 'turn.started'
+  | 'assistant.message.started'
+  | 'assistant.message.completed'
+  | 'user.message.accepted'
+  | 'turn.input.updated'
   | 'assistant.delta'
   | 'turn.approval.requested'
   | 'turn.approval.resolved'

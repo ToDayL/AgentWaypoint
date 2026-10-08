@@ -34,6 +34,7 @@ import { EditorView } from '@codemirror/view';
 import {
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Eye,
   EyeOff,
   File,
@@ -42,6 +43,7 @@ import {
   FolderTree,
   GitFork,
   Info,
+  ListTree,
   Menu,
   Paperclip,
   Pin,
@@ -61,7 +63,9 @@ import { Diff, Hunk, parseDiff } from 'react-diff-view';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
+import { applyHistoryEvent, applyInputEvent, eventInMessageRange, mergeHistoryMessages, mergeQueuedInput, type ChatMessage, type QueuedInput } from './history-messages';
 import { TerminalPanel } from '../components/terminal/TerminalPanel';
+import { requestId } from '../components/terminal/terminal-client';
 import {
   findTargetToolTimelineIndex,
   isCommandToolKind,
@@ -105,15 +109,10 @@ type AvailableModel = {
   defaultEffort: string | null;
 };
 
-type ChatMessage = {
-  id: string;
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  createdAt: string;
-};
-
 type TurnSummary = {
   id: string;
+  historyVersion?: number;
+  eventCursor?: number;
   backend: string | null;
   status: string;
   requestedBackendConfig: Record<string, unknown> | null;
@@ -133,6 +132,9 @@ type TurnSummary = {
 };
 
 type SessionHistory = {
+  pendingInputs?: QueuedInput[];
+  hasMore?: boolean;
+  nextBefore?: number | null;
   session: Session;
   messages: ChatMessage[];
   turns: TurnSummary[];
@@ -635,6 +637,10 @@ const INTEGRATION_CREATE_OPTIONS: Array<{ provider: string; label: string }> = [
 
 const STREAM_EVENTS = [
   'turn.started',
+  'assistant.message.started',
+  'assistant.message.completed',
+  'user.message.accepted',
+  'turn.input.updated',
   'assistant.delta',
   'turn.approval.requested',
   'turn.approval.resolved',
@@ -758,6 +764,8 @@ export default function HomePage() {
   const [ccSwitchClaudeDraft, setCcSwitchClaudeDraft] = useState('claude-official');
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
+  const selectedSessionIdRef = useRef(selectedSessionId);
+  selectedSessionIdRef.current = selectedSessionId;
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState('My Workspace');
   const [newProjectRepoPath, setNewProjectRepoPath] = useState('');
@@ -801,6 +809,18 @@ export default function HomePage() {
   const [inspectedTurnId, setInspectedTurnId] = useState('');
   const [turnEventsLoading, setTurnEventsLoading] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [queuedInputs, setQueuedInputs] = useState<QueuedInput[]>([]);
+  const [historyBefore, setHistoryBefore] = useState<number | null>(null);
+  const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
+  const inspectedMessageRef = useRef<ChatMessage | null>(null);
+  const messageHistoryTurnsRef = useRef(new Set<string>());
+  const timelineLastSeqRef = useRef(0);
+  const [timelineMode, setTimelineMode] = useState<'live' | 'message' | 'turn'>('live');
+  const followTimelineRef = useRef(true);
+  const liveTimelineNeedsResetRef = useRef(false);
+  const timelineRequestIdRef = useRef(0);
+  const timelineLoadBufferRef = useRef<StreamEnvelope[] | null>(null);
+
   const [turns, setTurns] = useState<TurnSummary[]>([]);
   const [assistantText, setAssistantText] = useState('');
   const [reasoningText, setReasoningText] = useState('');
@@ -1000,8 +1020,10 @@ export default function HomePage() {
       : null);
   const commandSuggestionMode: CommandSuggestionMode = effectiveBackend === 'claude' ? 'claude-slash' : 'codex-skill';
   const displayedMessages = useMemo(() => {
-    const base = messages.map((message) => ({ ...message, streaming: false }));
-    if (!streamBubbleTurnId) {
+    const base = messages.filter((message) => message.role !== 'assistant' || message.state === 'streaming' || message.content.length > 0)
+      .map((message) => ({ ...message, streaming: message.state === 'streaming' }));
+    if (!streamBubbleTurnId || turns.some((turn) => turn.id === streamBubbleTurnId && turn.historyVersion === 2) ||
+      messages.some((message) => message.turnId === streamBubbleTurnId && message.backendItemId)) {
       return base;
     }
 
@@ -1012,10 +1034,11 @@ export default function HomePage() {
         role: 'assistant' as const,
         content: assistantText.length > 0 ? assistantText : streamActive ? '_Thinking..._' : '',
         createdAt: new Date().toISOString(),
+        turnId: streamBubbleTurnId,
         streaming: streamActive,
       },
     ];
-  }, [messages, assistantText, streamBubbleTurnId, streamActive]);
+  }, [messages, turns, assistantText, streamBubbleTurnId, streamActive]);
   const hiddenMessageCount = Math.max(0, displayedMessages.length - visibleMessageCount);
   const visibleMessages = useMemo(() => {
     if (hiddenMessageCount === 0) {
@@ -1023,6 +1046,11 @@ export default function HomePage() {
     }
     return displayedMessages.slice(hiddenMessageCount);
   }, [displayedMessages, hiddenMessageCount]);
+  const liveTurnId = activeTurnId || (streamActive ? streamBubbleTurnId : '');
+  const lastDisplayedMessage = displayedMessages.at(-1);
+  const activeAssistantMessageId = liveTurnId && lastDisplayedMessage?.role === 'assistant' &&
+    lastDisplayedMessage.streaming && lastDisplayedMessage.turnId === liveTurnId ? lastDisplayedMessage.id : '';
+  const pendingInputs = queuedInputs.filter((input) => input.status !== 'accepted');
   const timelineVirtualView = useMemo(() => {
     const measuredHeights = timelineRowHeightsRef.current;
     const viewportHeight = Math.max(timelineViewportHeight, TIMELINE_ESTIMATED_ROW_HEIGHT);
@@ -1135,6 +1163,12 @@ export default function HomePage() {
   }, [flushPendingTimelineEvents]);
   const queueTimelineEvent = useCallback(
     (envelope: StreamEnvelope): void => {
+      if (timelineLoadBufferRef.current) {
+        timelineLoadBufferRef.current.push(envelope);
+        return;
+      }
+      if (envelope.seq <= timelineLastSeqRef.current) return;
+      timelineLastSeqRef.current = envelope.seq;
       pendingTimelineEventsRef.current.push(envelope);
       if (pendingTimelineEventsRef.current.length >= TIMELINE_BATCH_MAX_EVENTS) {
         flushPendingTimelineEvents();
@@ -1147,6 +1181,7 @@ export default function HomePage() {
   const replaceTimelineEvents = useCallback(
     (events: TimelineEvent[]): void => {
       clearPendingTimelineBatch();
+      timelineLastSeqRef.current = events.reduce((max, event) => Math.max(max, event.seqEnd), 0);
       setTimelineEvents(events);
     },
     [clearPendingTimelineBatch],
@@ -1234,6 +1269,7 @@ export default function HomePage() {
   const isAdmin = currentUserRole === 'admin';
   const turnIdByMessageId = useMemo(() => {
     const map = new Map<string, string>();
+    messages.forEach((message) => { if (message.turnId) map.set(message.id, message.turnId); });
     turns.forEach((turn) => {
       if (typeof turn.userMessageId === 'string' && turn.userMessageId.trim().length > 0) {
         map.set(turn.userMessageId, turn.id);
@@ -1243,7 +1279,7 @@ export default function HomePage() {
       }
     });
     return map;
-  }, [turns]);
+  }, [turns, messages]);
   const configFullscreenActive =
     leftSidebarTab === 'config' && (leftSidebarMode !== 'closed' || mobileLeftSidebarOpen);
   const shellGridClassName = [
@@ -1826,7 +1862,7 @@ export default function HomePage() {
       return;
     }
     container.scrollTop = container.scrollHeight;
-  }, [visibleMessages]);
+  }, [visibleMessages, liveTurnId, activeAssistantMessageId]);
 
   useEffect(() => {
     const previousCount = previousDisplayedMessageCountRef.current;
@@ -2084,6 +2120,8 @@ export default function HomePage() {
       setSelectedProjectId('');
       setSelectedSessionId('');
       setMessages([]);
+      setQueuedInputs([]);
+      setHistoryBefore(null);
       setTurns([]);
       replaceTimelineEvents([]);
       replaceAssistantText('');
@@ -3137,6 +3175,40 @@ export default function HomePage() {
     }
   }
 
+  async function submitQueuedInput(input: QueuedInput): Promise<void> {
+    const sessionId = selectedSessionId;
+    setQueuedInputs((current) => mergeQueuedInput(current, input));
+    try {
+      const result = await apiRequest<TurnStatusResponse & { input: QueuedInput }>(
+        `/api/channels/plugins/web/app/turns/${input.turnId}/steer`,
+        { method: 'POST', body: { content: input.content, clientRequestId: input.clientRequestId } },
+      );
+      if (selectedSessionIdRef.current === sessionId) setQueuedInputs((current) => mergeQueuedInput(current, result.input));
+    } catch (error: unknown) {
+      if (selectedSessionIdRef.current === sessionId) setQueuedInputs((current) => mergeQueuedInput(current, {
+        ...input, status: 'unconfirmed', errorMessage: extractMessage(error),
+      }));
+    }
+  }
+
+  async function loadMoreHistory(): Promise<void> {
+    if (historyBefore === null || historyLoadingMore) return;
+    const sessionId = selectedSessionId;
+    setHistoryLoadingMore(true);
+    try {
+      const history = await apiRequest<SessionHistory>(
+        `/api/channels/plugins/web/app/sessions/${sessionId}/history?limit=${CHAT_VISIBLE_MESSAGE_STEP}&before=${historyBefore}`,
+        { method: 'GET' },
+      );
+      if (selectedSessionIdRef.current !== sessionId) return;
+      setMessages((current) => mergeHistoryMessages(current, history.messages));
+      setHistoryBefore(history.nextBefore ?? null);
+      setVisibleMessageCount((current) => current + history.messages.length);
+      suppressBottomAutoCollapseRef.current = true;
+    } catch (error: unknown) { setError(extractMessage(error)); }
+    finally { setHistoryLoadingMore(false); }
+  }
+
   async function handleSendTurn(content: string): Promise<void> {
     const userContent = content.trim();
     if (!userContent || (!canStartTurn && !canSteerTurn)) {
@@ -3150,27 +3222,20 @@ export default function HomePage() {
 
     try {
       if (canSteerTurn && activeTurnId) {
-        const steerContent = userContent;
-        const optimisticMessageId = `steer-${Date.now()}`;
-        setMessages((current) => [
-          ...current,
-          {
-            id: optimisticMessageId,
-            role: 'user',
-            content: steerContent,
-            createdAt: new Date().toISOString(),
-          },
-        ]);
-        setComposerPrompt('');
-        try {
+        if (messageHistoryTurnsRef.current.has(activeTurnId)) {
+          const clientRequestId = requestId();
+          const queued: QueuedInput = {
+            id: clientRequestId, clientRequestId, turnId: activeTurnId,
+            content: userContent, status: 'queued', createdAt: new Date().toISOString(),
+          };
+          setComposerPrompt('');
+          await submitQueuedInput(queued);
+        } else {
           await apiRequest<TurnStatusResponse>(`/api/channels/plugins/web/app/turns/${activeTurnId}/steer`, {
-            method: 'POST',
-            body: { content: steerContent },
+            method: 'POST', body: { content: userContent },
           });
-        } catch {
-          setMessages((current) => current.filter((message) => message.id !== optimisticMessageId));
-          setComposerPrompt(steerContent, { focus: true });
-          throw new Error('Failed to steer the current turn');
+          setComposerPrompt('');
+          await loadSessionHistory(selectedSessionId, { resumeStream: true, resetEventLog: false, resetInspectPanel: false });
         }
         return;
       }
@@ -3197,6 +3262,11 @@ export default function HomePage() {
       setStreamActive(true);
       const pendingBubbleId = `pending-${Date.now()}`;
       setStreamBubbleTurnId(pendingBubbleId);
+      inspectedTurnIdRef.current = '';
+      inspectedMessageRef.current = null;
+      followTimelineRef.current = true;
+      setTimelineMode('live');
+      liveTimelineNeedsResetRef.current = false;
       const createTurnController = new AbortController();
       pendingTurnCreateAbortRef.current = createTurnController;
 
@@ -3339,16 +3409,17 @@ export default function HomePage() {
     return Math.max(turnStreamCursorRef.current[normalizedTurnId] ?? 0, 0);
   }
 
-  async function fetchTurnEventSnapshot(turnId: string): Promise<TurnEventSnapshot> {
+  async function fetchTurnEventSnapshot(turnId: string, range?: { since?: number; until?: number }): Promise<TurnEventSnapshot> {
     const normalizedTurnId = turnId.trim();
     const pageSize = 250;
     const normalizedEvents: StreamEnvelope[] = [];
-    let cursor = 0;
+    let cursor = range?.since ?? 0;
     while (true) {
       const events = await apiRequest<TurnEventHistoryItem[]>(
         `/api/channels/plugins/web/app/turns/${normalizedTurnId}/events?${new URLSearchParams({
           since: String(cursor),
           limit: String(pageSize),
+          ...(range?.until !== undefined ? { until: String(range.until) } : {}),
         }).toString()}`,
         {
           method: 'GET',
@@ -3365,8 +3436,23 @@ export default function HomePage() {
       cursor = nextCursor;
     }
     const snapshot = buildTurnEventSnapshot(normalizedEvents);
-    rememberTurnStreamCursor(normalizedTurnId, snapshot.latestSeq);
     return snapshot;
+  }
+
+  async function loadTimelineSnapshot(turnId: string, range?: { since?: number; until?: number }): Promise<TurnEventSnapshot | null> {
+    const requestId = ++timelineRequestIdRef.current;
+    timelineLoadBufferRef.current = [];
+    try {
+      const snapshot = await fetchTurnEventSnapshot(turnId, range);
+      if (timelineRequestIdRef.current !== requestId) return null;
+      const buffered = timelineLoadBufferRef.current ?? [];
+      snapshot.timelineEvents = buffered.filter((event) => event.seq > snapshot.latestSeq)
+        .reduce((events, event) => mergeTimelineEvent(events, event), snapshot.timelineEvents);
+      snapshot.latestSeq = buffered.reduce((latest, event) => Math.max(latest, event.seq), snapshot.latestSeq);
+      return snapshot;
+    } finally {
+      if (timelineRequestIdRef.current === requestId) timelineLoadBufferRef.current = null;
+    }
   }
 
   async function loadSessionHistory(
@@ -3375,6 +3461,8 @@ export default function HomePage() {
   ): Promise<void> {
     const requestId = sessionHistoryRequestRef.current + 1;
     sessionHistoryRequestRef.current = requestId;
+    timelineRequestIdRef.current += 1;
+    timelineLoadBufferRef.current = null;
     const isCurrentRequest = (): boolean => sessionHistoryRequestRef.current === requestId;
 
     if (!sessionId) {
@@ -3406,20 +3494,30 @@ export default function HomePage() {
     eventSourceRef.current = null;
     setError('');
     try {
-      const history = await apiRequest<SessionHistory>(`/api/channels/plugins/web/app/sessions/${sessionId}/history`, {
+      const history = await apiRequest<SessionHistory>(`/api/channels/plugins/web/app/sessions/${sessionId}/history?limit=${CHAT_VISIBLE_MESSAGE_STEP}`, {
         method: 'GET',
       });
       if (!isCurrentRequest()) {
         return;
       }
-      setMessages(history.messages);
+      const cursors = new Map(history.turns.map((turn) => [turn.id, turn.eventCursor ?? 0]));
+      const loadedMessages = history.messages.map((message) => ({ ...message, lastEventSeq: cursors.get(message.turnId ?? '') ?? 0 }));
+      setMessages(loadedMessages);
+      setHistoryBefore(history.nextBefore ?? null);
+      setQueuedInputs(history.pendingInputs ?? []);
+      messageHistoryTurnsRef.current = new Set(history.turns.filter((turn) => turn.historyVersion === 2).map((turn) => turn.id));
       setTurns(history.turns);
       setTurnStatus(history.activeTurnStatus ?? 'idle');
       const latestTurn = history.turns[history.turns.length - 1] ?? null;
       setContextRemainingRatio(latestTurn?.contextRemainingRatio ?? null);
       setActiveTurnId(history.activeTurnId ?? '');
       setPendingApproval(null);
-      let streamSince = history.activeTurnId ? getTurnStreamCursor(history.activeTurnId) : 0;
+      const messageHistory = messageHistoryTurnsRef.current.has(history.activeTurnId ?? '');
+      let streamSince = messageHistory ? cursors.get(history.activeTurnId ?? '') ?? 0 :
+        history.activeTurnId ? getTurnStreamCursor(history.activeTurnId) : 0;
+      if (messageHistory && history.activeTurnId) {
+        turnStreamCursorRef.current[history.activeTurnId] = streamSince;
+      }
       let sawNonReasoningAssistantDelta = false;
       if (history.activeTurnId) {
         setStreamBubbleTurnId(history.activeTurnId);
@@ -3436,23 +3534,32 @@ export default function HomePage() {
         const nextInspectedTurnId = history.activeTurnId ?? latestTurn?.id ?? '';
         setInspectedTurnId(nextInspectedTurnId);
         inspectedTurnIdRef.current = nextInspectedTurnId;
+        followTimelineRef.current = Boolean(history.activeTurnId);
+        setTimelineMode(history.activeTurnId ? 'live' : 'message');
+        const latestMessage = [...loadedMessages].reverse().find((message) => message.turnId === nextInspectedTurnId && message.role === 'assistant' && message.backendItemId) ?? null;
+        inspectedMessageRef.current = history.activeTurnId ? null : latestMessage;
       }
       if (options.resetEventLog) {
         replaceTimelineEvents([]);
       }
       if (history.activeTurnId) {
         if (options.resetEventLog || options.resetInspectPanel) {
-          const snapshot = await fetchTurnEventSnapshot(history.activeTurnId);
-          if (!isCurrentRequest()) {
+          const selectedMessage = inspectedMessageRef.current;
+          const lastCompleted = [...loadedMessages].reverse().find((message) => message.turnId === history.activeTurnId && message.role === 'assistant' && message.endEventSeq != null);
+          const snapshot = await loadTimelineSnapshot(history.activeTurnId, selectedMessage ? {
+            since: selectedMessage.timelineStartSeq ?? 0,
+            ...(selectedMessage.endEventSeq != null ? { until: selectedMessage.endEventSeq } : {}),
+          } : messageHistory && followTimelineRef.current ? { since: lastCompleted?.endEventSeq ?? 0 } : undefined);
+          if (!isCurrentRequest() || !snapshot) {
             return;
           }
-          streamSince = Math.max(streamSince, snapshot.latestSeq);
+          if (!messageHistory) streamSince = Math.max(streamSince, snapshot.latestSeq);
           sawNonReasoningAssistantDelta = snapshot.sawNonReasoningAssistantDelta;
           if (options.resetEventLog) {
             replaceTimelineEvents(snapshot.timelineEvents);
           }
           if (options.resetInspectPanel) {
-            replaceAssistantText(snapshot.assistantText);
+            if (!messageHistory) replaceAssistantText(snapshot.assistantText);
             setReasoningText(snapshot.reasoningText);
             setLatestPlan(snapshot.latestPlan);
           }
@@ -3576,8 +3683,10 @@ export default function HomePage() {
     flushPendingTimelineEvents();
     flushPendingAssistantText();
     eventSourceRef.current?.close();
-    inspectedTurnIdRef.current = turnId;
-    setInspectedTurnId(turnId);
+    if (!inspectedTurnIdRef.current) {
+      inspectedTurnIdRef.current = turnId;
+      setInspectedTurnId(turnId);
+    }
     const since = Math.max(options?.since ?? getTurnStreamCursor(turnId), 0);
     const query = since > 0 ? `?${new URLSearchParams({ since: String(since) }).toString()}` : '';
     const streamUrl = `/api/channels/plugins/web/app/turns/${turnId}/stream${query}`;
@@ -3585,6 +3694,7 @@ export default function HomePage() {
     eventSourceRef.current = source;
     let sawNonReasoningAssistantDelta = options?.initialSawNonReasoningAssistantDelta === true;
     let disconnected = false;
+    let appliedSeq = since;
 
     const finishStream = (status: string): void => {
       if (eventSourceRef.current !== source) {
@@ -3614,10 +3724,31 @@ export default function HomePage() {
         }
         const message = evt as MessageEvent<string>;
         const envelope = JSON.parse(message.data) as StreamEnvelope;
+        if (envelope.seq <= appliedSeq) return;
+        appliedSeq = envelope.seq;
         rememberTurnStreamCursor(envelope.turnId, envelope.seq);
+        setMessages((current) => applyHistoryEvent(current, envelope));
+        setQueuedInputs((current) => applyInputEvent(current, envelope));
+        if (envelope.payload.historyVersion === 2 || envelope.type.startsWith('assistant.message.')) {
+          messageHistoryTurnsRef.current.add(envelope.turnId);
+          setTurns((current) => current.map((turn) => turn.id === envelope.turnId ? { ...turn, historyVersion: 2 } : turn));
+        }
+        const selectedMessage = inspectedMessageRef.current;
+        const updatedMessage = envelope.payload.message as ChatMessage | undefined;
+        if (selectedMessage && updatedMessage?.id === selectedMessage.id) {
+          inspectedMessageRef.current = updatedMessage;
+        }
         const selectedTurnId = inspectedTurnIdRef.current.trim();
-        const shouldUpdateInspectPanel = !selectedTurnId || selectedTurnId === envelope.turnId;
+        const shouldUpdateTurnPanel = !selectedTurnId || selectedTurnId === envelope.turnId;
+        const shouldUpdateInspectPanel = shouldUpdateTurnPanel && eventInMessageRange(inspectedMessageRef.current, envelope.seq);
         if (shouldUpdateInspectPanel) {
+          if (followTimelineRef.current && messageHistoryTurnsRef.current.has(envelope.turnId)) {
+            if (liveTimelineNeedsResetRef.current && !['turn.input.updated', 'turn.completed', 'turn.failed', 'turn.cancelled'].includes(envelope.type)) {
+              replaceTimelineEvents([]);
+              liveTimelineNeedsResetRef.current = false;
+            }
+            if (envelope.type === 'assistant.message.completed') liveTimelineNeedsResetRef.current = true;
+          }
           if (!selectedTurnId) {
             inspectedTurnIdRef.current = envelope.turnId;
             setInspectedTurnId(envelope.turnId);
@@ -3625,7 +3756,7 @@ export default function HomePage() {
           queueTimelineEvent(envelope);
         }
 
-        if (envelope.type === 'assistant.delta') {
+        if (envelope.type === 'assistant.delta' && typeof envelope.payload.itemId !== 'string') {
           const delta = envelope.payload.text;
           if (typeof delta === 'string') {
             const isReasoningDelta = envelope.payload.isReasoning === true;
@@ -3647,7 +3778,7 @@ export default function HomePage() {
           setLatestPlan(formatPlanPayload(envelope.payload));
         }
 
-        if (envelope.type === 'diff.updated' && shouldUpdateInspectPanel) {
+        if (envelope.type === 'diff.updated' && shouldUpdateTurnPanel) {
           setDiffStale(true);
         }
 
@@ -3703,7 +3834,7 @@ export default function HomePage() {
         }
 
         if (envelope.type === 'turn.completed' || envelope.type === 'turn.failed' || envelope.type === 'turn.cancelled') {
-          if (envelope.type === 'turn.completed' && !sawNonReasoningAssistantDelta) {
+          if (envelope.type === 'turn.completed' && !messageHistoryTurnsRef.current.has(envelope.turnId) && !sawNonReasoningAssistantDelta) {
             const completedContent = typeof envelope.payload.content === 'string' ? envelope.payload.content : '';
             appendCompletedAssistantText(completedContent);
           }
@@ -4074,12 +4205,15 @@ export default function HomePage() {
     setRightSidebarMode((current) => (current === 'closed' ? 'pop' : current));
   }
 
-  async function inspectTurnEvents(turnId: string): Promise<void> {
+  async function inspectTurnEvents(turnId: string, message: ChatMessage | null = null): Promise<void> {
     const normalizedTurnId = turnId.trim();
     if (!normalizedTurnId) {
       return;
     }
     inspectedTurnIdRef.current = normalizedTurnId;
+    inspectedMessageRef.current = message;
+    followTimelineRef.current = false;
+    setTimelineMode(message ? 'message' : 'turn');
     setInspectedTurnId(normalizedTurnId);
     setTurnEventsLoading(true);
     replaceTimelineEvents([]);
@@ -4087,20 +4221,23 @@ export default function HomePage() {
     openInsightsPanel('events');
 
     try {
-      const snapshot = await fetchTurnEventSnapshot(normalizedTurnId);
-      if (inspectedTurnIdRef.current !== normalizedTurnId) {
+      const snapshot = await loadTimelineSnapshot(normalizedTurnId, message ? {
+        since: message.timelineStartSeq ?? 0,
+        ...(message.endEventSeq != null ? { until: message.endEventSeq } : {}),
+      } : undefined);
+      if (!snapshot || inspectedTurnIdRef.current !== normalizedTurnId || inspectedMessageRef.current?.id !== message?.id) {
         return;
       }
       replaceTimelineEvents(snapshot.timelineEvents);
     } catch (requestError) {
-      if (inspectedTurnIdRef.current !== normalizedTurnId) {
+      if (inspectedTurnIdRef.current !== normalizedTurnId || inspectedMessageRef.current?.id !== message?.id) {
         return;
       }
       setError(extractMessage(requestError));
       replaceTimelineEvents([]);
       setLatestDiffSummary('');
     } finally {
-      if (inspectedTurnIdRef.current === normalizedTurnId) {
+      if (inspectedTurnIdRef.current === normalizedTurnId && inspectedMessageRef.current?.id === message?.id) {
         setTurnEventsLoading(false);
       }
     }
@@ -4108,17 +4245,23 @@ export default function HomePage() {
 
   async function reconnectStreamingTimeline(): Promise<void> {
     const liveTurnId = (streamBubbleTurnId || activeTurnId).trim();
-    if (!liveTurnId) {
-      return;
-    }
-    await inspectTurnEvents(liveTurnId);
-    const sessionId = selectedSessionId.trim();
-    if (!sessionId || eventSourceRef.current || TERMINAL_TURN_STATUSES.has(turnStatus)) {
-      return;
-    }
-    setResumedTurnHint(`Resumed in-flight turn: ${liveTurnId}`);
-    setStreamActive(true);
-    openStream(liveTurnId, sessionId);
+    if (!liveTurnId) return;
+    inspectedTurnIdRef.current = liveTurnId;
+    inspectedMessageRef.current = null;
+    followTimelineRef.current = true;
+    setTimelineMode('live');
+    setInspectedTurnId(liveTurnId);
+    setTurnEventsLoading(true);
+    replaceTimelineEvents([]);
+    openInsightsPanel('events');
+    const lastCompleted = [...messages].reverse().find((message) => message.turnId === liveTurnId && message.role === 'assistant' && message.endEventSeq != null);
+    try {
+      const snapshot = await loadTimelineSnapshot(liveTurnId, { since: lastCompleted?.endEventSeq ?? 0 });
+      if (!snapshot || inspectedTurnIdRef.current !== liveTurnId || !followTimelineRef.current) return;
+      replaceTimelineEvents(snapshot.timelineEvents);
+      liveTimelineNeedsResetRef.current = snapshot.timelineEvents.at(-1)?.kind === 'assistant' && snapshot.timelineEvents.at(-1)?.status === 'completed';
+    } catch (error: unknown) { setError(extractMessage(error)); }
+    finally { setTurnEventsLoading(false); }
   }
 
   async function toggleProjectExpansion(projectId: string): Promise<void> {
@@ -5745,16 +5888,17 @@ export default function HomePage() {
             {!configFullscreenActive ? <section className="chat-pane">
               <div className="chat-thread" ref={chatThreadRef} onScroll={handleChatScroll}>
                 {displayedMessages.length === 0 ? <p className="chat-empty">No messages yet.</p> : null}
-                {hiddenMessageCount > 0 ? (
+                {hiddenMessageCount > 0 || historyBefore !== null ? (
                   <button
                     type="button"
                     className="button-secondary chat-show-more"
                     onClick={() => {
                       suppressBottomAutoCollapseRef.current = true;
-                      setVisibleMessageCount((current) => Math.min(current + CHAT_VISIBLE_MESSAGE_STEP, displayedMessages.length));
+                      if (hiddenMessageCount > 0) setVisibleMessageCount((current) => Math.min(current + CHAT_VISIBLE_MESSAGE_STEP, displayedMessages.length));
+                      else void loadMoreHistory();
                     }}
                   >
-                    Show More
+                    {historyLoadingMore ? 'Loading...' : 'Show More'}
                   </button>
                 ) : null}
                 {visibleMessages.map((message) => (
@@ -5772,42 +5916,21 @@ export default function HomePage() {
                     >
                       <header className="chat-message-meta">
                         <span>{message.role === 'user' ? 'You' : 'Assistant'}</span>
+                        {message.state === 'interrupted' ? <span className="status-pill">interrupted</span> : null}
                         <div className="chat-message-meta-right">
-                          {'streaming' in message && message.streaming ? (
-                            <div className="chat-streaming-actions">
-                              <span className="status-pill">streaming</span>
-                              <button
-                                type="button"
-                                className="button-secondary"
-                                onClick={() => void handleCancelTurn()}
-                                disabled={!activeTurnId || busy}
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          ) : null}
-                          {'streaming' in message &&
-                          message.streaming &&
-                          message.role === 'assistant' &&
-                          (streamBubbleTurnId || activeTurnId) ? (
+                          {message.id === activeAssistantMessageId ? (
+                            <ChatTurnActions
+                              status={turnStatus === 'waiting_approval' ? 'Waiting for approval' : 'streaming'}
+                              onCancel={() => void handleCancelTurn()}
+                              onInspect={() => void reconnectStreamingTimeline()}
+                              cancelDisabled={!activeTurnId || busy}
+                              loading={turnEventsLoading}
+                            />
+                          ) : message.role === 'assistant' && turnIdByMessageId.get(message.id) ? (
                             <button
                               type="button"
                               className="chat-inspect-button"
-                              onClick={() => void reconnectStreamingTimeline()}
-                              disabled={turnEventsLoading}
-                              aria-label={turnEventsLoading ? 'Loading timeline' : 'Reconnect timeline'}
-                              title={turnEventsLoading ? 'Loading timeline' : 'Reconnect timeline'}
-                            >
-                              <Info />
-                            </button>
-                          ) : null}
-                          {!('streaming' in message && message.streaming) &&
-                          message.role === 'assistant' &&
-                          turnIdByMessageId.get(message.id) ? (
-                            <button
-                              type="button"
-                              className="chat-inspect-button"
-                              onClick={() => void inspectTurnEvents(turnIdByMessageId.get(message.id) ?? '')}
+                              onClick={() => void inspectTurnEvents(turnIdByMessageId.get(message.id) ?? '', message.backendItemId ? message : null)}
                               disabled={turnEventsLoading}
                               aria-label={turnEventsLoading ? 'Loading timeline' : 'Inspect timeline'}
                               title={turnEventsLoading ? 'Loading timeline' : 'Inspect timeline'}
@@ -5818,7 +5941,7 @@ export default function HomePage() {
                         </div>
                       </header>
                       <div className="chat-markdown">
-                        <ChatMessageMarkdown content={message.content} />
+                        <ChatMessageMarkdown content={message.content || (message.state === 'streaming' ? '_Thinking..._' : '')} />
                       </div>
                     </article>
                     {message.role === 'assistant' && !('streaming' in message && message.streaming) ? (
@@ -5828,6 +5951,23 @@ export default function HomePage() {
                     ) : null}
                   </div>
                 ))}
+                {liveTurnId && !activeAssistantMessageId ? (
+                  <div className="chat-message-row chat-message-row-assistant">
+                    <article className="chat-message chat-message-assistant">
+                      <header className="chat-message-meta">
+                        <span>Assistant</span>
+                        <ChatTurnActions
+                          status={turnStatus === 'waiting_approval' ? 'Waiting for approval' : 'Working...'}
+                          onCancel={() => void handleCancelTurn()}
+                          onInspect={() => void reconnectStreamingTimeline()}
+                          cancelDisabled={!activeTurnId || busy}
+                          loading={turnEventsLoading}
+                        />
+                      </header>
+                      <p className="chat-working-placeholder">Thinking...</p>
+                    </article>
+                  </div>
+                ) : null}
               </div>
 
               {pendingApproval ? (
@@ -5920,20 +6060,31 @@ export default function HomePage() {
                   void handleFileInputChange(event);
                 }}
               />
-              <ChatComposer
-                ref={chatComposerRef}
-                availableSkills={availableSkills}
-                busy={busy}
-                canStartTurn={canStartTurn}
-                canSteerTurn={canSteerTurn}
-                commandSuggestionMode={commandSuggestionMode}
-                draftRef={promptDraftRef}
-                onOpenUploadDialog={handleComposerOpenUpload}
-                onSubmit={handleComposerSubmit}
-                uploadError={uploadError}
-                uploadingFiles={uploadingFiles}
-                workspaceAvailable={!!activeWorkspacePath}
-              />
+              <div className="chat-composer-dock">
+                {pendingInputs.length > 0 ? (
+                  <PendingInputsPanel
+                    key={selectedSessionId}
+                    inputs={pendingInputs}
+                    activeTurnId={activeTurnId}
+                    onCheckDelivery={(input) => void submitQueuedInput(input)}
+                    onCopyToInput={(input) => setComposerPrompt(input.content, { focus: true })}
+                  />
+                ) : null}
+                <ChatComposer
+                  ref={chatComposerRef}
+                  availableSkills={availableSkills}
+                  busy={busy}
+                  canStartTurn={canStartTurn}
+                  canSteerTurn={canSteerTurn}
+                  commandSuggestionMode={commandSuggestionMode}
+                  draftRef={promptDraftRef}
+                  onOpenUploadDialog={handleComposerOpenUpload}
+                  onSubmit={handleComposerSubmit}
+                  uploadError={uploadError}
+                  uploadingFiles={uploadingFiles}
+                  workspaceAvailable={!!activeWorkspacePath}
+                />
+              </div>
             </section> : null}
 
             {!configFullscreenActive && (rightSidebarMode !== 'closed' || mobileInsightsOpen) ? (
@@ -5968,10 +6119,22 @@ export default function HomePage() {
                   <button type="button" className={insightsTab === 'detail' ? 'tab-active' : ''} onClick={() => openInsightsPanel('detail')}>
                     Detail
                   </button>
+                  {insightsTab === 'events' && inspectedTurnId && timelineMode !== 'turn' ? (
+                    <button
+                      type="button"
+                      className="icon-button insights-scope-button"
+                      onClick={() => void inspectTurnEvents(inspectedTurnId)}
+                      disabled={turnEventsLoading}
+                      aria-label="Entire turn"
+                      title="View entire turn"
+                    >
+                      <ListTree />
+                    </button>
+                  ) : null}
                 </div>
                 <div className="insights-content">
                   {insightsTab === 'preview' ? previewPanelView : null}
-                  {insightsTab === 'diff' ? diffPanelView : null}
+                  {insightsTab === 'diff' ? <><p className="timeline-empty">Changes for the entire turn</p>{diffPanelView}</> : null}
                   {insightsTab === 'detail' ? commandDetailPanelView : null}
                   {insightsTab === 'events' ? (
                     <div className="timeline-list" ref={timelineListRef} onScroll={handleTimelineScroll}>
@@ -6147,6 +6310,76 @@ export default function HomePage() {
         ) : null}
       </section>
     </main>
+  );
+}
+
+function ChatTurnActions({ status, onCancel, onInspect, cancelDisabled, loading }: {
+  status: string;
+  onCancel: () => void;
+  onInspect: () => void;
+  cancelDisabled: boolean;
+  loading: boolean;
+}) {
+  return (
+    <div className="chat-streaming-actions">
+      <span className="chat-turn-status" role="status">{status}</span>
+      <button type="button" className="button-secondary chat-cancel-button" onClick={onCancel} disabled={cancelDisabled}>
+        Cancel
+      </button>
+      <button
+        type="button"
+        className="chat-inspect-button"
+        onClick={onInspect}
+        disabled={loading}
+        aria-label="Live stream"
+        title={loading ? 'Loading live stream' : 'Live stream'}
+      >
+        <Info />
+      </button>
+    </div>
+  );
+}
+
+function PendingInputsPanel({ inputs, activeTurnId, onCheckDelivery, onCopyToInput }: {
+  inputs: QueuedInput[];
+  activeTurnId: string;
+  onCheckDelivery: (input: QueuedInput) => void;
+  onCopyToInput: (input: QueuedInput) => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  return (
+    <div className={`chat-queued-inputs${expanded ? '' : ' is-collapsed'}`} role="region" aria-label="Pending inputs">
+      <div className="chat-queued-inputs-head">
+        {expanded ? <span className="chat-queued-inputs-label">Pending inputs <span>{inputs.length}</span></span> : null}
+        <button
+          type="button"
+          className="chat-queued-toggle"
+          onClick={() => setExpanded((current) => !current)}
+          aria-expanded={expanded}
+          aria-controls="pending-input-list"
+          aria-label={expanded ? 'Collapse pending inputs' : 'Expand pending inputs'}
+          title={expanded ? 'Collapse pending inputs' : 'Expand pending inputs'}
+        >
+          {expanded ? <ChevronDown /> : <ChevronUp />}
+          {!expanded ? <span>{inputs.length}</span> : null}
+        </button>
+      </div>
+      <div className="chat-queued-input-list" id="pending-input-list" hidden={!expanded} aria-live="polite">
+        {inputs.map((input) => (
+          <div className="chat-queued-input" key={`${input.turnId}:${input.clientRequestId}`}>
+            {input.status !== 'queued' ? <span className="status-pill">{input.status === 'unconfirmed' ? 'Acceptance unconfirmed' : input.status}</span> : null}
+            <p>{input.content}</p>
+            {input.errorMessage ? <small>{input.errorMessage}</small> : null}
+            {input.status === 'unconfirmed' && input.turnId === activeTurnId ? (
+              <button type="button" className="button-secondary" onClick={() => onCheckDelivery(input)}>Check delivery</button>
+            ) : null}
+            {input.status === 'failed' ? (
+              <button type="button" className="button-secondary" onClick={() => onCopyToInput(input)}>Copy to input</button>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -6972,6 +7205,26 @@ function buildTurnEventSnapshot(events: StreamEnvelope[]): TurnEventSnapshot {
 }
 
 function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope): TimelineEvent[] {
+  if (envelope.payload.ignored === true || envelope.type === 'turn.input.updated') return current;
+  if (envelope.type === 'user.message.accepted') {
+    const message = envelope.payload.message as ChatMessage | undefined;
+    const id = `user-${message?.id ?? envelope.payload.itemId}`;
+    if (current.some((event) => event.id === id)) return current;
+    return [...current, {
+      id, kind: 'event', title: envelope.payload.initial === true ? 'User message' : 'Steer received',
+      seqStart: envelope.seq, seqEnd: envelope.seq, createdAt: envelope.createdAt,
+      details: message?.content ? [message.content] : [],
+    }];
+  }
+  if (envelope.type.startsWith('assistant.message.') ||
+    (envelope.type === 'assistant.delta' && typeof envelope.payload.itemId === 'string')) {
+    const id = `assistant-${envelope.payload.itemId}`;
+    const existing = current.find((event) => event.id === id);
+    const status = envelope.type === 'assistant.message.completed' ? 'completed' as const : 'running' as const;
+    if (existing) return current.map((event) => event.id === id ? { ...event, seqEnd: envelope.seq, status } : event);
+    return [...current, { id, kind: 'assistant', title: 'Assistant Message',
+      seqStart: envelope.seq, seqEnd: envelope.seq, createdAt: envelope.createdAt, details: [], status }];
+  }
   // Omit top-level wrapper events so the timeline focuses on the useful payload events.
   if (
     envelope.type === 'turn.started' ||
@@ -6982,7 +7235,7 @@ function mergeTimelineEvent(current: TimelineEvent[], envelope: StreamEnvelope):
   }
 
   if (envelope.type === 'turn.completed') {
-    const next = appendOrMergeByKindWithoutDetails(current, 'assistant', 'Assistant Message', envelope);
+    const next = envelope.payload.historyVersion === 2 ? [...current] : appendOrMergeByKindWithoutDetails(current, 'assistant', 'Assistant Message', envelope);
     next.push({
       id: `turn-completed-${envelope.seq}`,
       kind: 'event',

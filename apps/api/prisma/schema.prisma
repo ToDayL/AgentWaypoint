@@ -83,24 +83,37 @@ model Session {
 }
 
 model Message {
-  id         String   @id @default(cuid())
-  sessionId  String
-  role       String
-  content    String
-  tokenCount Int?
-  createdAt  DateTime @default(now())
-  session    Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  id               String   @id @default(cuid())
+  sessionId        String
+  role             String
+  content          String
+  tokenCount       Int?
+  createdAt        DateTime @default(now())
+  turnId           String?
+  backendItemId    String?
+  historySeq       Int?
+  state            String   @default("completed")
+  phase            String?
+  startEventSeq    Int?
+  endEventSeq      Int?
+  timelineStartSeq Int?
+  session          Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
+  @@unique([sessionId, historySeq])
+  @@unique([turnId, backendItemId])
   @@index([sessionId])
 }
 
 model Turn {
-  id                     String         @id @default(cuid())
+  id                     String            @id @default(cuid())
   sessionId              String
   userMessageId          String?
   assistantMessageId     String?
-  triggerIdentifier      String         @default("web")
-  triggerProvider        String?        @default("web")
+  historyVersion         Int               @default(1)
+  backendTurnId          String?
+  runnerCursor           Int               @default(0)
+  triggerIdentifier      String            @default("web")
+  triggerProvider        String?           @default("web")
   triggerIntegrationId   String?
   triggerMessageId       String?
   status                 String
@@ -116,13 +129,32 @@ model Turn {
   contextUpdatedAt       DateTime?
   startedAt              DateTime?
   endedAt                DateTime?
-  createdAt              DateTime       @default(now())
-  session                Session        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  createdAt              DateTime          @default(now())
+  session                Session           @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   events                 Event[]
   approvals              TurnApproval[]
   diffSnapshot           TurnDiffSnapshot?
+  inputs                 TurnInput[]
 
   @@index([sessionId])
+}
+
+model TurnInput {
+  id              String    @id @default(cuid())
+  turnId          String
+  clientRequestId String
+  content         String
+  status          String    @default("queued")
+  messageId       String?
+  backendItemId   String?
+  createdAt       DateTime  @default(now())
+  dispatchedAt    DateTime?
+  acceptedAt      DateTime?
+  errorMessage    String?
+  turn            Turn      @relation(fields: [turnId], references: [id], onDelete: Cascade)
+
+  @@unique([turnId, clientRequestId])
+  @@index([turnId, status, createdAt])
 }
 
 model TurnDiffSnapshot {
@@ -205,6 +237,7 @@ model BotMessage {
   sentAt            DateTime?
   deliveredAt       DateTime?
   eventId           String?   @unique
+  messageId         String?   @unique
   project           Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   session           Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   event             Event?    @relation(fields: [eventId], references: [id], onDelete: Cascade)

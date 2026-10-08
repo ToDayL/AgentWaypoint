@@ -207,7 +207,7 @@ export class CodexBackend {
       threadId: null,
       codexTurnId: null,
       assistantText: '',
-      pendingAgentMessageBreak: false,
+      initialUserMessageId: input.userMessageId,
       completionResolve,
       completionReject,
     };
@@ -231,6 +231,7 @@ export class CodexBackend {
 
       const turnStartResult = (await this.sendWorkerRequest(worker, 'turn/start', {
         threadId,
+        clientUserMessageId: input.userMessageId,
         input: [{ type: 'text', text: input.content, text_elements: [] }],
         ...(model ? { model } : {}),
         ...(effort ? { effort } : {}),
@@ -240,6 +241,8 @@ export class CodexBackend {
 
       await this.deps.appendTurnEvent(turn.turnId, 'turn.started', {
         threadId,
+        backendTurnId: turn.codexTurnId,
+        historyVersion: 2,
         cwd: workspaceCwd,
         ...(model ? { model } : {}),
         ...(sandbox ? { sandbox } : {}),
@@ -320,6 +323,7 @@ export class CodexBackend {
     await worker.readyPromise;
     await this.sendWorkerRequest(worker, 'turn/steer', {
       threadId: turn.threadId,
+      clientUserMessageId: input.clientRequestId,
       expectedTurnId: turn.codexTurnId,
       input: [{ type: 'text', text: input.content, text_elements: [] }],
     });
@@ -636,14 +640,10 @@ export class CodexBackend {
       if (codexTurnId && !turn.codexTurnId) {
         turn.codexTurnId = codexTurnId;
       }
-      // Codex can emit multiple agentMessage items per turn (e.g. one per
-      // narrated step). Deltas within one item are continuous; only insert
-      // a paragraph break at the boundary between distinct items.
-      const effectiveDelta =
-        turn.pendingAgentMessageBreak && turn.assistantText.length > 0 ? `\n\n${delta}` : delta;
-      turn.pendingAgentMessageBreak = false;
-      turn.assistantText += effectiveDelta;
-      await this.deps.appendTurnEvent(turn.turnId, 'assistant.delta', { text: effectiveDelta });
+      const itemId = readNestedString(params, ['itemId']);
+      if (!itemId) return;
+      turn.assistantText += delta;
+      await this.deps.appendTurnEvent(turn.turnId, 'assistant.delta', { itemId, text: delta });
       return;
     }
 
@@ -681,13 +681,18 @@ export class CodexBackend {
 
       const itemType = readNestedString(params, ['item', 'type']);
       if (itemType === 'agentMessage') {
-        const text = readNestedString(params, ['item', 'text']);
-        if (text && turn.assistantText.length === 0) {
-          turn.assistantText = text;
+        const itemId = readNestedString(params, ['item', 'id']);
+        const text = readNestedString(params, ['item', 'text']) ?? '';
+        if (text && turn.assistantText.length === 0) turn.assistantText = text;
+        if (itemId) {
+          await this.deps.appendTurnEvent(turn.turnId, 'assistant.message.completed', {
+            itemId, text, phase: readNestedString(params, ['item', 'phase']),
+          });
         }
-        // Mark a pending break so the next agentMessage's first delta
-        // starts on a new paragraph instead of running into this one.
-        turn.pendingAgentMessageBreak = true;
+        return;
+      }
+      if (itemType === 'userMessage') {
+        await this.emitUserMessage(turn, params);
         return;
       }
 
@@ -732,6 +737,18 @@ export class CodexBackend {
       }
       const turn = this.findTurnByThread(threadId, codexTurnId);
       if (!turn || turn.finalized) {
+        return;
+      }
+      const itemType = readNestedString(params, ['item', 'type']);
+      if (itemType === 'agentMessage') {
+        const itemId = readNestedString(params, ['item', 'id']);
+        if (itemId) await this.deps.appendTurnEvent(turn.turnId, 'assistant.message.started', {
+          itemId, phase: readNestedString(params, ['item', 'phase']),
+        });
+        return;
+      }
+      if (itemType === 'userMessage') {
+        await this.emitUserMessage(turn, params);
         return;
       }
       this.captureFileChangeItem(params);
@@ -913,6 +930,25 @@ export class CodexBackend {
       const message = error instanceof Error ? error.message : 'serialize failed';
       console.error(`[agentwaypoint-runner] raw notification ${method}: <unserializable: ${message}>`);
     }
+  }
+
+  private async emitUserMessage(turn: ActiveCodexTurn, params: Record<string, unknown>): Promise<void> {
+    const item = params.item as Record<string, unknown> | undefined;
+    const itemId = typeof item?.id === 'string' ? item.id : '';
+    if (!itemId) return;
+    const clientId = typeof item?.clientId === 'string' ? item.clientId : null;
+    const initial = clientId === turn.initialUserMessageId ||
+      (!clientId && (!turn.initialUserItemId || turn.initialUserItemId === itemId));
+    if (initial) turn.initialUserItemId = itemId;
+    const content = Array.isArray(item?.content) ? item.content.flatMap((input) => {
+      if (!input || typeof input !== 'object') return [];
+      const value = input as Record<string, unknown>;
+      if (value.type === 'text' && typeof value.text === 'string') return [value.text];
+      if (value.type === 'localImage' && typeof value.path === 'string') return [`[Image: ${value.path}]`];
+      if (value.type === 'image') return ['[Image]'];
+      return [];
+    }).join('\n') : '';
+    await this.deps.appendTurnEvent(turn.turnId, 'user.message.accepted', { itemId, clientId, initial, content });
   }
 
   private async handleServerRequest(worker: CodexWorker, message: Record<string, unknown>): Promise<void> {

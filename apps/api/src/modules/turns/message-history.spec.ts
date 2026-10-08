@@ -1,0 +1,349 @@
+import "reflect-metadata";
+import { PrismaClient } from "@prisma/client";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  restoreEnv,
+  setupSqliteTestDatabase,
+  type SqliteTestDatabase,
+} from "../../test-utils/sqlite-test-database";
+import type { PrismaService } from "../prisma/prisma.service";
+import type { RunnerAdapter } from "../runner/runner.types";
+import type { SettingsService } from "../settings/settings.service";
+import type { QueueSignalService } from "../queue-signal/queue-signal.service";
+import type { ApprovalQueueService } from "./approval-queue.service";
+import type { ProjectsService } from "../projects/projects.service";
+import { SessionsService } from "../sessions/sessions.service";
+import { TurnsService } from "./turns.service";
+import { createHistoryMessage } from "./message-history";
+
+describe("durable message history", () => {
+  let database: SqliteTestDatabase;
+  let prisma: PrismaClient;
+  const previousEnv = Object.fromEntries(
+    ["AGENTWAYPOINT_HOME", "DATABASE_URL", "DEFAULT_WORKSPACE_ROOT"].map(
+      (key) => [key, process.env[key]],
+    ),
+  );
+
+  beforeAll(async () => {
+    database = await setupSqliteTestDatabase("agentwaypoint-message-history-");
+    prisma = new PrismaClient();
+  }, 30_000);
+  afterAll(async () => {
+    await prisma?.$disconnect();
+    await database?.cleanup();
+    for (const [key, value] of Object.entries(previousEnv))
+      restoreEnv(key, value);
+  });
+
+  async function fixture() {
+    const user = await prisma.user.create({
+      data: { email: `${crypto.randomUUID()}@example.test` },
+    });
+    const project = await prisma.project.create({
+      data: { ownerUserId: user.id, name: "test" },
+    });
+    const session = await prisma.session.create({
+      data: { projectId: project.id, title: "test", status: "active" },
+    });
+    const message = await prisma.$transaction((tx) =>
+      createHistoryMessage(tx, {
+        data: { sessionId: session.id, role: "user", content: "initial input" },
+      }),
+    );
+    const turn = await prisma.turn.create({
+      data: {
+        sessionId: session.id,
+        userMessageId: message.id,
+        status: "running",
+        historyVersion: 2,
+        backend: "codex",
+      },
+    });
+    await prisma.message.update({
+      where: { id: message.id },
+      data: { turnId: turn.id },
+    });
+    const steer = vi
+      .fn<RunnerAdapter["steerTurn"]>()
+      .mockResolvedValue(undefined);
+    const runner = { steerTurn: steer } as unknown as RunnerAdapter;
+    const service = new TurnsService(
+      prisma as PrismaService,
+      runner,
+      {
+        getAppSettings: async () => ({ turnSteerEnabled: true }),
+      } as unknown as SettingsService,
+      {
+        publishOutboundWake: async () => undefined,
+      } as unknown as QueueSignalService,
+      {} as ApprovalQueueService,
+    );
+    const sessions = new SessionsService(
+      prisma as PrismaService,
+      {} as ProjectsService,
+      runner,
+    );
+    const emit = (
+      type: Parameters<TurnsService["ingestRunnerEvent"]>[1],
+      payload: Record<string, unknown>,
+    ) => service.ingestRunnerEvent(turn.id, type, payload);
+    const history = () => sessions.getHistoryForSession(user.id, session.id);
+    return {
+      user,
+      session,
+      turn,
+      message,
+      steer,
+      service,
+      sessions,
+      emit,
+      history,
+    };
+  }
+
+  it("commits each completed item before turn end and replaces deltas with authoritative text", async () => {
+    const f = await fixture();
+    await f.emit("assistant.message.started", {
+      itemId: "a",
+      phase: "commentary",
+    });
+    await f.emit("assistant.delta", { itemId: "a", text: "streamed draft" });
+    await f.emit("assistant.message.completed", {
+      itemId: "a",
+      text: "First complete message",
+      phase: "commentary",
+    });
+    let history = await f.history();
+    expect(history.activeTurnId).toBe(f.turn.id);
+    expect(history.messages.map((m) => m.content)).toEqual([
+      "initial input",
+      "First complete message",
+    ]);
+    expect(
+      await prisma.botMessage.count({
+        where: { sessionId: f.session.id, kind: "turn_message" },
+      }),
+    ).toBe(1);
+    const endA = history.messages[1]?.endEventSeq;
+    // A complete item can arrive without either start or deltas.
+    await f.emit("assistant.message.completed", {
+      itemId: "b",
+      text: "Second message",
+      phase: "final_answer",
+    });
+    await f.emit("assistant.message.completed", {
+      itemId: "b",
+      text: "Second message",
+      phase: "final_answer",
+    });
+    await f.emit("assistant.delta", { itemId: "b", text: "late duplicate" });
+    await f.emit("turn.completed", {
+      content: "obsolete whole turn concatenation",
+    });
+    history = await f.history();
+    expect(history.messages.map((m) => m.content)).toEqual([
+      "initial input",
+      "First complete message",
+      "Second message",
+    ]);
+    expect(history.messages[2]?.timelineStartSeq).toBe(endA);
+    expect(history.activeTurnId).toBeNull();
+    expect(
+      await prisma.botMessage.count({
+        where: { sessionId: f.session.id, kind: "turn_message" },
+      }),
+    ).toBe(2);
+    await f.service.onModuleDestroy();
+  });
+
+  it("keeps identical steer requests queued until their own receipt and orders history by receipt", async () => {
+    const f = await fixture();
+    const first = await f.service.steerTurnForUser(f.user.id, f.turn.id, {
+      content: "same text",
+      clientRequestId: "one",
+    });
+    await f.service.steerTurnForUser(f.user.id, f.turn.id, {
+      content: "same text",
+      clientRequestId: "one",
+    });
+    await f.service.steerTurnForUser(f.user.id, f.turn.id, {
+      content: "same text",
+      clientRequestId: "two",
+    });
+    await vi.waitFor(() => expect(f.steer).toHaveBeenCalledTimes(2));
+    expect(first).toHaveProperty("input.status", "queued");
+    expect((await f.history()).messages).toHaveLength(1);
+    expect((await f.history()).pendingInputs).toHaveLength(2);
+    await f.emit("assistant.message.completed", {
+      itemId: "a",
+      text: "Before receipt",
+    });
+    await f.emit("user.message.accepted", {
+      itemId: "input-two",
+      clientId: "two",
+      content: "same text",
+    });
+    await f.emit("assistant.message.completed", {
+      itemId: "b",
+      text: "Between receipts",
+    });
+    await f.emit("user.message.accepted", {
+      itemId: "input-one",
+      clientId: "one",
+      content: "same text",
+    });
+    await f.emit("user.message.accepted", {
+      itemId: "input-one",
+      clientId: "one",
+      content: "same text",
+    });
+    // The initial echoed input must not add a second initial message.
+    await f.emit("user.message.accepted", {
+      itemId: "initial",
+      initial: true,
+      content: "initial input",
+    });
+    const history = await f.history();
+    expect(history.messages.map((m) => m.content)).toEqual([
+      "initial input",
+      "Before receipt",
+      "same text",
+      "Between receipts",
+      "same text",
+    ]);
+    expect(history.messages[2]?.backendItemId).toBe("input-two");
+    expect(history.pendingInputs).toEqual([]);
+    expect(history.messages.every((m) => m.turnId === f.turn.id)).toBe(true);
+    await f.emit("turn.completed", {});
+    const replay = await f.service.steerTurnForUser(f.user.id, f.turn.id, {
+      content: "same text",
+      clientRequestId: "one",
+    });
+    expect(replay).toHaveProperty("input.status", "accepted");
+    expect(f.steer).toHaveBeenCalledTimes(2);
+    await f.service.onModuleDestroy();
+  });
+
+  it("keeps acceptance when a late RPC failure arrives, and preserves partial output on cancellation", async () => {
+    const f = await fixture();
+    let reject!: (error: Error) => void;
+    f.steer.mockImplementation(
+      () =>
+        new Promise<void>((_resolve, rejectPromise) => {
+          reject = rejectPromise;
+        }),
+    );
+    await f.service.steerTurnForUser(f.user.id, f.turn.id, {
+      content: "steer",
+      clientRequestId: "request",
+    });
+    await vi.waitFor(() => expect(reject).toBeTypeOf("function"));
+    await f.emit("assistant.delta", {
+      itemId: "partial",
+      text: "Partial output",
+    });
+    await f.emit("user.message.accepted", {
+      itemId: "input",
+      clientId: "request",
+      content: "steer",
+    });
+    reject(new Error("RPC timed out"));
+    await vi.waitFor(async () =>
+      expect(
+        await prisma.turnInput.findFirst({ where: { turnId: f.turn.id } }),
+      ).toHaveProperty("status", "accepted"),
+    );
+    await f.emit("turn.cancelled", {});
+    const history = await f.history();
+    expect(history.messages.map((m) => m.content)).toEqual([
+      "initial input",
+      "Partial output",
+      "steer",
+    ]);
+    expect(history.messages[1]?.state).toBe("interrupted");
+    expect(history.pendingInputs).toHaveLength(0);
+    await f.service.onModuleDestroy();
+  });
+
+  it("flushes boundaries in source order and persists the upstream cursor independently from API events", async () => {
+    const f = await fixture();
+    await f.emit("assistant.message.started", { itemId: "a", runnerSeq: 10 });
+    await f.emit("assistant.delta", { itemId: "a", text: "A", runnerSeq: 11 });
+    await f.emit("assistant.delta", { itemId: "a", text: "B", runnerSeq: 12 });
+    await f.emit("user.message.accepted", {
+      itemId: "u",
+      content: "interrupt",
+      runnerSeq: 13,
+    });
+    const events = await prisma.event.findMany({
+      where: { turnId: f.turn.id },
+      orderBy: { seq: "asc" },
+    });
+    expect(events.map((e) => e.type)).toEqual([
+      "assistant.message.started",
+      "assistant.delta",
+      "user.message.accepted",
+    ]);
+    expect(events[1]?.payload).toMatchObject({ text: "AB", runnerSeq: 12 });
+    expect(
+      await prisma.turn.findUnique({ where: { id: f.turn.id } }),
+    ).toHaveProperty("runnerCursor", 13);
+    await f.emit("assistant.delta", { itemId: "a", text: "B", runnerSeq: 12 });
+    await f.emit("assistant.message.completed", {
+      itemId: "a",
+      text: "AB",
+      runnerSeq: 14,
+    });
+    expect((await f.history()).messages[1]?.content).toBe("AB");
+    const page = await f.sessions.getHistoryForSession(
+      f.user.id,
+      f.session.id,
+      { limit: 2 },
+    );
+    expect(page.messages).toHaveLength(2);
+    expect(page.hasMore).toBe(true);
+    const older = await f.sessions.getHistoryForSession(
+      f.user.id,
+      f.session.id,
+      { limit: 2, before: page.nextBefore! },
+    );
+    expect(older.messages.map((m) => m.content)).toEqual(["initial input"]);
+    expect(
+      (await f.service.getEventsForTurn(f.user.id, f.turn.id, 1, 20, 2)).map(
+        (e) => e.seq,
+      ),
+    ).toEqual([2]);
+    await f.emit("turn.completed", { runnerSeq: 15 });
+    await f.service.onModuleDestroy();
+  });
+
+  it("does not put rejected or unconfirmed input in formal history", async () => {
+    const f = await fixture();
+    f.steer.mockRejectedValueOnce(
+      new Error("Turn is not ready for steering yet"),
+    );
+    await f.service.steerTurnForUser(f.user.id, f.turn.id, {
+      content: "rejected",
+      clientRequestId: "rejected",
+    });
+    await vi.waitFor(async () =>
+      expect(
+        await prisma.turnInput.findFirst({ where: { turnId: f.turn.id } }),
+      ).toHaveProperty("status", "failed"),
+    );
+    await f.service.steerTurnForUser(f.user.id, f.turn.id, {
+      content: "not received",
+      clientRequestId: "pending",
+    });
+    await vi.waitFor(() => expect(f.steer).toHaveBeenCalledTimes(2));
+    await f.emit("turn.failed", { code: "STOPPED", message: "Process exited" });
+    const history = await f.history();
+    expect(history.messages.map((m) => m.content)).toEqual(["initial input"]);
+    expect(history.pendingInputs.map((input) => input.status)).toEqual([
+      "failed",
+      "unconfirmed",
+    ]);
+    await f.service.onModuleDestroy();
+  });
+});

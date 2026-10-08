@@ -53,6 +53,7 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       method: 'POST',
       path: '/runner/turns/start',
       body: {
+        userMessageId: input.userMessageId,
         turnId: input.turnId,
         sessionId: input.sessionId,
         content: input.content,
@@ -162,6 +163,7 @@ export class HttpRunnerAdapter implements RunnerAdapter {
       method: 'POST',
       path: '/runner/turns/steer',
       body: {
+        clientRequestId: input.clientRequestId,
         turnId: input.turnId,
         content: input.content,
       },

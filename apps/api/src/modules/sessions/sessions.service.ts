@@ -82,8 +82,8 @@ export class SessionsService {
     });
   }
 
-  async getHistoryForSession(userId: string, sessionId: string) {
-    const session = await this.prisma.session.findFirst({
+  async getHistoryForSession(userId: string, sessionId: string, query: { before?: number; limit?: number } = {}) {
+    const session = await this.prisma.$transaction((tx) => tx.session.findFirst({
       where: {
         id: sessionId,
         project: {
@@ -98,18 +98,31 @@ export class SessionsService {
         updatedAt: true,
         meta: true,
         messages: {
-          orderBy: { createdAt: 'asc' },
+          ...(query.before ? { where: { historySeq: { lt: query.before } } } : {}),
+          orderBy: [{ historySeq: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+          ...(query.limit ? { take: query.limit + 1 } : {}),
           select: {
             id: true,
             role: true,
             content: true,
             createdAt: true,
+            turnId: true,
+            backendItemId: true,
+            historySeq: true,
+            state: true,
+            phase: true,
+            startEventSeq: true,
+            endEventSeq: true,
+            timelineStartSeq: true,
           },
         },
         turns: {
           orderBy: { createdAt: 'asc' },
           select: {
             id: true,
+            historyVersion: true,
+            events: { orderBy: { seq: 'desc' }, take: 1, select: { seq: true } },
+            inputs: { where: { status: { not: 'accepted' } }, orderBy: { createdAt: 'asc' } },
             status: true,
             backend: true,
             requestedBackendConfig: true,
@@ -133,7 +146,7 @@ export class SessionsService {
           },
         },
       },
-    });
+    }));
 
     if (!session) {
       throw new NotFoundException({ message: 'Session not found' });
@@ -141,7 +154,12 @@ export class SessionsService {
 
     const activeTurn = [...session.turns].reverse().find((turn) => ACTIVE_TURN_STATUSES.has(turn.status));
 
+    const hasMore = Boolean(query.limit && session.messages.length > query.limit);
+    const messages = (query.limit ? session.messages.slice(0, query.limit) : session.messages).reverse();
     return {
+      hasMore,
+      nextBefore: hasMore ? messages[0]?.historySeq ?? null : null,
+      pendingInputs: session.turns.flatMap((turn) => turn.inputs),
       session: {
         id: session.id,
         projectId: session.projectId,
@@ -150,9 +168,10 @@ export class SessionsService {
         updatedAt: session.updatedAt,
         meta: normalizeJsonRecord(session.meta),
       },
-      messages: session.messages,
-      turns: session.turns.map((turn) => ({
+      messages,
+      turns: session.turns.map(({ events, inputs: _inputs, ...turn }) => ({
         ...turn,
+        eventCursor: events[0]?.seq ?? 0,
         requestedBackendConfig: normalizeJsonRecord(turn.requestedBackendConfig),
         effectiveBackendConfig: normalizeJsonRecord(turn.effectiveBackendConfig),
         effectiveRuntimeConfig: normalizeJsonRecord(turn.effectiveRuntimeConfig),
@@ -249,7 +268,7 @@ export class SessionsService {
         meta: true,
         backendThreadId: true,
         messages: {
-          orderBy: { createdAt: 'asc' },
+          orderBy: [{ historySeq: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
           select: {
             role: true,
             content: true,
@@ -305,7 +324,8 @@ export class SessionsService {
 
       if (sourceSession.messages.length > 0) {
         await tx.message.createMany({
-          data: sourceSession.messages.map((message) => ({
+          data: sourceSession.messages.map((message, index) => ({
+            historySeq: index + 1,
             sessionId: session.id,
             role: message.role,
             content: message.content,

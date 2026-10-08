@@ -77,3 +77,8 @@ export type SessionIdParams = z.infer<typeof SessionIdParamsSchema>;
 export type CreateSessionBody = z.infer<typeof CreateSessionBodySchema>;
 export type ForkSessionBody = z.infer<typeof ForkSessionBodySchema>;
 export type UpdateSessionBody = z.infer<typeof UpdateSessionBodySchema>;
+
+export const HistoryQuerySchema = z.object({
+  before: z.coerce.number().int().positive().optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});

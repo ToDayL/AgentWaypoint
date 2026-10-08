@@ -13,6 +13,7 @@ export const CreateTurnBodySchema = z.object({
 });
 
 export const SteerTurnBodySchema = z.object({
+  clientRequestId: z.string().trim().min(1).max(128).optional(),
   content: z.string().trim().min(1).max(10000),
 });
 
@@ -48,6 +49,7 @@ export const ApprovalTimerActionSchema = z.object({
 });
 
 export const StreamTurnQuerySchema = z.object({
+  until: z.coerce.number().int().min(0).optional(),
   since: z.coerce.number().int().min(0).optional(),
   limit: z.coerce.number().int().min(1).max(1000).optional(),
 });
