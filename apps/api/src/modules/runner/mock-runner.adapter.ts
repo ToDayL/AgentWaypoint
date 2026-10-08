@@ -1,3 +1,4 @@
+import { createHistoryMessage } from '../turns/message-history';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -177,7 +178,7 @@ export class MockRunnerAdapter implements RunnerAdapter {
       const assistantContent = await collectAssistantDeltaContent(tx, input.turnId);
       const assistantMessage =
         assistantContent.length > 0
-          ? await tx.message.create({
+          ? await createHistoryMessage(tx, {
               data: {
                 sessionId: turn.sessionId,
                 role: 'assistant',
@@ -512,7 +513,7 @@ export class MockRunnerAdapter implements RunnerAdapter {
     }
 
     await this.prisma.$transaction(async (tx) => {
-      const assistantMessage = await tx.message.create({
+      const assistantMessage = await createHistoryMessage(tx, {
         data: {
           sessionId: turn.sessionId,
           role: 'assistant',

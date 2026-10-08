@@ -1,3 +1,4 @@
+import { HistoryQuerySchema } from '../../../sessions/sessions.schemas';
 import {
   BadRequestException,
   Body,
@@ -222,9 +223,9 @@ export class WebPluginAppController {
   }
 
   @Get('sessions/:id/history')
-  async getSessionHistory(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown) {
+  async getSessionHistory(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown, @Query() query: unknown) {
     const { id } = parseWithZod(SessionIdParamsSchema, params);
-    return this.webPlugin.getSessionHistoryForUser(user.id, id);
+    return this.webPlugin.getSessionHistoryForUser(user.id, id, parseWithZod(HistoryQuerySchema, query));
   }
 
   @Patch('sessions/:id')
@@ -308,9 +309,9 @@ export class WebPluginAppController {
     const turn = await this.webPlugin.getTurnForUser(user.id, id);
     const cursor = queryInput.since ?? 0;
     const limit = queryInput.limit ?? 500;
-    const persistedEvents = await this.webPlugin.getEventsForTurn(user.id, id, cursor, limit);
-    const dispatchedEvents = this.webPlugin.getDispatchedEventsForSessionTurn(turn.sessionId, id, cursor);
-    return mergeBySeq(persistedEvents, dispatchedEvents).slice(0, limit);
+    const persistedEvents = await this.webPlugin.getEventsForTurn(user.id, id, cursor, limit, queryInput.until);
+    return persistedEvents
+      .filter((event) => queryInput.until === undefined || event.seq <= queryInput.until).slice(0, limit);
   }
 
   @Get('turns/:id/diff')
@@ -442,8 +443,9 @@ export class WebPluginAppController {
       inFlight = true;
       try {
         const persistedEvents = await this.webPlugin.getEventsForTurn(user.id, id, cursor, queryInput.limit);
-        const dispatchedEvents = this.webPlugin.getDispatchedEventsForSessionTurn(turn.sessionId, id, cursor);
-        const events = mergeBySeq(persistedEvents, dispatchedEvents);
+        // The outbox is persisted before dispatch. Reading the durable page alone
+        // prevents a newer buffered event from skipping a gap at the page boundary.
+        const events = persistedEvents;
         const latestTurn = await this.webPlugin.getTurnForUser(user.id, id);
         const contextUpdate = contextUpdateTracker.next(id, latestTurn, {
           force: TERMINAL_STATUSES.has(latestTurn.status),

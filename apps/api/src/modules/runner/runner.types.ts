@@ -1,6 +1,7 @@
 export type StartTurnInput = {
   turnId: string;
   sessionId: string;
+  userMessageId?: string;
   content: string;
   backend?: string | null;
   backendConfig?: Record<string, unknown> | null;
@@ -46,6 +47,7 @@ export type CancelTurnInput = {
 };
 
 export type SteerTurnInput = {
+  clientRequestId?: string;
   turnId: string;
   content: string;
 };
@@ -193,7 +195,11 @@ export type RunnerStreamEvent = {
   seq: number;
   type:
     | 'turn.started'
-    | 'assistant.delta'
+    | 'assistant.message.started'
+  | 'assistant.message.completed'
+  | 'user.message.accepted'
+  | 'turn.input.updated'
+  | 'assistant.delta'
     | 'turn.approval.requested'
     | 'turn.approval.resolved'
     | 'turn.approval.auto_review'
@@ -212,6 +218,7 @@ export type RunnerStreamEvent = {
 };
 
 export interface RunnerAdapter {
+  supportsMessageHistory?(backend: string): boolean;
   startTurn(input: StartTurnInput): Promise<void>;
   consumeTurnEvents(
     input: { turnId: string; sinceSeq?: number },

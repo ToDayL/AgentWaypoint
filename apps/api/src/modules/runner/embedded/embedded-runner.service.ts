@@ -119,6 +119,7 @@ export class EmbeddedRunnerService implements OnModuleInit {
     const payload: StartTurnBody = {
       turnId: input.turnId,
       sessionId: input.sessionId,
+      userMessageId: input.userMessageId,
       content: input.content,
       backend: input.backend ?? null,
       backendConfig: input.backendConfig ?? null,
@@ -237,6 +238,7 @@ export class EmbeddedRunnerService implements OnModuleInit {
       return;
     }
     await this.codexBackend.steerTurn({
+      clientRequestId: input.clientRequestId,
       turnId: input.turnId,
       content: input.content,
     });

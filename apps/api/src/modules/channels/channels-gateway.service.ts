@@ -71,7 +71,7 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
     listSessionsForProject: async (userId, projectId) => this.sessionsService.listForProject(userId, projectId),
     createSessionForProject: async (userId, projectId, input) => this.sessionsService.createForProject(userId, projectId, input),
     updateSessionForUser: async (userId, sessionId, input) => this.sessionsService.updateByIdForUser(userId, sessionId, input),
-    getSessionHistoryForUser: async (userId, sessionId) => this.sessionsService.getHistoryForSession(userId, sessionId),
+    getSessionHistoryForUser: async (userId, sessionId, query) => this.sessionsService.getHistoryForSession(userId, sessionId, query),
     deleteSessionForUser: async (userId, sessionId) => {
       await this.sessionsService.deleteByIdForUser(userId, sessionId);
     },
@@ -155,8 +155,8 @@ export class ChannelsGatewayService implements OnModuleInit, OnModuleDestroy {
         contentLength: input.contentLength,
       }),
     getTurnForUser: async (userId, turnId) => this.turnsService.getTurnForUser(userId, turnId),
-    getEventsForTurn: async (userId, turnId, sinceSeq, limit) =>
-      this.turnsService.getEventsForTurn(userId, turnId, sinceSeq, limit),
+    getEventsForTurn: async (userId, turnId, sinceSeq, limit, untilSeq) =>
+      this.turnsService.getEventsForTurn(userId, turnId, sinceSeq, limit, untilSeq),
     getLatestDiffForTurn: async (userId, turnId) => this.turnsService.getLatestDiffForTurn(userId, turnId),
     getCommandOutputForTurn: async (userId, turnId, input) =>
       this.turnsService.getCommandOutputForTurn(userId, turnId, input),

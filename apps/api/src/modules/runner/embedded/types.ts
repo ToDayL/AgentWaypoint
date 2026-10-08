@@ -3,6 +3,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 export type StartTurnBody = {
   turnId: string;
   sessionId: string;
+  userMessageId?: string;
   content: string;
   backend?: string | null;
   backendConfig?: Record<string, unknown> | null;
@@ -40,6 +41,7 @@ export type CancelTurnBody = {
 };
 
 export type SteerTurnBody = {
+  clientRequestId?: string;
   turnId: string;
   content: string;
 };
@@ -99,6 +101,10 @@ export type ResolveApprovalBody = {
 
 export type RunnerEventType =
   | 'turn.started'
+  | 'assistant.message.started'
+  | 'assistant.message.completed'
+  | 'user.message.accepted'
+  | 'turn.input.updated'
   | 'assistant.delta'
   | 'turn.approval.requested'
   | 'turn.approval.resolved'
@@ -135,7 +141,8 @@ export type ActiveCodexTurn = ActiveTurnBase & {
   threadId: string | null;
   codexTurnId: string | null;
   assistantText: string;
-  pendingAgentMessageBreak: boolean;
+  initialUserMessageId?: string;
+  initialUserItemId?: string;
   completionResolve: (() => void) | null;
   completionReject: ((error: Error) => void) | null;
 };

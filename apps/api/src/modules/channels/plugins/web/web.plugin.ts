@@ -122,8 +122,8 @@ export class WebPlugin implements ChannelPlugin {
     return this.requireContext().updateSessionForUser(userId, sessionId, input);
   }
 
-  async getSessionHistoryForUser(userId: string, sessionId: string): Promise<unknown> {
-    return this.requireContext().getSessionHistoryForUser(userId, sessionId);
+  async getSessionHistoryForUser(userId: string, sessionId: string, query?: { before?: number; limit?: number }): Promise<unknown> {
+    return this.requireContext().getSessionHistoryForUser(userId, sessionId, query);
   }
 
   async deleteSessionForUser(userId: string, sessionId: string): Promise<void> {
@@ -215,8 +215,9 @@ export class WebPlugin implements ChannelPlugin {
     turnId: string,
     sinceSeq: number,
     limit?: number,
+    untilSeq?: number,
   ): Promise<Array<{ seq: number; type: string; payload: unknown; turnId: string; createdAt: Date }>> {
-    return this.requireContext().getEventsForTurn(userId, turnId, sinceSeq, limit);
+    return this.requireContext().getEventsForTurn(userId, turnId, sinceSeq, limit, untilSeq);
   }
 
   async getLatestDiffForTurn(userId: string, turnId: string): Promise<unknown> {

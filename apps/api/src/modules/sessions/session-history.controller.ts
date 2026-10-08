@@ -1,9 +1,9 @@
-import { Body, Controller, Delete, Get, HttpCode, Inject, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Inject, Param, Query, Patch, Post, UseGuards } from '@nestjs/common';
 import { parseWithZod } from '../../common/validation/zod';
 import { AuthGuard } from '../auth/auth.guard';
 import { CurrentUserDecorator } from '../auth/current-user.decorator';
 import { CurrentUser } from '../auth/auth.types';
-import { ForkSessionBodySchema, SessionIdParamsSchema, UpdateSessionBodySchema } from './sessions.schemas';
+import { HistoryQuerySchema, ForkSessionBodySchema, SessionIdParamsSchema, UpdateSessionBodySchema } from './sessions.schemas';
 import { SessionsService } from './sessions.service';
 
 @Controller('/api/sessions')
@@ -19,9 +19,9 @@ export class SessionHistoryController {
   }
 
   @Get('/:id/history')
-  async getSessionHistory(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown) {
+  async getSessionHistory(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown, @Query() query: unknown) {
     const { id } = parseWithZod(SessionIdParamsSchema, params);
-    return this.sessionsService.getHistoryForSession(user.id, id);
+    return this.sessionsService.getHistoryForSession(user.id, id, parseWithZod(HistoryQuerySchema, query));
   }
 
   @Patch('/:id')

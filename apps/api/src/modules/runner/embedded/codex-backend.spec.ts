@@ -21,7 +21,6 @@ function createHarness() {
     threadId: 'codex-thread-1',
     codexTurnId: 'codex-turn-1',
     assistantText: '',
-    pendingAgentMessageBreak: false,
     completionResolve: null,
     completionReject: null,
   };
@@ -203,6 +202,44 @@ describe('CodexBackend worker message routing', () => {
 
     await expect(response).resolves.toEqual({ ok: true });
     expect(worker.pendingRequests.size).toBe(0);
+  });
+});
+
+describe('CodexBackend message boundaries', () => {
+  it('retains item IDs and emits complete text without treating messages as tools', async () => {
+    const harness = createHarness();
+    const scope = { threadId: 'codex-thread-1', turnId: 'codex-turn-1' };
+    await harness.notify('item/started', { ...scope, item: { id: 'a', type: 'agentMessage', phase: 'commentary', text: '' } });
+    await harness.notify('item/agentMessage/delta', { ...scope, itemId: 'a', delta: 'draft' });
+    await harness.notify('item/completed', { ...scope, item: { id: 'a', type: 'agentMessage', phase: 'commentary', text: 'First message' } });
+    await harness.notify('item/completed', { ...scope, item: { id: 'b', type: 'agentMessage', phase: 'final_answer', text: 'Second message without deltas' } });
+    expect(harness.appended.map((event) => event.type)).toEqual([
+      'assistant.message.started', 'assistant.delta', 'assistant.message.completed', 'assistant.message.completed',
+    ]);
+    expect(harness.appended[1]?.payload).toEqual({ itemId: 'a', text: 'draft' });
+    expect(harness.appended[3]?.payload).toEqual({ itemId: 'b', text: 'Second message without deltas', phase: 'final_answer' });
+  });
+
+  it('forwards the steer correlation ID and emits receipts only from userMessage items', async () => {
+    const harness = createHarness();
+    const requests: Array<{ method: string; params: unknown }> = [];
+    stubWorkerRequests(harness.backend, async (method, params) => {
+      requests.push({ method, params });
+      return { turnId: 'codex-turn-1' };
+    });
+    await harness.backend.steerTurn({ turnId: 'waypoint-turn-1', content: 'steer', clientRequestId: 'client-input' });
+    expect(requests).toEqual([{ method: 'turn/steer', params: {
+      threadId: 'codex-thread-1', expectedTurnId: 'codex-turn-1', clientUserMessageId: 'client-input',
+      input: [{ type: 'text', text: 'steer', text_elements: [] }],
+    } }]);
+    expect(harness.appended).toEqual([]);
+    await harness.notify('item/started', {
+      threadId: 'codex-thread-1', turnId: 'codex-turn-1',
+      item: { type: 'userMessage', id: 'backend-input', clientId: 'client-input', content: [{ type: 'text', text: 'steer' }] },
+    });
+    expect(harness.appended).toEqual([{ turnId: 'waypoint-turn-1', type: 'user.message.accepted', payload: {
+      itemId: 'backend-input', clientId: 'client-input', initial: false, content: 'steer',
+    } }]);
   });
 });
 

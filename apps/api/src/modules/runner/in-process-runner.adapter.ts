@@ -37,6 +37,10 @@ export class InProcessRunnerAdapter implements RunnerAdapter {
     private readonly embedded: EmbeddedRunnerService,
   ) {}
 
+  supportsMessageHistory(backend: string): boolean {
+    return backend === 'codex';
+  }
+
   startTurn(input: StartTurnInput): Promise<void> {
     return this.embedded.startTurn(input);
   }
