@@ -13,6 +13,10 @@ let fixture: {
   apiUrl: string;
   sessionId: string;
   turnId: string;
+  longSessionId: string;
+  longTurnId: string;
+  legacySessionId: string;
+  legacyTurnId: string;
   email: string;
   password: string;
 };
@@ -63,9 +67,10 @@ async function emit(
   request: APIRequestContext,
   type: string,
   payload: Record<string, unknown>,
+  turnId = fixture.turnId,
 ) {
   const response = await request.post(
-    `${fixture.apiUrl}/internal/runner/turns/${fixture.turnId}/events`,
+    `${fixture.apiUrl}/internal/runner/turns/${turnId}/events`,
     { data: { type, payload } },
   );
   expect(response.ok()).toBe(true);
@@ -96,7 +101,19 @@ test("keeps live actions in an independent active bubble, floats steer inputs, a
   await page.request.post(`${fixture.url}/api/auth/login/password`, {
     data: { email: fixture.email, password: fixture.password },
   });
+  const historyResponse = page.waitForResponse((response) =>
+    response.url().includes(`/sessions/${fixture.sessionId}/history`),
+  );
   await page.goto(fixture.url);
+  const initialHistory = await (await historyResponse).json();
+  expect(initialHistory.hasMore).toBe(false);
+  expect(initialHistory).not.toHaveProperty("turns");
+  expect(initialHistory.activeTurn).toMatchObject({
+    id: fixture.turnId,
+    historyVersion: 2,
+    eventCursor: 1,
+  });
+  expect(initialHistory.latestTurn.id).toBe(fixture.turnId);
   expect(await page.evaluate(() => typeof crypto.randomUUID)).toBe("undefined");
   await expect(page.locator(".chat-markdown")).toHaveText(["Initial request"]);
   await expect(
@@ -168,6 +185,10 @@ test("keeps live actions in an independent active bubble, floats steer inputs, a
     .toBeLessThanOrEqual(1);
   const beforeQueue = await chatLayout(page);
   expect(beforeQueue.scrollTop).toBeGreaterThan(0);
+  await emit(page.request, 'tool.started', { itemId: 'compact', kind: 'contextCompaction', title: 'contextCompaction' });
+  await emit(page.request, 'tool.completed', { itemId: 'compact', kind: 'contextCompaction', title: 'contextCompaction' });
+  await expect(page.locator('.chat-message-assistant').last()).toContainText('Thinking...');
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeVisible();
   await test.info().attach("Independent working Assistant bubble", {
     body: await page.screenshot({
       animations: "disabled",
@@ -435,4 +456,149 @@ test("keeps live actions in an independent active bubble, floats steer inputs, a
   await expect(
     page.getByRole("button", { name: "Live stream", exact: true }),
   ).toHaveCount(0);
+});
+
+test('loads complete history once, buffers virtual rows, preserves reading position, and calibrates one turn', async ({
+  page,
+}) => {
+  const requests: URL[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.endsWith(`/sessions/${fixture.longSessionId}/history`)) requests.push(url);
+  });
+  await page.request.post(`${fixture.url}/api/auth/login/password`, {
+    data: { email: fixture.email, password: fixture.password },
+  });
+  await page.goto(fixture.url);
+  await expect(page.getByText('Long message history', { exact: true })).toBeVisible();
+  const initialResponse = page.waitForResponse((response) =>
+    response.url().endsWith(`/sessions/${fixture.longSessionId}/history`),
+  );
+  await page.getByText('Long message history', { exact: true }).click();
+  const initial = await (await initialResponse).json();
+  expect(initial.messages).toHaveLength(601);
+  expect(initial.messages[0].content).toContain('History message 0');
+  expect(initial.hasMore).toBe(false);
+  expect(requests).toHaveLength(1);
+  expect(requests[0]!.search).toBe('');
+  await expect(page.getByRole('button', { name: 'Show More', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeVisible();
+  await expect.poll(async () => (await chatLayout(page)).bottomGap).toBeLessThanOrEqual(1);
+  expect(await page.locator('.chat-virtual-row').count()).toBeLessThan(100);
+
+  await page.locator('.chat-thread').evaluate((thread) => {
+    thread.scrollTop = 0;
+  });
+  await expect(page.locator('.chat-markdown').first()).toContainText('History message 0');
+  await page.locator('.chat-thread').evaluate((thread) => {
+    thread.scrollTop = thread.scrollHeight / 2;
+  });
+  const readingAnchor = async () =>
+    page.evaluate(() => {
+      const thread = document.querySelector<HTMLElement>('.chat-thread')!;
+      const rect = thread.getBoundingClientRect();
+      const rows = [...thread.querySelectorAll<HTMLElement>('.chat-virtual-row')];
+      const visible = rows.find((row) => row.getBoundingClientRect().bottom > rect.top + 1)!;
+      return {
+        id: visible?.dataset.messageId,
+        top: visible ? visible.getBoundingClientRect().top - rect.top : 0,
+        bufferAbove: rows[0] ? rect.top - rows[0].getBoundingClientRect().top : 0,
+        bufferBelow: rows.at(-1) ? rows.at(-1)!.getBoundingClientRect().bottom - rect.bottom : 0,
+        height: thread.clientHeight,
+      };
+    });
+  await expect.poll(async () => (await readingAnchor()).bufferAbove).toBeGreaterThanOrEqual(1200);
+  await expect.poll(async () => (await readingAnchor()).bufferBelow).toBeGreaterThanOrEqual(1200);
+  const anchor = await readingAnchor();
+  await page.getByRole('button', { name: 'Config', exact: true }).click();
+  await expect(page.locator('.chat-thread')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Explorer', exact: true }).click();
+  await expect.poll(async () => (await readingAnchor()).id).toBe(anchor.id);
+  expect(Math.abs((await readingAnchor()).top - anchor.top)).toBeLessThanOrEqual(2);
+  await emit(page.request, 'assistant.message.started', { itemId: 'long-a' }, fixture.longTurnId);
+  await emit(
+    page.request,
+    'assistant.delta',
+    { itemId: 'long-a', text: 'Streamed response' },
+    fixture.longTurnId,
+  );
+  await emit(
+    page.request,
+    'assistant.message.completed',
+    { itemId: 'long-a', text: 'Completed while reading history' },
+    fixture.longTurnId,
+  );
+  const scopedResponse = page.waitForResponse((response) =>
+    response
+      .url()
+      .includes(`/sessions/${fixture.longSessionId}/history?turnId=${fixture.longTurnId}`),
+  );
+  await emit(page.request, 'turn.completed', {}, fixture.longTurnId);
+  const scoped = await (await scopedResponse).json();
+  expect(scoped.messages.map((message: { content: string }) => message.content)).toEqual([
+    'Continue long history',
+    'Completed while reading history',
+  ]);
+  expect(scoped.messageTurn.status).toBe('completed');
+  await expect.poll(async () => (await readingAnchor()).id).toBe(anchor.id);
+  expect(Math.abs((await readingAnchor()).top - anchor.top)).toBeLessThanOrEqual(2);
+  expect(requests.filter((url) => !url.searchParams.has('turnId'))).toHaveLength(1);
+
+  await page.locator('.chat-thread').evaluate((thread) => {
+    thread.scrollTop = thread.scrollHeight;
+  });
+  await expect(page.locator('.chat-markdown').last()).toHaveText('Completed while reading history');
+  const createdResponse = page.waitForResponse(
+    (response) =>
+      response.url().endsWith(`/sessions/${fixture.longSessionId}/turns`) &&
+      response.request().method() === 'POST',
+  );
+  await page.getByPlaceholder('Send a message...').fill('New turn without reloading old history');
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  const created = await (await createdResponse).json();
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeVisible();
+  await emit(page.request, 'assistant.message.started', { itemId: 'long-b' }, created.turnId);
+  await emit(
+    page.request,
+    'assistant.delta',
+    { itemId: 'long-b', text: 'Streaming growth\n\n' + 'A growing paragraph.\n\n'.repeat(80) },
+    created.turnId,
+  );
+  await expect(page.locator('.chat-markdown').last()).toContainText('Streaming growth');
+  await expect.poll(async () => (await chatLayout(page)).bottomGap).toBeLessThanOrEqual(1);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(async () => (await chatLayout(page)).bottomGap).toBeLessThanOrEqual(1);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const cancelledResponse = page.waitForResponse((response) =>
+    response.url().includes(`/sessions/${fixture.longSessionId}/history?turnId=${created.turnId}`),
+  );
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  expect((await (await cancelledResponse).json()).messageTurn.status).toBe('cancelled');
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toHaveCount(0);
+  expect(requests.filter((url) => !url.searchParams.has('turnId'))).toHaveLength(1);
+  await page.locator('.chat-thread').evaluate((thread) => {
+    thread.scrollTop = 0;
+  });
+  await expect(page.locator('.chat-markdown').first()).toContainText('History message 0');
+});
+
+test('calibrates legacy streamed output into one persisted message', async ({ page }) => {
+  await page.request.post(`${fixture.url}/api/auth/login/password`, {
+    data: { email: fixture.email, password: fixture.password },
+  });
+  await page.goto(fixture.url);
+  await page.getByText('Legacy protocol history', { exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeVisible();
+  await emit(page.request, 'assistant.delta', { text: 'Legacy streamed output' }, fixture.legacyTurnId);
+  await expect(page.locator('.chat-markdown').last()).toHaveText('Legacy streamed output');
+  const calibratedResponse = page.waitForResponse((response) =>
+    response.url().includes(`/sessions/${fixture.legacySessionId}/history?turnId=${fixture.legacyTurnId}`),
+  );
+  await emit(page.request, 'turn.completed', { content: 'Legacy streamed output' }, fixture.legacyTurnId);
+  const calibrated = await (await calibratedResponse).json();
+  expect(calibrated.messageTurn).toMatchObject({ historyVersion: 1, status: 'completed' });
+  expect(calibrated.messages).toHaveLength(2);
+  await expect(page.locator('.chat-markdown')).toHaveText(['Legacy input', 'Legacy streamed output']);
+  await expect(page.locator('.chat-message-assistant')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toHaveCount(0);
 });

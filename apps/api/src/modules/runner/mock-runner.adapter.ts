@@ -181,6 +181,7 @@ export class MockRunnerAdapter implements RunnerAdapter {
           ? await createHistoryMessage(tx, {
               data: {
                 sessionId: turn.sessionId,
+                turnId: input.turnId,
                 role: 'assistant',
                 content: assistantContent,
               },
@@ -516,6 +517,7 @@ export class MockRunnerAdapter implements RunnerAdapter {
       const assistantMessage = await createHistoryMessage(tx, {
         data: {
           sessionId: turn.sessionId,
+          turnId,
           role: 'assistant',
           content,
         },

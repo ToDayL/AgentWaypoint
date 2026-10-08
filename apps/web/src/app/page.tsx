@@ -64,6 +64,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import { applyHistoryEvent, applyInputEvent, eventInMessageRange, mergeHistoryMessages, mergeQueuedInput, type ChatMessage, type QueuedInput } from './history-messages';
+import { VirtualChatThread, type ChatMeasurements, type ChatRow } from './virtual-chat-thread';
 import { TerminalPanel } from '../components/terminal/TerminalPanel';
 import { requestId } from '../components/terminal/terminal-client';
 import {
@@ -109,26 +110,18 @@ type AvailableModel = {
   defaultEffort: string | null;
 };
 
-type TurnSummary = {
+type SessionTurnInfo = {
   id: string;
-  historyVersion?: number;
-  eventCursor?: number;
   backend: string | null;
   status: string;
-  requestedBackendConfig: Record<string, unknown> | null;
   effectiveBackendConfig: Record<string, unknown> | null;
   effectiveRuntimeConfig: Record<string, unknown> | null;
-  failureCode: string | null;
-  failureMessage: string | null;
   contextRemainingRatio: number | null;
-  contextRemainingTokens: number | null;
-  contextWindowTokens: number | null;
-  contextUpdatedAt: string | null;
-  createdAt: string;
-  startedAt: string | null;
-  endedAt: string | null;
-  userMessageId: string | null;
-  assistantMessageId: string | null;
+};
+
+type ActiveHistoryTurn = SessionTurnInfo & {
+  historyVersion: number;
+  eventCursor: number;
 };
 
 type SessionHistory = {
@@ -137,7 +130,9 @@ type SessionHistory = {
   nextBefore?: number | null;
   session: Session;
   messages: ChatMessage[];
-  turns: TurnSummary[];
+  messageTurn: ActiveHistoryTurn | null;
+  activeTurn: ActiveHistoryTurn | null;
+  latestTurn: SessionTurnInfo | null;
   activeTurnId: string | null;
   activeTurnStatus: string | null;
 };
@@ -673,8 +668,6 @@ const WORKSPACE_SUGGESTIONS_LIST_ID = 'workspace-path-suggestions';
 const LAST_PROJECT_STORAGE_KEY_PREFIX = 'agentwaypoint:last-project:';
 const LAST_SESSION_STORAGE_KEY_PREFIX = 'agentwaypoint:last-session:';
 const PANEL_LAYOUT_STORAGE_KEY_PREFIX = 'agentwaypoint:panel-layout:';
-const CHAT_VISIBLE_MESSAGE_STEP = 10;
-const CHAT_SCROLL_IDLE_MS = 220;
 const MAX_VISIBLE_DIFF_LINES = 20;
 const LEFT_PANE_DEFAULT_WIDTH = 280;
 const LEFT_PANE_MIN_WIDTH = 220;
@@ -810,8 +803,6 @@ export default function HomePage() {
   const [turnEventsLoading, setTurnEventsLoading] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [queuedInputs, setQueuedInputs] = useState<QueuedInput[]>([]);
-  const [historyBefore, setHistoryBefore] = useState<number | null>(null);
-  const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const inspectedMessageRef = useRef<ChatMessage | null>(null);
   const messageHistoryTurnsRef = useRef(new Set<string>());
   const timelineLastSeqRef = useRef(0);
@@ -821,7 +812,8 @@ export default function HomePage() {
   const timelineRequestIdRef = useRef(0);
   const timelineLoadBufferRef = useRef<StreamEnvelope[] | null>(null);
 
-  const [turns, setTurns] = useState<TurnSummary[]>([]);
+  const [activeHistoryTurn, setActiveHistoryTurn] = useState<ActiveHistoryTurn | null>(null);
+  const [latestHistoryTurn, setLatestHistoryTurn] = useState<SessionTurnInfo | null>(null);
   const [assistantText, setAssistantText] = useState('');
   const [reasoningText, setReasoningText] = useState('');
   const [latestPlan, setLatestPlan] = useState('');
@@ -852,7 +844,6 @@ export default function HomePage() {
   const [previewFileError, setPreviewFileError] = useState('');
   const [expandedToolDetailKeys, setExpandedToolDetailKeys] = useState<Record<string, boolean>>({});
   const [recentMentionedPath, setRecentMentionedPath] = useState('');
-  const [visibleMessageCount, setVisibleMessageCount] = useState(CHAT_VISIBLE_MESSAGE_STEP);
   const [sessionInfoOpen, setSessionInfoOpen] = useState(true);
   const [mobileLeftSidebarOpen, setMobileLeftSidebarOpen] = useState(false);
   const [mobileInsightsOpen, setMobileInsightsOpen] = useState(false);
@@ -897,6 +888,7 @@ export default function HomePage() {
     leftWidth: number;
   } | null>(null);
   const chatThreadRef = useRef<HTMLDivElement | null>(null);
+  const chatMeasurementsRef = useRef<ChatMeasurements>([]);
   const chatComposerRef = useRef<ChatComposerHandle | null>(null);
   const promptDraftRef = useRef('');
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -912,12 +904,7 @@ export default function HomePage() {
     openUploadDialogHandlerRef.current();
   }, []);
   const chatAtBottomRef = useRef(true);
-  const chatScrollIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const chatScrollSettleRafRef = useRef<number | null>(null);
-  const suppressBottomAutoCollapseRef = useRef(false);
-  const previousDisplayedMessageCountRef = useRef(0);
   const chatScrollTopRef = useRef(0);
-  const wasConfigFullscreenActiveRef = useRef(false);
   const previewLoadSeqRef = useRef(0);
   const fileNodeLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileNodeLongPressTriggeredRef = useRef(false);
@@ -961,8 +948,8 @@ export default function HomePage() {
     [sessions, selectedSessionId],
   );
   const sessionInfoTurn = useMemo(
-    () => turns.find((item) => item.id === activeTurnId) ?? turns[turns.length - 1] ?? null,
-    [turns, activeTurnId],
+    () => activeHistoryTurn?.id === activeTurnId ? activeHistoryTurn : latestHistoryTurn,
+    [activeHistoryTurn, activeTurnId, latestHistoryTurn],
   );
   const resolvedSessionInfo = useMemo(() => {
     const turnRuntime = readTurnRuntimeConfig(sessionInfoTurn?.effectiveBackendConfig);
@@ -1022,7 +1009,7 @@ export default function HomePage() {
   const displayedMessages = useMemo(() => {
     const base = messages.filter((message) => message.role !== 'assistant' || message.state === 'streaming' || message.content.length > 0)
       .map((message) => ({ ...message, streaming: message.state === 'streaming' }));
-    if (!streamBubbleTurnId || turns.some((turn) => turn.id === streamBubbleTurnId && turn.historyVersion === 2) ||
+    if (!streamBubbleTurnId || (activeHistoryTurn?.id === streamBubbleTurnId && activeHistoryTurn.historyVersion === 2) ||
       messages.some((message) => message.turnId === streamBubbleTurnId && message.backendItemId)) {
       return base;
     }
@@ -1038,18 +1025,16 @@ export default function HomePage() {
         streaming: streamActive,
       },
     ];
-  }, [messages, turns, assistantText, streamBubbleTurnId, streamActive]);
-  const hiddenMessageCount = Math.max(0, displayedMessages.length - visibleMessageCount);
-  const visibleMessages = useMemo(() => {
-    if (hiddenMessageCount === 0) {
-      return displayedMessages;
-    }
-    return displayedMessages.slice(hiddenMessageCount);
-  }, [displayedMessages, hiddenMessageCount]);
+  }, [messages, activeHistoryTurn, assistantText, streamBubbleTurnId, streamActive]);
   const liveTurnId = activeTurnId || (streamActive ? streamBubbleTurnId : '');
   const lastDisplayedMessage = displayedMessages.at(-1);
   const activeAssistantMessageId = liveTurnId && lastDisplayedMessage?.role === 'assistant' &&
     lastDisplayedMessage.streaming && lastDisplayedMessage.turnId === liveTurnId ? lastDisplayedMessage.id : '';
+  const chatRows = useMemo<ChatRow[]>(() => liveTurnId && !activeAssistantMessageId ? [
+    ...displayedMessages,
+    { id: `working-${liveTurnId}`, role: 'assistant', content: '', turnId: liveTurnId,
+      createdAt: '', working: true },
+  ] : displayedMessages, [displayedMessages, liveTurnId, activeAssistantMessageId]);
   const pendingInputs = queuedInputs.filter((input) => input.status !== 'accepted');
   const timelineVirtualView = useMemo(() => {
     const measuredHeights = timelineRowHeightsRef.current;
@@ -1267,19 +1252,6 @@ export default function HomePage() {
     [flushPendingAssistantText],
   );
   const isAdmin = currentUserRole === 'admin';
-  const turnIdByMessageId = useMemo(() => {
-    const map = new Map<string, string>();
-    messages.forEach((message) => { if (message.turnId) map.set(message.id, message.turnId); });
-    turns.forEach((turn) => {
-      if (typeof turn.userMessageId === 'string' && turn.userMessageId.trim().length > 0) {
-        map.set(turn.userMessageId, turn.id);
-      }
-      if (typeof turn.assistantMessageId === 'string' && turn.assistantMessageId.trim().length > 0) {
-        map.set(turn.assistantMessageId, turn.id);
-      }
-    });
-    return map;
-  }, [turns, messages]);
   const configFullscreenActive =
     leftSidebarTab === 'config' && (leftSidebarMode !== 'closed' || mobileLeftSidebarOpen);
   const shellGridClassName = [
@@ -1546,14 +1518,6 @@ export default function HomePage() {
       clearPendingAssistantTextBatch();
       pendingTurnCreateAbortRef.current?.abort();
       pendingTurnCreateAbortRef.current = null;
-      if (chatScrollIdleTimerRef.current) {
-        clearTimeout(chatScrollIdleTimerRef.current);
-        chatScrollIdleTimerRef.current = null;
-      }
-      if (typeof window !== 'undefined' && chatScrollSettleRafRef.current !== null) {
-        window.cancelAnimationFrame(chatScrollSettleRafRef.current);
-        chatScrollSettleRafRef.current = null;
-      }
       clearFileNodeLongPressTimer();
       clearMentionBlinkTimer();
     };
@@ -1857,47 +1821,6 @@ export default function HomePage() {
   }, [mounted, authenticated, activeWorkspacePath, selectedProject?.backend, selectedSession?.meta]);
 
   useEffect(() => {
-    const container = chatThreadRef.current;
-    if (!container || !chatAtBottomRef.current) {
-      return;
-    }
-    container.scrollTop = container.scrollHeight;
-  }, [visibleMessages, liveTurnId, activeAssistantMessageId]);
-
-  useEffect(() => {
-    const previousCount = previousDisplayedMessageCountRef.current;
-    if (displayedMessages.length > previousCount && visibleMessageCount !== CHAT_VISIBLE_MESSAGE_STEP) {
-      setVisibleMessageCount(CHAT_VISIBLE_MESSAGE_STEP);
-    }
-    if (displayedMessages.length > previousCount) {
-      suppressBottomAutoCollapseRef.current = false;
-    }
-    previousDisplayedMessageCountRef.current = displayedMessages.length;
-  }, [displayedMessages.length, visibleMessageCount]);
-
-  useEffect(() => {
-    setVisibleMessageCount(CHAT_VISIBLE_MESSAGE_STEP);
-    suppressBottomAutoCollapseRef.current = false;
-  }, [selectedSessionId]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-    if (!chatAtBottomRef.current) {
-      return;
-    }
-    const rafId = window.requestAnimationFrame(() => {
-      const container = chatThreadRef.current;
-      if (!container) {
-        return;
-      }
-      container.scrollTop = container.scrollHeight;
-    });
-    return () => window.cancelAnimationFrame(rafId);
-  }, [leftSidebarMode, rightSidebarMode]);
-
-  useEffect(() => {
     if (typeof window === 'undefined') {
       return;
     }
@@ -1944,82 +1867,8 @@ export default function HomePage() {
     };
   }, []);
 
-  useEffect(() => {
-    const wasConfigFullscreenActive = wasConfigFullscreenActiveRef.current;
-    if (configFullscreenActive && !wasConfigFullscreenActive) {
-      const container = chatThreadRef.current;
-      if (container) {
-        chatScrollTopRef.current = container.scrollTop;
-      }
-    }
-    if (!configFullscreenActive && wasConfigFullscreenActive) {
-      if (typeof window === 'undefined') {
-        return;
-      }
-      const rafId = window.requestAnimationFrame(() => {
-        const container = chatThreadRef.current;
-        if (!container) {
-          return;
-        }
-        if (chatAtBottomRef.current) {
-          container.scrollTop = container.scrollHeight;
-          return;
-        }
-        const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
-        container.scrollTop = Math.min(chatScrollTopRef.current, maxScrollTop);
-      });
-      wasConfigFullscreenActiveRef.current = configFullscreenActive;
-      return () => window.cancelAnimationFrame(rafId);
-    }
-    wasConfigFullscreenActiveRef.current = configFullscreenActive;
-  }, [configFullscreenActive]);
-
   function handleChatScroll(): void {
-    const container = chatThreadRef.current;
-    if (!container) {
-      return;
-    }
-    chatScrollTopRef.current = container.scrollTop;
-    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    chatAtBottomRef.current = distanceFromBottom <= 24;
-    if (!chatAtBottomRef.current) {
-      suppressBottomAutoCollapseRef.current = false;
-    }
-    if (chatScrollIdleTimerRef.current) {
-      clearTimeout(chatScrollIdleTimerRef.current);
-      chatScrollIdleTimerRef.current = null;
-    }
-    if (typeof window !== 'undefined' && chatScrollSettleRafRef.current !== null) {
-      window.cancelAnimationFrame(chatScrollSettleRafRef.current);
-      chatScrollSettleRafRef.current = null;
-    }
-    const scheduledTop = container.scrollTop;
-    chatScrollIdleTimerRef.current = setTimeout(() => {
-      chatScrollIdleTimerRef.current = null;
-      const currentContainer = chatThreadRef.current;
-      if (!currentContainer || !chatAtBottomRef.current) {
-        return;
-      }
-      if (suppressBottomAutoCollapseRef.current) {
-        return;
-      }
-      if (typeof window === 'undefined') {
-        setVisibleMessageCount((current) => (current === CHAT_VISIBLE_MESSAGE_STEP ? current : CHAT_VISIBLE_MESSAGE_STEP));
-        return;
-      }
-      chatScrollSettleRafRef.current = window.requestAnimationFrame(() => {
-        chatScrollSettleRafRef.current = null;
-        const latestContainer = chatThreadRef.current;
-        if (!latestContainer || !chatAtBottomRef.current) {
-          return;
-        }
-        const settled = Math.abs(latestContainer.scrollTop - scheduledTop) <= 1;
-        if (!settled) {
-          return;
-        }
-        setVisibleMessageCount((current) => (current === CHAT_VISIBLE_MESSAGE_STEP ? current : CHAT_VISIBLE_MESSAGE_STEP));
-      });
-    }, CHAT_SCROLL_IDLE_MS);
+    snapshotChatScrollState();
   }
 
   function snapshotChatScrollState(): void {
@@ -2029,7 +1878,7 @@ export default function HomePage() {
     }
     chatScrollTopRef.current = container.scrollTop;
     const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    chatAtBottomRef.current = distanceFromBottom <= 24;
+    chatAtBottomRef.current = distanceFromBottom <= 80;
   }
 
   async function loadAuthSession(): Promise<void> {
@@ -2121,8 +1970,8 @@ export default function HomePage() {
       setSelectedSessionId('');
       setMessages([]);
       setQueuedInputs([]);
-      setHistoryBefore(null);
-      setTurns([]);
+      setActiveHistoryTurn(null);
+      setLatestHistoryTurn(null);
       replaceTimelineEvents([]);
       replaceAssistantText('');
       setReasoningText('');
@@ -3191,24 +3040,6 @@ export default function HomePage() {
     }
   }
 
-  async function loadMoreHistory(): Promise<void> {
-    if (historyBefore === null || historyLoadingMore) return;
-    const sessionId = selectedSessionId;
-    setHistoryLoadingMore(true);
-    try {
-      const history = await apiRequest<SessionHistory>(
-        `/api/channels/plugins/web/app/sessions/${sessionId}/history?limit=${CHAT_VISIBLE_MESSAGE_STEP}&before=${historyBefore}`,
-        { method: 'GET' },
-      );
-      if (selectedSessionIdRef.current !== sessionId) return;
-      setMessages((current) => mergeHistoryMessages(current, history.messages));
-      setHistoryBefore(history.nextBefore ?? null);
-      setVisibleMessageCount((current) => current + history.messages.length);
-      suppressBottomAutoCollapseRef.current = true;
-    } catch (error: unknown) { setError(extractMessage(error)); }
-    finally { setHistoryLoadingMore(false); }
-  }
-
   async function handleSendTurn(content: string): Promise<void> {
     const userContent = content.trim();
     if (!userContent || (!canStartTurn && !canSteerTurn)) {
@@ -3235,12 +3066,13 @@ export default function HomePage() {
             method: 'POST', body: { content: userContent },
           });
           setComposerPrompt('');
-          await loadSessionHistory(selectedSessionId, { resumeStream: true, resetEventLog: false, resetInspectPanel: false });
+          await loadSessionHistory(selectedSessionId, { resumeStream: true, resetEventLog: false, resetInspectPanel: false, turnId: activeTurnId });
         }
         return;
       }
 
       optimisticMessageId = `user-${Date.now()}`;
+      sessionHistoryRequestRef.current += 1;
       setMessages((current) => [
         ...current,
         {
@@ -3270,7 +3102,7 @@ export default function HomePage() {
       const createTurnController = new AbortController();
       pendingTurnCreateAbortRef.current = createTurnController;
 
-      const result = await apiRequest<{ turnId: string; status: string }>(
+      const result = await apiRequest<{ turnId: string; messageId: string; status: string }>(
         `/api/channels/plugins/web/app/sessions/${selectedSessionId}/turns`,
         {
         method: 'POST',
@@ -3280,7 +3112,10 @@ export default function HomePage() {
       if (pendingTurnCreateAbortRef.current === createTurnController) {
         pendingTurnCreateAbortRef.current = null;
       }
+      if (selectedSessionIdRef.current !== selectedSessionId) return;
 
+      setMessages((current) => current.map((message) => message.id === optimisticMessageId
+        ? { ...message, id: result.messageId, turnId: result.turnId } : message));
       setActiveTurnId(result.turnId);
       setStreamBubbleTurnId(result.turnId);
       setTurnStatus(result.status);
@@ -3288,7 +3123,9 @@ export default function HomePage() {
         resumeStream: false,
         resetEventLog: false,
         resetInspectPanel: false,
+        turnId: result.turnId,
       });
+      if (selectedSessionIdRef.current !== selectedSessionId) return;
       openStream(result.turnId, selectedSessionId);
     } catch (requestError) {
       if (optimisticMessageId.length > 0) {
@@ -3336,9 +3173,10 @@ export default function HomePage() {
       });
       setTurnStatus(cancelled.status);
       await loadSessionHistory(cancellingSessionId, {
-        resumeStream: false,
+        resumeStream: true,
         resetEventLog: false,
         resetInspectPanel: false,
+        turnId: cancellingTurnId,
       });
     } catch (requestError) {
       setError(extractMessage(requestError));
@@ -3457,7 +3295,7 @@ export default function HomePage() {
 
   async function loadSessionHistory(
     sessionId: string,
-    options: { resumeStream: boolean; resetEventLog: boolean; resetInspectPanel: boolean },
+    options: { resumeStream: boolean; resetEventLog: boolean; resetInspectPanel: boolean; turnId?: string },
   ): Promise<void> {
     const requestId = sessionHistoryRequestRef.current + 1;
     sessionHistoryRequestRef.current = requestId;
@@ -3469,7 +3307,8 @@ export default function HomePage() {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
       setMessages([]);
-      setTurns([]);
+      setActiveHistoryTurn(null);
+      setLatestHistoryTurn(null);
       replaceAssistantText('');
       setReasoningText('');
       setLatestPlan('');
@@ -3492,28 +3331,44 @@ export default function HomePage() {
 
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
+    if (!options.turnId && options.resetInspectPanel) {
+      chatAtBottomRef.current = true;
+      chatScrollTopRef.current = 0;
+      chatMeasurementsRef.current = [];
+      setMessages([]);
+      setActiveTurnId('');
+      setActiveHistoryTurn(null);
+      setStreamActive(false);
+      setStreamBubbleTurnId('');
+    }
     setError('');
     try {
-      const history = await apiRequest<SessionHistory>(`/api/channels/plugins/web/app/sessions/${sessionId}/history?limit=${CHAT_VISIBLE_MESSAGE_STEP}`, {
+      const query = options.turnId ? `?${new URLSearchParams({ turnId: options.turnId })}` : '';
+      const history = await apiRequest<SessionHistory>(`/api/channels/plugins/web/app/sessions/${sessionId}/history${query}`, {
         method: 'GET',
       });
       if (!isCurrentRequest()) {
         return;
       }
-      const cursors = new Map(history.turns.map((turn) => [turn.id, turn.eventCursor ?? 0]));
-      const loadedMessages = history.messages.map((message) => ({ ...message, lastEventSeq: cursors.get(message.turnId ?? '') ?? 0 }));
-      setMessages(loadedMessages);
-      setHistoryBefore(history.nextBefore ?? null);
+      const activeTurn = history.activeTurn;
+      const loadedMessages = history.messages.map((message) => ({
+        ...message,
+        lastEventSeq: history.messageTurn && message.turnId === history.messageTurn.id
+          ? history.messageTurn.eventCursor
+          : activeTurn && message.turnId === activeTurn.id ? activeTurn.eventCursor : 0,
+      }));
+      setMessages((current) => options.turnId ? mergeHistoryMessages(current, loadedMessages) : loadedMessages);
       setQueuedInputs(history.pendingInputs ?? []);
-      messageHistoryTurnsRef.current = new Set(history.turns.filter((turn) => turn.historyVersion === 2).map((turn) => turn.id));
-      setTurns(history.turns);
+      messageHistoryTurnsRef.current = new Set(activeTurn?.historyVersion === 2 ? [activeTurn.id] : []);
+      setActiveHistoryTurn(activeTurn);
+      setLatestHistoryTurn(history.latestTurn);
       setTurnStatus(history.activeTurnStatus ?? 'idle');
-      const latestTurn = history.turns[history.turns.length - 1] ?? null;
+      const latestTurn = history.latestTurn;
       setContextRemainingRatio(latestTurn?.contextRemainingRatio ?? null);
       setActiveTurnId(history.activeTurnId ?? '');
       setPendingApproval(null);
       const messageHistory = messageHistoryTurnsRef.current.has(history.activeTurnId ?? '');
-      let streamSince = messageHistory ? cursors.get(history.activeTurnId ?? '') ?? 0 :
+      let streamSince = messageHistory ? activeTurn?.eventCursor ?? 0 :
         history.activeTurnId ? getTurnStreamCursor(history.activeTurnId) : 0;
       if (messageHistory && history.activeTurnId) {
         turnStreamCursorRef.current[history.activeTurnId] = streamSince;
@@ -3704,15 +3559,19 @@ export default function HomePage() {
       flushPendingAssistantText();
       setTurnStatus(status);
       setStreamActive(false);
+      setActiveTurnId('');
+      setActiveHistoryTurn(null);
+      setLatestHistoryTurn((current) => current?.id === turnId ? { ...current, status } : current);
       setResumedTurnHint('');
       setPendingApproval(null);
       source.close();
       eventSourceRef.current = null;
       if (sessionId) {
         void loadSessionHistory(sessionId, {
-          resumeStream: false,
+          resumeStream: true,
           resetEventLog: false,
           resetInspectPanel: false,
+          turnId,
         });
       }
     };
@@ -3731,7 +3590,7 @@ export default function HomePage() {
         setQueuedInputs((current) => applyInputEvent(current, envelope));
         if (envelope.payload.historyVersion === 2 || envelope.type.startsWith('assistant.message.')) {
           messageHistoryTurnsRef.current.add(envelope.turnId);
-          setTurns((current) => current.map((turn) => turn.id === envelope.turnId ? { ...turn, historyVersion: 2 } : turn));
+          setActiveHistoryTurn((current) => current?.id === envelope.turnId ? { ...current, historyVersion: 2 } : current);
         }
         const selectedMessage = inspectedMessageRef.current;
         const updatedMessage = envelope.payload.message as ChatMessage | undefined;
@@ -5886,22 +5745,32 @@ export default function HomePage() {
             ) : null}
 
             {!configFullscreenActive ? <section className="chat-pane">
-              <div className="chat-thread" ref={chatThreadRef} onScroll={handleChatScroll}>
-                {displayedMessages.length === 0 ? <p className="chat-empty">No messages yet.</p> : null}
-                {hiddenMessageCount > 0 || historyBefore !== null ? (
-                  <button
-                    type="button"
-                    className="button-secondary chat-show-more"
-                    onClick={() => {
-                      suppressBottomAutoCollapseRef.current = true;
-                      if (hiddenMessageCount > 0) setVisibleMessageCount((current) => Math.min(current + CHAT_VISIBLE_MESSAGE_STEP, displayedMessages.length));
-                      else void loadMoreHistory();
-                    }}
-                  >
-                    {historyLoadingMore ? 'Loading...' : 'Show More'}
-                  </button>
-                ) : null}
-                {visibleMessages.map((message) => (
+              <VirtualChatThread
+                key={selectedSessionId}
+                messages={chatRows}
+                scrollElementRef={chatThreadRef}
+                measurementsRef={chatMeasurementsRef}
+                initialOffset={chatScrollTopRef.current}
+                initialAtEnd={chatAtBottomRef.current}
+                onScroll={handleChatScroll}
+              >
+                {(message) => message.working ? (
+                  <div className="chat-message-row chat-message-row-assistant">
+                    <article className="chat-message chat-message-assistant">
+                      <header className="chat-message-meta">
+                        <span>Assistant</span>
+                        <ChatTurnActions
+                          status={turnStatus === 'waiting_approval' ? 'Waiting for approval' : 'Working...'}
+                          onCancel={() => void handleCancelTurn()}
+                          onInspect={() => void reconnectStreamingTimeline()}
+                          cancelDisabled={!activeTurnId || busy}
+                          loading={turnEventsLoading}
+                        />
+                      </header>
+                      <p className="chat-working-placeholder">Thinking...</p>
+                    </article>
+                  </div>
+                ) : (
                   <div
                     key={message.id}
                     className={`chat-message-row chat-message-row-${message.role === 'user' ? 'user' : 'assistant'}`}
@@ -5926,11 +5795,11 @@ export default function HomePage() {
                               cancelDisabled={!activeTurnId || busy}
                               loading={turnEventsLoading}
                             />
-                          ) : message.role === 'assistant' && turnIdByMessageId.get(message.id) ? (
+                          ) : message.role === 'assistant' && message.turnId ? (
                             <button
                               type="button"
                               className="chat-inspect-button"
-                              onClick={() => void inspectTurnEvents(turnIdByMessageId.get(message.id) ?? '', message.backendItemId ? message : null)}
+                              onClick={() => void inspectTurnEvents(message.turnId ?? '', message.backendItemId ? message : null)}
                               disabled={turnEventsLoading}
                               aria-label={turnEventsLoading ? 'Loading timeline' : 'Inspect timeline'}
                               title={turnEventsLoading ? 'Loading timeline' : 'Inspect timeline'}
@@ -5950,25 +5819,8 @@ export default function HomePage() {
                       </p>
                     ) : null}
                   </div>
-                ))}
-                {liveTurnId && !activeAssistantMessageId ? (
-                  <div className="chat-message-row chat-message-row-assistant">
-                    <article className="chat-message chat-message-assistant">
-                      <header className="chat-message-meta">
-                        <span>Assistant</span>
-                        <ChatTurnActions
-                          status={turnStatus === 'waiting_approval' ? 'Waiting for approval' : 'Working...'}
-                          onCancel={() => void handleCancelTurn()}
-                          onInspect={() => void reconnectStreamingTimeline()}
-                          cancelDisabled={!activeTurnId || busy}
-                          loading={turnEventsLoading}
-                        />
-                      </header>
-                      <p className="chat-working-placeholder">Thinking...</p>
-                    </article>
-                  </div>
-                ) : null}
-              </div>
+                )}
+              </VirtualChatThread>
 
               {pendingApproval ? (
                 <article className="sim-approval">

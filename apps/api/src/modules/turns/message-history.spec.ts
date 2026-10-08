@@ -102,6 +102,135 @@ describe("durable message history", () => {
     };
   }
 
+  it('returns bounded turn metadata and retains pending inputs from older turns', async () => {
+    const f = await fixture();
+    const archivedIds = Array.from({ length: 30 }, () => crypto.randomUUID());
+    await prisma.turn.createMany({
+      data: archivedIds.map((id, index) => ({
+        id,
+        sessionId: f.session.id,
+        status: 'completed',
+        createdAt: new Date(Date.now() - (60 - index) * 1000),
+        effectiveBackendConfig: { archivedOnly: 'old configuration'.repeat(500) },
+      })),
+    });
+    await prisma.turnInput.createMany({
+      data: ['unconfirmed', 'accepted'].map((status) => ({
+        turnId: archivedIds[0]!,
+        clientRequestId: status,
+        content: status,
+        status,
+      })),
+    });
+    await prisma.turn.update({
+      where: { id: f.turn.id },
+      data: { effectiveBackendConfig: { model: 'current model' }, contextRemainingRatio: 0.75 },
+    });
+    await f.emit('assistant.message.started', { itemId: 'live' });
+    const history = await f.sessions.getHistoryForSession(f.user.id, f.session.id, { limit: 1 });
+    expect(history).not.toHaveProperty('turns');
+    expect(history.turnCount).toBe(31);
+    expect(history.activeTurn).toMatchObject({
+      id: f.turn.id,
+      historyVersion: 2,
+      eventCursor: 1,
+      effectiveBackendConfig: { model: 'current model' },
+    });
+    expect(history.activeTurn).not.toHaveProperty('events');
+    expect(history.latestTurn).toMatchObject({ id: f.turn.id, contextRemainingRatio: 0.75 });
+    expect(JSON.stringify(history)).not.toContain('archivedOnly');
+    expect(history.pendingInputs.map((input) => input.status)).toEqual(['unconfirmed']);
+    await f.emit('turn.cancelled', {});
+    expect((await f.history()).activeTurn).toBeNull();
+    expect((await f.history()).latestTurn?.id).toBe(f.turn.id);
+    await f.service.onModuleDestroy();
+  });
+
+  it('loads complete history and calibrates only the requested turn, including legacy associations', async () => {
+    const f = await fixture();
+    const legacy = await prisma.message.create({
+      data: { sessionId: f.session.id, role: 'assistant', content: 'Legacy response', historySeq: 2 },
+    });
+    const oldTurn = await prisma.turn.create({
+      data: { sessionId: f.session.id, status: 'completed', assistantMessageId: legacy.id },
+    });
+    await prisma.message.createMany({
+      data: Array.from({ length: 25 }, (_, index) => ({
+        sessionId: f.session.id, turnId: oldTurn.id, role: 'assistant',
+        content: `Older message ${index}`, historySeq: index + 3,
+      })),
+    });
+    await f.emit('assistant.message.completed', { itemId: 'live', text: 'Current response' });
+    await f.emit('turn.completed', {});
+    const full = await f.history();
+    expect(full.messages).toHaveLength(28);
+    expect(full.hasMore).toBe(false);
+    const scoped = await f.sessions.getHistoryForSession(f.user.id, f.session.id, { turnId: f.turn.id });
+    expect(scoped.messages.map((message) => message.content)).toEqual(['initial input', 'Current response']);
+    expect(scoped.messageTurn).toMatchObject({ id: f.turn.id, historyVersion: 2, eventCursor: 2, status: 'completed' });
+    expect(scoped.activeTurn).toBeNull();
+    expect(scoped).not.toHaveProperty('turns');
+    const older = await f.sessions.getHistoryForSession(f.user.id, f.session.id, { turnId: oldTurn.id });
+    expect(older.messages).toHaveLength(26);
+    expect(older.messages[0]).toMatchObject({ id: legacy.id, turnId: oldTurn.id });
+    expect((await prisma.message.findUniqueOrThrow({ where: { id: legacy.id } })).turnId).toBeNull();
+    await expect(f.sessions.getHistoryForSession('another user', f.session.id, { turnId: f.turn.id })).rejects.toThrow('Turn not found');
+    const other = await fixture();
+    await expect(f.sessions.getHistoryForSession(f.user.id, f.session.id, { turnId: other.turn.id })).rejects.toThrow('Turn not found');
+    await f.service.onModuleDestroy();
+    await other.service.onModuleDestroy();
+  });
+
+  it('resolves legacy message associations on older pages and leaves copied history unlinked', async () => {
+    const f = await fixture();
+    const legacyMessage = await prisma.$transaction((tx) =>
+      createHistoryMessage(tx, {
+        data: { sessionId: f.session.id, role: 'assistant', content: 'legacy response' },
+      }),
+    );
+    const archivedTurn = await prisma.turn.create({
+      data: {
+        sessionId: f.session.id,
+        status: 'completed',
+        assistantMessageId: legacyMessage.id,
+        createdAt: new Date(Date.now() - 60_000),
+      },
+    });
+    await prisma.$transaction((tx) =>
+      createHistoryMessage(tx, {
+        data: { sessionId: f.session.id, role: 'assistant', content: 'copied response' },
+      }),
+    );
+    const page = await f.sessions.getHistoryForSession(f.user.id, f.session.id, { limit: 1 });
+    expect(page.messages[0]).toMatchObject({ content: 'copied response', turnId: null });
+    const older = await f.sessions.getHistoryForSession(f.user.id, f.session.id, {
+      limit: 1,
+      before: page.nextBefore!,
+    });
+    expect(older.messages[0]).toMatchObject({ id: legacyMessage.id, turnId: archivedTurn.id });
+    expect(older.latestTurn?.id).toBe(f.turn.id);
+    expect(older.activeTurn?.id).toBe(f.turn.id);
+    expect(older).not.toHaveProperty('turns');
+    await expect(f.sessions.getHistoryForSession('another user', f.session.id)).rejects.toThrow(
+      'Session not found',
+    );
+    await f.service.onModuleDestroy();
+  });
+
+  it.each(['turn.completed', 'turn.cancelled', 'turn.failed'] as const)(
+    'stores turnId when writing a legacy assistant message on %s',
+    async (terminal) => {
+      const f = await fixture();
+      await prisma.turn.update({ where: { id: f.turn.id }, data: { historyVersion: 1 } });
+      await f.emit('assistant.delta', { text: 'legacy output' });
+      await f.emit(terminal, { content: 'legacy output', code: 'STOP', message: 'Stopped' });
+      expect(
+        await prisma.message.findFirst({ where: { sessionId: f.session.id, role: 'assistant' } }),
+      ).toMatchObject({ content: 'legacy output', turnId: f.turn.id });
+      await f.service.onModuleDestroy();
+    },
+  );
+
   it("commits each completed item before turn end and replaces deltas with authoritative text", async () => {
     const f = await fixture();
     await f.emit("assistant.message.started", {

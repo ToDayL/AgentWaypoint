@@ -66,8 +66,35 @@ On interruption, already completed messages are retained and unfinished messages
 are closed as `interrupted` with the text received so far.
 
 History supports optional `limit` and `before` cursors; callers that omit them
-still receive the whole history. The web application loads the latest page and
-loads older pages on demand.
+receive the whole history. The web application loads the complete message
+snapshot on session entry/reload and after manual compaction. During a turn,
+message lifecycle, receipt, delta, and interruption events update that snapshot
+incrementally. New-turn creation, turn termination, cancellation, and legacy
+steering calibrate only the affected turn using `history?turnId=...`; these
+responses merge by message id instead of replacing older history. This query
+validates turn ownership and session membership and includes legacy message
+associations. `messageTurn` supplies the requested turn's protocol version and
+API event watermark, including after termination, to prevent replaying deltas
+already represented in the snapshot.
+
+Chat bubbles use TanStack Virtual with stable message ids and dynamic height
+measurement. The render buffer includes at least 12 bubbles and two viewports
+(minimum 1200 pixels) above and below the visible range. The list follows new
+messages and streaming growth only while pinned to the bottom; reading older
+history retains its anchor. Thinking placeholders participate in the same
+virtual list. History is no longer sliced or collapsed back to ten bubbles.
+
+The history response does not include the session's full `turns` collection.
+`activeTurn` contains only the running turn's runtime information, protocol
+version, and API event watermark; `latestTurn` contains the latest turn's runtime
+information for the session details. Both are nullable. `activeTurnId` and
+`activeTurnStatus` remain available, and `turnCount` supplies the count without
+transferring historical turn records. Pending inputs are queried separately so
+unconfirmed inputs from ended turns remain available.
+
+Messages carry their own `turnId` for Timeline and Diff requests. Legacy messages
+missing the field are resolved from known message associations for the requested
+page only; copied history without a source-turn association remains unlinked.
 
 A message's Timeline covers `(timelineStartSeq, endEventSeq]`: activity after
 the preceding assistant completion, through the selected assistant completion.
@@ -94,13 +121,16 @@ the migration or delete v2 data as a rollback mechanism.
 ## Validation
 
 - `message-history.spec.ts`: real SQLite projection, queued input correlation,
+  complete snapshots and scoped turn calibration (including legacy links),
   authoritative completion, interruption, pagination, ordering, and replay.
 - `message-history-migration.spec.ts`: applies the checked-in migrations to a
   legacy fixture and verifies preserved data, uniqueness, and cascading cleanup.
 - `codex-backend.spec.ts`: protocol mapping and correlation fields.
 - `history-messages.spec.ts`: browser state reduction and response/receipt races.
 - `apps/web/e2e/history.pw.ts`: real web/API/SSE with a controlled runner,
-  covering queued input, reload, streaming, message Timeline, and turn Diff.
+  covering queued input, reload, streaming, message Timeline, turn Diff,
+  compaction activity, legacy completion, full snapshot/scoped transfer,
+  virtual overscan, reading anchors, panel restoration, and viewport resizing.
 
 The browser test requires a web production build and installed Playwright
 Chromium; all test data and listeners are temporary. It does not call a live AI

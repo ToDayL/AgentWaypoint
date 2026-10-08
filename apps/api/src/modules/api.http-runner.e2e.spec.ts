@@ -886,13 +886,18 @@ describe.sequential('API e2e (http runner)', () => {
     expect(historyResponse.status).toBe(200);
     const history = (await historyResponse.json()) as {
       messages: Array<{ role: string; content: string }>;
-      turns: Array<unknown>;
+      turnCount: number;
+      activeTurn: unknown;
+      latestTurn: unknown;
     };
     expect(history.messages).toMatchObject([
       { role: 'user', content: 'create forkable history' },
       { role: 'assistant', content: expect.stringMatching(/^Echo:\s*create fork/) },
     ]);
-    expect(history.turns).toHaveLength(0);
+    expect(history).not.toHaveProperty('turns');
+    expect(history.turnCount).toBe(0);
+    expect(history.activeTurn).toBeNull();
+    expect(history.latestTurn).toBeNull();
   });
 
   it('closes codex thread when deleting a session', async () => {

@@ -69,6 +69,62 @@ const project = await prisma.project.create({
     backendConfig,
   },
 });
+const longSession = await prisma.session.create({
+  data: {
+    projectId: project.id,
+    title: 'Long message history',
+    status: 'active',
+    meta: {
+      runtime: {
+        backend: 'codex',
+        cwd: database.defaultWorkspaceRoot,
+        backendConfig,
+        autoApprove: false,
+      },
+    },
+  },
+});
+const historyStart = Date.now() - 700_000;
+const oldTurnIds = Array.from({ length: 100 }, () => crypto.randomUUID());
+await prisma.turn.createMany({
+  data: oldTurnIds.map((id, index) => ({
+    id,
+    sessionId: longSession.id,
+    status: 'completed',
+    historyVersion: 2,
+    createdAt: new Date(historyStart + index * 6000),
+  })),
+});
+await prisma.message.createMany({
+  data: Array.from({ length: 600 }, (_, index) => ({
+    sessionId: longSession.id,
+    turnId: oldTurnIds[Math.floor(index / 6)]!,
+    backendItemId: `history-${index}`,
+    historySeq: index + 1,
+    role: index % 6 === 0 ? 'user' : 'assistant',
+    state: 'completed',
+    content:
+      `History message ${index}\n\n` +
+      (index % 7 === 0
+        ? 'A paragraph with **bold text**, a link [reference](https://example.test), and several words.\n\n'.repeat(
+            14,
+          )
+        : 'A short message.'),
+    createdAt: new Date(historyStart + index * 1000),
+  })),
+});
+const longTurn = await app
+  .get(TurnsService)
+  .createTurnForSession(user.id, longSession.id, { content: 'Continue long history' });
+const legacySession = await prisma.session.create({
+  data: { projectId: project.id, title: 'Legacy protocol history', status: 'active' },
+});
+const legacyMessage = await prisma.message.create({
+  data: { sessionId: legacySession.id, role: 'user', content: 'Legacy input', historySeq: 1 },
+});
+const legacyTurn = await prisma.turn.create({
+  data: { sessionId: legacySession.id, userMessageId: legacyMessage.id, status: 'running', historyVersion: 1 },
+});
 const session = await prisma.session.create({
   data: {
     projectId: project.id,
@@ -108,6 +164,10 @@ web.once("message", (message: { port: number }) =>
     apiUrl,
     sessionId: session.id,
     turnId: turn.turnId,
+    longSessionId: longSession.id,
+    longTurnId: longTurn.turnId,
+    legacySessionId: legacySession.id,
+    legacyTurnId: legacyTurn.id,
     email,
     password,
   }),

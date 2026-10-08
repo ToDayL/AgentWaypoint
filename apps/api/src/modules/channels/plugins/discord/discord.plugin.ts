@@ -1483,7 +1483,7 @@ export class DiscordPlugin implements ChannelPlugin {
     const sessionRecord = asRecord(historyRecord.session) ?? session;
     const sessionRuntime = readSessionRuntimeMetaForDisplay(sessionRecord.meta);
     const messages = asRecordArray(historyRecord.messages);
-    const turns = asRecordArray(historyRecord.turns);
+    const turnCount = typeof historyRecord.turnCount === 'number' ? historyRecord.turnCount : 0;
     const info =
       `id: ${normalizeOptionalString(sessionRecord.id) ?? sessionId}\n` +
       `title: ${normalizeOptionalString(sessionRecord.title) ?? 'untitled'}\n` +
@@ -1493,7 +1493,7 @@ export class DiscordPlugin implements ChannelPlugin {
       `workspace: ${sessionRuntime.workspace}\n` +
       `backendConfig: ${JSON.stringify(sessionRuntime.backendConfig)}\n` +
       `messages: ${messages.length}\n` +
-      `turns: ${turns.length}`;
+      `turns: ${turnCount}`;
     await interaction.editReply(`Session info:\n\`\`\`\n${info}\n\`\`\``);
   }
 

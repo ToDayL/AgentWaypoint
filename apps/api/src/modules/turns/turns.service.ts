@@ -983,6 +983,7 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
           const assistantMessage = await createHistoryMessage(tx, {
             data: {
               sessionId: turn.sessionId,
+              turnId,
               role: 'assistant',
               content: normalizedAssistantContent,
             },
@@ -1038,6 +1039,7 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
               ? await createHistoryMessage(tx, {
                   data: {
                     sessionId: turn.sessionId,
+                    turnId,
                     role: 'assistant',
                     content: assistantContent,
                   },
@@ -1613,6 +1615,7 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
           ? await createHistoryMessage(tx, {
               data: {
                 sessionId: turn.sessionId,
+                turnId,
                 role: 'assistant',
                 content: assistantContent,
               },
