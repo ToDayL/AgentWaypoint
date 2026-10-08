@@ -69,6 +69,18 @@ History supports optional `limit` and `before` cursors; callers that omit them
 still receive the whole history. The web application loads the latest page and
 loads older pages on demand.
 
+The history response does not include the session's full `turns` collection.
+`activeTurn` contains only the running turn's runtime information, protocol
+version, and API event watermark; `latestTurn` contains the latest turn's runtime
+information for the session details. Both are nullable. `activeTurnId` and
+`activeTurnStatus` remain available, and `turnCount` supplies the count without
+transferring historical turn records. Pending inputs are queried separately so
+unconfirmed inputs from ended turns remain available.
+
+Messages carry their own `turnId` for Timeline and Diff requests. Legacy messages
+missing the field are resolved from known message associations for the requested
+page only; copied history without a source-turn association remains unlinked.
+
 A message's Timeline covers `(timelineStartSeq, endEventSeq]`: activity after
 the preceding assistant completion, through the selected assistant completion.
 The live view advances at message boundaries and retains following activity.

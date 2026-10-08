@@ -8,6 +8,26 @@ import { terminalLifecycle } from '../terminals/terminal-lifecycle';
 
 const ACTIVE_TURN_STATUSES = new Set(['queued', 'running', 'waiting_approval']);
 const EXECUTION_MODES = new Set(['read-only', 'safe-write', 'auto-review', 'yolo']);
+const HISTORY_TURN_SELECT = {
+  id: true,
+  status: true,
+  backend: true,
+  effectiveBackendConfig: true,
+  effectiveRuntimeConfig: true,
+  contextRemainingRatio: true,
+} satisfies Prisma.TurnSelect;
+
+function serializeHistoryTurn(turn: Prisma.TurnGetPayload<{ select: typeof HISTORY_TURN_SELECT }>) {
+  return {
+    id: turn.id,
+    status: turn.status,
+    backend: turn.backend,
+    effectiveBackendConfig: normalizeJsonRecord(turn.effectiveBackendConfig),
+    effectiveRuntimeConfig: normalizeJsonRecord(turn.effectiveRuntimeConfig),
+    contextRemainingRatio:
+      turn.contextRemainingRatio === null ? null : Number(turn.contextRemainingRatio),
+  };
+}
 
 type SessionRuntimeConfig = {
   backend: string;
@@ -82,105 +102,127 @@ export class SessionsService {
     });
   }
 
-  async getHistoryForSession(userId: string, sessionId: string, query: { before?: number; limit?: number } = {}) {
-    const session = await this.prisma.$transaction((tx) => tx.session.findFirst({
-      where: {
-        id: sessionId,
-        project: {
-          ownerUserId: userId,
-        },
-      },
-      select: {
-        id: true,
-        projectId: true,
-        title: true,
-        status: true,
-        updatedAt: true,
-        meta: true,
-        messages: {
-          ...(query.before ? { where: { historySeq: { lt: query.before } } } : {}),
-          orderBy: [{ historySeq: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
-          ...(query.limit ? { take: query.limit + 1 } : {}),
-          select: {
-            id: true,
-            role: true,
-            content: true,
-            createdAt: true,
-            turnId: true,
-            backendItemId: true,
-            historySeq: true,
-            state: true,
-            phase: true,
-            startEventSeq: true,
-            endEventSeq: true,
-            timelineStartSeq: true,
+  async getHistoryForSession(
+    userId: string,
+    sessionId: string,
+    query: { before?: number; limit?: number } = {},
+  ) {
+    return this.prisma.$transaction(async (tx) => {
+      const session = await tx.session.findFirst({
+        where: {
+          id: sessionId,
+          project: {
+            ownerUserId: userId,
           },
         },
-        turns: {
-          orderBy: { createdAt: 'asc' },
-          select: {
-            id: true,
-            historyVersion: true,
-            events: { orderBy: { seq: 'desc' }, take: 1, select: { seq: true } },
-            inputs: { where: { status: { not: 'accepted' } }, orderBy: { createdAt: 'asc' } },
-            status: true,
-            backend: true,
-            requestedBackendConfig: true,
-            effectiveBackendConfig: true,
-            effectiveRuntimeConfig: true,
-            failureCode: true,
-            failureMessage: true,
-            contextRemainingRatio: true,
-            contextRemainingTokens: true,
-            contextWindowTokens: true,
-            contextUpdatedAt: true,
-            triggerIdentifier: true,
-            triggerProvider: true,
-            triggerIntegrationId: true,
-            triggerMessageId: true,
-            userMessageId: true,
-            assistantMessageId: true,
-            createdAt: true,
-            startedAt: true,
-            endedAt: true,
+        select: {
+          id: true,
+          projectId: true,
+          title: true,
+          status: true,
+          updatedAt: true,
+          meta: true,
+          _count: { select: { turns: true } },
+          messages: {
+            ...(query.before ? { where: { historySeq: { lt: query.before } } } : {}),
+            orderBy: [{ historySeq: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+            ...(query.limit ? { take: query.limit + 1 } : {}),
+            select: {
+              id: true,
+              role: true,
+              content: true,
+              createdAt: true,
+              turnId: true,
+              backendItemId: true,
+              historySeq: true,
+              state: true,
+              phase: true,
+              startEventSeq: true,
+              endEventSeq: true,
+              timelineStartSeq: true,
+            },
+          },
+          turns: {
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+            take: 1,
+            select: HISTORY_TURN_SELECT,
           },
         },
-      },
-    }));
+      });
 
-    if (!session) {
-      throw new NotFoundException({ message: 'Session not found' });
-    }
+      if (!session) {
+        throw new NotFoundException({ message: 'Session not found' });
+      }
 
-    const activeTurn = [...session.turns].reverse().find((turn) => ACTIVE_TURN_STATUSES.has(turn.status));
-
-    const hasMore = Boolean(query.limit && session.messages.length > query.limit);
-    const messages = (query.limit ? session.messages.slice(0, query.limit) : session.messages).reverse();
-    return {
-      hasMore,
-      nextBefore: hasMore ? messages[0]?.historySeq ?? null : null,
-      pendingInputs: session.turns.flatMap((turn) => turn.inputs),
-      session: {
-        id: session.id,
-        projectId: session.projectId,
-        title: session.title,
-        status: session.status,
-        updatedAt: session.updatedAt,
-        meta: normalizeJsonRecord(session.meta),
-      },
-      messages,
-      turns: session.turns.map(({ events, inputs: _inputs, ...turn }) => ({
-        ...turn,
-        eventCursor: events[0]?.seq ?? 0,
-        requestedBackendConfig: normalizeJsonRecord(turn.requestedBackendConfig),
-        effectiveBackendConfig: normalizeJsonRecord(turn.effectiveBackendConfig),
-        effectiveRuntimeConfig: normalizeJsonRecord(turn.effectiveRuntimeConfig),
-        contextRemainingRatio:
-          turn.contextRemainingRatio === null ? null : Number(turn.contextRemainingRatio),
-      })),
-      activeTurnId: activeTurn?.id ?? null,
-      activeTurnStatus: activeTurn?.status ?? null,
-    };
+      const hasMore = Boolean(query.limit && session.messages.length > query.limit);
+      const messages = (
+        query.limit ? session.messages.slice(0, query.limit) : session.messages
+      ).reverse();
+      const unlinkedIds = messages
+        .filter((message) => !message.turnId)
+        .map((message) => message.id);
+      const activeTurn = await tx.turn.findFirst({
+        where: { sessionId, status: { in: [...ACTIVE_TURN_STATUSES] } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        select: {
+          ...HISTORY_TURN_SELECT,
+          historyVersion: true,
+          events: { orderBy: { seq: 'desc' }, take: 1, select: { seq: true } },
+        },
+      });
+      const pendingInputs = await tx.turnInput.findMany({
+        where: { turn: { sessionId }, status: { not: 'accepted' } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      });
+      // Legacy writers did not always store turnId. Resolve only the messages
+      // returned on this page; forked messages without an association stay unlinked.
+      const linkedTurns = unlinkedIds.length
+        ? await tx.turn.findMany({
+            where: {
+              sessionId,
+              OR: [
+                { userMessageId: { in: unlinkedIds } },
+                { assistantMessageId: { in: unlinkedIds } },
+              ],
+            },
+            select: { id: true, userMessageId: true, assistantMessageId: true },
+          })
+        : [];
+      const turnIdByMessageId = new Map<string, string>();
+      for (const turn of linkedTurns) {
+        if (turn.userMessageId) turnIdByMessageId.set(turn.userMessageId, turn.id);
+        if (turn.assistantMessageId) turnIdByMessageId.set(turn.assistantMessageId, turn.id);
+      }
+      const latestTurn = session.turns[0];
+      return {
+        hasMore,
+        nextBefore: hasMore ? (messages[0]?.historySeq ?? null) : null,
+        pendingInputs,
+        turnCount: session._count.turns,
+        session: {
+          id: session.id,
+          projectId: session.projectId,
+          title: session.title,
+          status: session.status,
+          updatedAt: session.updatedAt,
+          meta: normalizeJsonRecord(session.meta),
+        },
+        messages: messages.map((message) => ({
+          ...message,
+          turnId: message.turnId ?? turnIdByMessageId.get(message.id) ?? null,
+        })),
+        latestTurn: latestTurn ? serializeHistoryTurn(latestTurn) : null,
+        activeTurn: activeTurn
+          ? {
+              ...serializeHistoryTurn(activeTurn),
+              historyVersion: activeTurn.historyVersion,
+              eventCursor: activeTurn.events[0]?.seq ?? 0,
+            }
+          : null,
+        activeTurnId: activeTurn?.id ?? null,
+        activeTurnStatus: activeTurn?.status ?? null,
+      };
+    });
   }
 
   async updateByIdForUser(userId: string, sessionId: string, input: UpdateSessionBody) {

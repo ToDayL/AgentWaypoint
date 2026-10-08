@@ -96,7 +96,18 @@ test("keeps live actions in an independent active bubble, floats steer inputs, a
   await page.request.post(`${fixture.url}/api/auth/login/password`, {
     data: { email: fixture.email, password: fixture.password },
   });
+  const historyResponse = page.waitForResponse((response) =>
+    response.url().includes(`/sessions/${fixture.sessionId}/history`),
+  );
   await page.goto(fixture.url);
+  const initialHistory = await (await historyResponse).json();
+  expect(initialHistory).not.toHaveProperty("turns");
+  expect(initialHistory.activeTurn).toMatchObject({
+    id: fixture.turnId,
+    historyVersion: 2,
+    eventCursor: 1,
+  });
+  expect(initialHistory.latestTurn.id).toBe(fixture.turnId);
   expect(await page.evaluate(() => typeof crypto.randomUUID)).toBe("undefined");
   await expect(page.locator(".chat-markdown")).toHaveText(["Initial request"]);
   await expect(

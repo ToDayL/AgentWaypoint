@@ -901,11 +901,10 @@ describe('API e2e', () => {
     expect(historyResponse.statusCode).toBe(200);
     const history = historyResponse.json() as {
       messages: Array<{ role: string; content: string }>;
-      turns: Array<{
+      latestTurn: {
         id: string;
-        requestedBackendConfig: Record<string, unknown> | null;
         effectiveBackendConfig: Record<string, unknown> | null;
-      }>;
+      } | null;
       activeTurnId: string | null;
     };
     expect(history.messages.length).toBeGreaterThanOrEqual(2);
@@ -914,19 +913,11 @@ describe('API e2e', () => {
       content: 'hello from e2e',
     });
     expect(history.messages.at(-1)).toMatchObject({ role: 'assistant' });
-    expect(history.turns).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: turnId,
-          requestedBackendConfig: expect.objectContaining({
-            cwd: TEST_REPO_PATH,
-          }),
-          effectiveBackendConfig: expect.objectContaining({
-            cwd: TEST_REPO_PATH,
-          }),
-        }),
-      ]),
-    );
+    expect(history).not.toHaveProperty('turns');
+    expect(history.latestTurn).toMatchObject({
+      id: turnId,
+      effectiveBackendConfig: { cwd: TEST_REPO_PATH },
+    });
     expect(history.activeTurnId).toBeNull();
   });
 
@@ -1597,28 +1588,22 @@ describe('API e2e', () => {
     });
     expect(historyResponse.statusCode).toBe(200);
     const history = historyResponse.json() as {
-      messages: Array<{ id: string; role: string; content: string }>;
-      turns: Array<{
+      messages: Array<{ id: string; role: string; content: string; turnId: string | null }>;
+      latestTurn: {
         id: string;
         status: string;
-        assistantMessageId: string | null;
-        failureCode: string | null;
-      }>;
+      } | null;
     };
     const assistantMessage = history.messages.find((message) => message.role === 'assistant');
     expect(assistantMessage).toMatchObject({
       content: 'partial assistant response',
+      turnId: turn.id,
     });
-    expect(history.turns).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: turn.id,
-          status: 'failed',
-          assistantMessageId: assistantMessage?.id,
-          failureCode: 'TEST_FAILURE',
-        }),
-      ]),
-    );
+    expect(history.latestTurn).toMatchObject({ id: turn.id, status: 'failed' });
+    expect(await prisma.turn.findUnique({ where: { id: turn.id } })).toMatchObject({
+      assistantMessageId: assistantMessage?.id,
+      failureCode: 'TEST_FAILURE',
+    });
     expect(
       await prisma.botMessage.count({
         where: { sessionId: session.id, kind: 'turn_message' },
@@ -1691,13 +1676,7 @@ describe('API e2e', () => {
         { role: 'user', content: 'preserve fallback response' },
         { role: 'assistant', content: 'assistant response recovered from completed item' },
       ],
-      turns: [
-        {
-          id: turn.id,
-          status: 'failed',
-          failureCode: 'TEST_FAILURE',
-        },
-      ],
+      latestTurn: { id: turn.id, status: 'failed' },
     });
   });
 

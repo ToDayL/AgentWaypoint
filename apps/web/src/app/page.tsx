@@ -109,26 +109,18 @@ type AvailableModel = {
   defaultEffort: string | null;
 };
 
-type TurnSummary = {
+type SessionTurnInfo = {
   id: string;
-  historyVersion?: number;
-  eventCursor?: number;
   backend: string | null;
   status: string;
-  requestedBackendConfig: Record<string, unknown> | null;
   effectiveBackendConfig: Record<string, unknown> | null;
   effectiveRuntimeConfig: Record<string, unknown> | null;
-  failureCode: string | null;
-  failureMessage: string | null;
   contextRemainingRatio: number | null;
-  contextRemainingTokens: number | null;
-  contextWindowTokens: number | null;
-  contextUpdatedAt: string | null;
-  createdAt: string;
-  startedAt: string | null;
-  endedAt: string | null;
-  userMessageId: string | null;
-  assistantMessageId: string | null;
+};
+
+type ActiveHistoryTurn = SessionTurnInfo & {
+  historyVersion: number;
+  eventCursor: number;
 };
 
 type SessionHistory = {
@@ -137,7 +129,8 @@ type SessionHistory = {
   nextBefore?: number | null;
   session: Session;
   messages: ChatMessage[];
-  turns: TurnSummary[];
+  activeTurn: ActiveHistoryTurn | null;
+  latestTurn: SessionTurnInfo | null;
   activeTurnId: string | null;
   activeTurnStatus: string | null;
 };
@@ -821,7 +814,8 @@ export default function HomePage() {
   const timelineRequestIdRef = useRef(0);
   const timelineLoadBufferRef = useRef<StreamEnvelope[] | null>(null);
 
-  const [turns, setTurns] = useState<TurnSummary[]>([]);
+  const [activeHistoryTurn, setActiveHistoryTurn] = useState<ActiveHistoryTurn | null>(null);
+  const [latestHistoryTurn, setLatestHistoryTurn] = useState<SessionTurnInfo | null>(null);
   const [assistantText, setAssistantText] = useState('');
   const [reasoningText, setReasoningText] = useState('');
   const [latestPlan, setLatestPlan] = useState('');
@@ -961,8 +955,8 @@ export default function HomePage() {
     [sessions, selectedSessionId],
   );
   const sessionInfoTurn = useMemo(
-    () => turns.find((item) => item.id === activeTurnId) ?? turns[turns.length - 1] ?? null,
-    [turns, activeTurnId],
+    () => activeHistoryTurn?.id === activeTurnId ? activeHistoryTurn : latestHistoryTurn,
+    [activeHistoryTurn, activeTurnId, latestHistoryTurn],
   );
   const resolvedSessionInfo = useMemo(() => {
     const turnRuntime = readTurnRuntimeConfig(sessionInfoTurn?.effectiveBackendConfig);
@@ -1022,7 +1016,7 @@ export default function HomePage() {
   const displayedMessages = useMemo(() => {
     const base = messages.filter((message) => message.role !== 'assistant' || message.state === 'streaming' || message.content.length > 0)
       .map((message) => ({ ...message, streaming: message.state === 'streaming' }));
-    if (!streamBubbleTurnId || turns.some((turn) => turn.id === streamBubbleTurnId && turn.historyVersion === 2) ||
+    if (!streamBubbleTurnId || (activeHistoryTurn?.id === streamBubbleTurnId && activeHistoryTurn.historyVersion === 2) ||
       messages.some((message) => message.turnId === streamBubbleTurnId && message.backendItemId)) {
       return base;
     }
@@ -1038,7 +1032,7 @@ export default function HomePage() {
         streaming: streamActive,
       },
     ];
-  }, [messages, turns, assistantText, streamBubbleTurnId, streamActive]);
+  }, [messages, activeHistoryTurn, assistantText, streamBubbleTurnId, streamActive]);
   const hiddenMessageCount = Math.max(0, displayedMessages.length - visibleMessageCount);
   const visibleMessages = useMemo(() => {
     if (hiddenMessageCount === 0) {
@@ -1267,19 +1261,6 @@ export default function HomePage() {
     [flushPendingAssistantText],
   );
   const isAdmin = currentUserRole === 'admin';
-  const turnIdByMessageId = useMemo(() => {
-    const map = new Map<string, string>();
-    messages.forEach((message) => { if (message.turnId) map.set(message.id, message.turnId); });
-    turns.forEach((turn) => {
-      if (typeof turn.userMessageId === 'string' && turn.userMessageId.trim().length > 0) {
-        map.set(turn.userMessageId, turn.id);
-      }
-      if (typeof turn.assistantMessageId === 'string' && turn.assistantMessageId.trim().length > 0) {
-        map.set(turn.assistantMessageId, turn.id);
-      }
-    });
-    return map;
-  }, [turns, messages]);
   const configFullscreenActive =
     leftSidebarTab === 'config' && (leftSidebarMode !== 'closed' || mobileLeftSidebarOpen);
   const shellGridClassName = [
@@ -2122,7 +2103,8 @@ export default function HomePage() {
       setMessages([]);
       setQueuedInputs([]);
       setHistoryBefore(null);
-      setTurns([]);
+      setActiveHistoryTurn(null);
+      setLatestHistoryTurn(null);
       replaceTimelineEvents([]);
       replaceAssistantText('');
       setReasoningText('');
@@ -3469,7 +3451,8 @@ export default function HomePage() {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
       setMessages([]);
-      setTurns([]);
+      setActiveHistoryTurn(null);
+      setLatestHistoryTurn(null);
       replaceAssistantText('');
       setReasoningText('');
       setLatestPlan('');
@@ -3500,20 +3483,24 @@ export default function HomePage() {
       if (!isCurrentRequest()) {
         return;
       }
-      const cursors = new Map(history.turns.map((turn) => [turn.id, turn.eventCursor ?? 0]));
-      const loadedMessages = history.messages.map((message) => ({ ...message, lastEventSeq: cursors.get(message.turnId ?? '') ?? 0 }));
+      const activeTurn = history.activeTurn;
+      const loadedMessages = history.messages.map((message) => ({
+        ...message,
+        lastEventSeq: activeTurn && message.turnId === activeTurn.id ? activeTurn.eventCursor : 0,
+      }));
       setMessages(loadedMessages);
       setHistoryBefore(history.nextBefore ?? null);
       setQueuedInputs(history.pendingInputs ?? []);
-      messageHistoryTurnsRef.current = new Set(history.turns.filter((turn) => turn.historyVersion === 2).map((turn) => turn.id));
-      setTurns(history.turns);
+      messageHistoryTurnsRef.current = new Set(activeTurn?.historyVersion === 2 ? [activeTurn.id] : []);
+      setActiveHistoryTurn(activeTurn);
+      setLatestHistoryTurn(history.latestTurn);
       setTurnStatus(history.activeTurnStatus ?? 'idle');
-      const latestTurn = history.turns[history.turns.length - 1] ?? null;
+      const latestTurn = history.latestTurn;
       setContextRemainingRatio(latestTurn?.contextRemainingRatio ?? null);
       setActiveTurnId(history.activeTurnId ?? '');
       setPendingApproval(null);
       const messageHistory = messageHistoryTurnsRef.current.has(history.activeTurnId ?? '');
-      let streamSince = messageHistory ? cursors.get(history.activeTurnId ?? '') ?? 0 :
+      let streamSince = messageHistory ? activeTurn?.eventCursor ?? 0 :
         history.activeTurnId ? getTurnStreamCursor(history.activeTurnId) : 0;
       if (messageHistory && history.activeTurnId) {
         turnStreamCursorRef.current[history.activeTurnId] = streamSince;
@@ -3731,7 +3718,7 @@ export default function HomePage() {
         setQueuedInputs((current) => applyInputEvent(current, envelope));
         if (envelope.payload.historyVersion === 2 || envelope.type.startsWith('assistant.message.')) {
           messageHistoryTurnsRef.current.add(envelope.turnId);
-          setTurns((current) => current.map((turn) => turn.id === envelope.turnId ? { ...turn, historyVersion: 2 } : turn));
+          setActiveHistoryTurn((current) => current?.id === envelope.turnId ? { ...current, historyVersion: 2 } : current);
         }
         const selectedMessage = inspectedMessageRef.current;
         const updatedMessage = envelope.payload.message as ChatMessage | undefined;
@@ -5926,11 +5913,11 @@ export default function HomePage() {
                               cancelDisabled={!activeTurnId || busy}
                               loading={turnEventsLoading}
                             />
-                          ) : message.role === 'assistant' && turnIdByMessageId.get(message.id) ? (
+                          ) : message.role === 'assistant' && message.turnId ? (
                             <button
                               type="button"
                               className="chat-inspect-button"
-                              onClick={() => void inspectTurnEvents(turnIdByMessageId.get(message.id) ?? '', message.backendItemId ? message : null)}
+                              onClick={() => void inspectTurnEvents(message.turnId ?? '', message.backendItemId ? message : null)}
                               disabled={turnEventsLoading}
                               aria-label={turnEventsLoading ? 'Loading timeline' : 'Inspect timeline'}
                               title={turnEventsLoading ? 'Loading timeline' : 'Inspect timeline'}
