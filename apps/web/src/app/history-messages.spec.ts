@@ -4,6 +4,7 @@ import {
   applyInputEvent,
   eventInMessageRange,
   mergeQueuedInput,
+  mergeHistoryMessages,
   type ChatMessage,
   type QueuedInput,
 } from "./history-messages";
@@ -31,6 +32,15 @@ const queued: QueuedInput = {
 };
 
 describe("message history streaming", () => {
+  it('merges turn calibration without dropping older messages or overwriting newer SSE data', () => {
+    const older = { ...message, id: 'older', turnId: 'old-turn', historySeq: 1, content: 'Old history' };
+    const staleSnapshot = { ...message, content: 'Stale', lastEventSeq: 4 };
+    const merged = mergeHistoryMessages([older, message], [staleSnapshot]);
+    expect(merged.map((entry) => entry.content)).toEqual(['Old history', 'A']);
+    const completed = { ...message, content: 'Complete', state: 'completed', lastEventSeq: 6 };
+    expect(mergeHistoryMessages(merged, [completed]).map((entry) => entry.content)).toEqual(['Old history', 'Complete']);
+    expect(mergeHistoryMessages(merged, [message])).toHaveLength(2);
+  });
   it("does not reapply deltas already represented by a history snapshot", () => {
     const event = {
       turnId: "turn",

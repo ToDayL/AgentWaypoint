@@ -105,9 +105,24 @@ export class SessionsService {
   async getHistoryForSession(
     userId: string,
     sessionId: string,
-    query: { before?: number; limit?: number } = {},
+    query: { before?: number; limit?: number; turnId?: string } = {},
   ) {
     return this.prisma.$transaction(async (tx) => {
+      const messageTurn = query.turnId
+        ? await tx.turn.findFirst({
+            where: { id: query.turnId, sessionId, session: { project: { ownerUserId: userId } } },
+            select: {
+              ...HISTORY_TURN_SELECT,
+              userMessageId: true,
+              assistantMessageId: true,
+              historyVersion: true,
+              events: { orderBy: { seq: 'desc' }, take: 1, select: { seq: true } },
+            },
+          })
+        : null;
+      if (query.turnId && !messageTurn) {
+        throw new NotFoundException({ message: 'Turn not found' });
+      }
       const session = await tx.session.findFirst({
         where: {
           id: sessionId,
@@ -124,7 +139,23 @@ export class SessionsService {
           meta: true,
           _count: { select: { turns: true } },
           messages: {
-            ...(query.before ? { where: { historySeq: { lt: query.before } } } : {}),
+            where: {
+              ...(query.before ? { historySeq: { lt: query.before } } : {}),
+              ...(messageTurn
+                ? {
+                    OR: [
+                      { turnId: messageTurn.id },
+                      {
+                        id: {
+                          in: [messageTurn.userMessageId, messageTurn.assistantMessageId].filter(
+                            (id): id is string => Boolean(id),
+                          ),
+                        },
+                      },
+                    ],
+                  }
+                : {}),
+            },
             orderBy: [{ historySeq: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
             ...(query.limit ? { take: query.limit + 1 } : {}),
             select: {
@@ -212,6 +243,13 @@ export class SessionsService {
           turnId: message.turnId ?? turnIdByMessageId.get(message.id) ?? null,
         })),
         latestTurn: latestTurn ? serializeHistoryTurn(latestTurn) : null,
+        messageTurn: messageTurn
+          ? {
+              ...serializeHistoryTurn(messageTurn),
+              historyVersion: messageTurn.historyVersion,
+              eventCursor: messageTurn.events[0]?.seq ?? 0,
+            }
+          : null,
         activeTurn: activeTurn
           ? {
               ...serializeHistoryTurn(activeTurn),

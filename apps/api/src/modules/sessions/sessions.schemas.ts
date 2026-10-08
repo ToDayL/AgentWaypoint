@@ -81,4 +81,5 @@ export type UpdateSessionBody = z.infer<typeof UpdateSessionBodySchema>;
 export const HistoryQuerySchema = z.object({
   before: z.coerce.number().int().positive().optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),
+  turnId: z.string().trim().min(1).optional(),
 });

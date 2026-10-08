@@ -122,7 +122,7 @@ export class WebPlugin implements ChannelPlugin {
     return this.requireContext().updateSessionForUser(userId, sessionId, input);
   }
 
-  async getSessionHistoryForUser(userId: string, sessionId: string, query?: { before?: number; limit?: number }): Promise<unknown> {
+  async getSessionHistoryForUser(userId: string, sessionId: string, query?: { before?: number; limit?: number; turnId?: string }): Promise<unknown> {
     return this.requireContext().getSessionHistoryForUser(userId, sessionId, query);
   }
 
