@@ -1798,6 +1798,7 @@ button:disabled {
   min-width: 0;
   overflow: auto;
   overflow-x: hidden;
+  overflow-anchor: none;
   margin-top: 0.6rem;
   padding-left: 0.25rem;
   align-content: start;

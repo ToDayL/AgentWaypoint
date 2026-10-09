@@ -15,6 +15,8 @@ let fixture: {
   turnId: string;
   longSessionId: string;
   longTurnId: string;
+  timelineSessionId: string;
+  timelineTurnId: string;
   legacySessionId: string;
   legacyTurnId: string;
   email: string;
@@ -456,6 +458,164 @@ test("keeps live actions in an independent active bubble, floats steer inputs, a
   await expect(
     page.getByRole("button", { name: "Live stream", exact: true }),
   ).toHaveCount(0);
+});
+
+test('virtualizes a long timeline and preserves anchors through output growth, tabs, and resizing', async ({
+  page,
+}) => {
+  await page.request.post(`${fixture.url}/api/auth/login/password`, {
+    data: { email: fixture.email, password: fixture.password },
+  });
+  await page.goto(fixture.url);
+  await page.getByText('Long event timeline', { exact: true }).click();
+  await page.getByRole('button', { name: 'Live stream', exact: true }).click();
+  await page.getByRole('button', { name: 'Pin insights', exact: true }).click();
+  const timeline = page.locator('.timeline-list');
+  const layout = () =>
+    timeline.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      const rows = [...element.querySelectorAll<HTMLElement>('.timeline-virtual-row')];
+      const visible = rows.find((row) => row.getBoundingClientRect().bottom > rect.top + 1);
+      return {
+        id: visible?.dataset.timelineEventId,
+        top: visible ? visible.getBoundingClientRect().top - rect.top : 0,
+        bottomGap: element.scrollHeight - element.clientHeight - element.scrollTop,
+        bufferAbove: rows[0] ? rect.top - rows[0].getBoundingClientRect().top : 0,
+        bufferBelow: rows.at(-1) ? rows.at(-1)!.getBoundingClientRect().bottom - rect.bottom : 0,
+        count: rows.length,
+      };
+    });
+  await expect(timeline).toContainText('Timeline tool 799');
+  await expect.poll(async () => (await layout()).bottomGap).toBeLessThanOrEqual(1);
+  expect((await layout()).count).toBeLessThan(120);
+  await timeline.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await expect(timeline.locator('.timeline-event-title').first()).toHaveText('Timeline tool 0');
+  await timeline.evaluate((element) => {
+    element.scrollTop = element.scrollHeight / 2;
+  });
+  await expect.poll(async () => (await layout()).bufferAbove).toBeGreaterThanOrEqual(1200);
+  await expect.poll(async () => (await layout()).bufferBelow).toBeGreaterThanOrEqual(1200);
+  const anchor = await layout();
+  const assertAnchor = async () => {
+    await expect.poll(async () => (await layout()).id).toBe(anchor.id);
+    await expect
+      .poll(async () => Math.abs((await layout()).top - anchor.top))
+      .toBeLessThanOrEqual(2);
+  };
+
+  // Expand a measured row above the fold without scrolling it into view.
+  const expandedId = await timeline.evaluate((element) => {
+    const top = element.getBoundingClientRect().top;
+    const row = [...element.querySelectorAll<HTMLElement>('.timeline-virtual-row')].find(
+      (candidate) =>
+        candidate.getBoundingClientRect().bottom < top - 100 &&
+        candidate.querySelector('button[aria-label="Expand details"]'),
+    )!;
+    row.querySelector<HTMLButtonElement>('button[aria-label="Expand details"]')!.click();
+    return row.dataset.timelineEventId!;
+  });
+  await expect(
+    timeline.locator(`[data-timeline-event-id="${expandedId}"]`).getByRole('button', {
+      name: 'Collapse details',
+      exact: true,
+    }),
+  ).toHaveCount(1);
+  await assertAnchor();
+  await emit(
+    page.request,
+    'tool.started',
+    {
+      itemId: 'timeline-live',
+      kind: 'customTool',
+      title: 'Appended live tool',
+    },
+    fixture.timelineTurnId,
+  );
+  await emit(
+    page.request,
+    'tool.output',
+    {
+      itemId: 'timeline-live',
+      kind: 'customTool',
+      text: 'Live output while reading older events.',
+    },
+    fixture.timelineTurnId,
+  );
+  await assertAnchor();
+
+  await page.getByRole('button', { name: 'Diff', exact: true }).click();
+  await expect(timeline).toHaveCount(0);
+  await page.getByRole('button', { name: 'Timeline', exact: true }).click();
+  await assertAnchor();
+  await expect(
+    timeline.locator(`[data-timeline-event-id="${expandedId}"]`).getByRole('button', {
+      name: 'Collapse details',
+      exact: true,
+    }),
+  ).toHaveCount(1);
+
+  await timeline.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  const liveTool = timeline.locator('.timeline-event').filter({ hasText: 'Appended live tool' });
+  await expect(liveTool).toBeVisible();
+  await expect.poll(async () => (await layout()).bottomGap).toBeLessThanOrEqual(1);
+  for (let chunk = 0; chunk < 3; chunk++) {
+    await emit(
+      page.request,
+      'tool.output',
+      {
+        itemId: 'timeline-live',
+        kind: 'customTool',
+        text: Array.from(
+          { length: 12 },
+          (_, line) => `\nLive chunk ${chunk}, line ${line}: growing tool output.`,
+        ).join(''),
+      },
+      fixture.timelineTurnId,
+    );
+    await expect(liveTool.locator('pre')).toContainText(`Live chunk ${chunk}, line 11`);
+    await expect.poll(async () => (await layout()).bottomGap).toBeLessThanOrEqual(1);
+  }
+  await liveTool.getByRole('button', { name: 'Expand details', exact: true }).click();
+  await expect(liveTool.locator('pre')).toContainText('Live chunk 0, line 0');
+  await expect.poll(async () => (await layout()).bottomGap).toBeLessThanOrEqual(1);
+  await emit(
+    page.request,
+    'tool.completed',
+    {
+      itemId: 'timeline-live',
+      kind: 'customTool',
+      summary: 'Finished live output.',
+    },
+    fixture.timelineTurnId,
+  );
+  await expect(liveTool.locator('.status-pill')).toHaveText('completed');
+  await expect.poll(async () => (await layout()).bottomGap).toBeLessThanOrEqual(1);
+
+  const resize = page.getByRole('separator', { name: 'Resize insights panel', exact: true });
+  const handle = (await resize.boundingBox())!;
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handle.x - 220, handle.y + handle.height / 2, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => (await layout()).bottomGap).toBeLessThanOrEqual(1);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Live stream', exact: true }).click();
+  await expect(timeline).toBeVisible();
+  await expect.poll(async () => (await layout()).bottomGap).toBeLessThanOrEqual(1);
+  expect((await layout()).count).toBeLessThan(120);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await expect.poll(async () => (await layout()).bottomGap).toBeLessThanOrEqual(1);
+
+  // A different scope starts at its latest event rather than restoring this offset.
+  await page.getByText('Legacy protocol history', { exact: true }).click();
+  await page.getByRole('button', { name: 'Live stream', exact: true }).click();
+  await expect(timeline).not.toContainText('Appended live tool');
+  await expect(timeline).toContainText('No events yet.');
+  await expect.poll(async () => (await layout()).bottomGap).toBeLessThanOrEqual(1);
 });
 
 test('loads complete history once, buffers virtual rows, preserves reading position, and calibrates one turn', async ({

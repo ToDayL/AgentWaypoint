@@ -116,6 +116,44 @@ await prisma.message.createMany({
 const longTurn = await app
   .get(TurnsService)
   .createTurnForSession(user.id, longSession.id, { content: 'Continue long history' });
+const timelineSession = await prisma.session.create({
+  data: {
+    projectId: project.id,
+    title: 'Long event timeline',
+    status: 'active',
+    meta: {
+      runtime: {
+        backend: 'codex',
+        cwd: database.defaultWorkspaceRoot,
+        backendConfig,
+        autoApprove: false,
+      },
+    },
+  },
+});
+const timelineTurn = await app
+  .get(TurnsService)
+  .createTurnForSession(user.id, timelineSession.id, { content: 'Inspect a long timeline' });
+await prisma.event.createMany({
+  data: Array.from({ length: 800 }, (_, index) => ({
+    turnId: timelineTurn.turnId,
+    seq: index + 2,
+    type: 'tool.completed',
+    payload: {
+      itemId: `timeline-${index}`,
+      kind: 'customTool',
+      title: `Timeline tool ${index}`,
+      summary:
+        index % 5 === 0
+          ? Array.from(
+              { length: 32 },
+              (_, line) => `Output ${index}, line ${line}: details for dynamic height measurement.`,
+            ).join('\n')
+          : `Short output ${index}.`,
+    },
+  })),
+});
+
 const legacySession = await prisma.session.create({
   data: { projectId: project.id, title: 'Legacy protocol history', status: 'active' },
 });
@@ -166,6 +204,8 @@ web.once("message", (message: { port: number }) =>
     turnId: turn.turnId,
     longSessionId: longSession.id,
     longTurnId: longTurn.turnId,
+    timelineSessionId: timelineSession.id,
+    timelineTurnId: timelineTurn.turnId,
     legacySessionId: legacySession.id,
     legacyTurnId: legacyTurn.id,
     email,

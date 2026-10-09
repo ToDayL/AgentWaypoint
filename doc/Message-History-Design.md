@@ -101,6 +101,13 @@ the preceding assistant completion, through the selected assistant completion.
 The live view advances at message boundaries and retains following activity.
 The full-turn view remains available. Tool output is still addressed by its
 turn and stable item/call reference, including tools crossing message boundaries.
+Timeline uses an independent TanStack Virtual list with stable event ids and
+dynamic height measurement. Its buffer includes at least 12 events and two
+viewports (minimum 1200 pixels) above and below the viewport. Appends and output
+growth follow the bottom only while pinned; tab changes preserve the scroll
+position and measurements for the same turn/message scope. Switching scope starts
+at the latest event. Event grouping and the 80ms SSE batch remain independent of
+virtual scrolling.
 Diff always loads the enclosing turn's `TurnDiffSnapshot` and is labeled as the
 entire turn's changes.
 
