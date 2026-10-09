@@ -63,7 +63,8 @@ import { Diff, Hunk, parseDiff } from 'react-diff-view';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
-import { applyHistoryEvent, applyInputEvent, eventInMessageRange, mergeHistoryMessages, mergeQueuedInput, type ChatMessage, type QueuedInput } from './history-messages';
+import { applyHistoryEvent, applyInputEvent, eventInMessageRange, mergeHistoryMessages, mergeQueuedInput, readHistoryMessageSnapshot, type ChatMessage, type QueuedInput } from './history-messages';
+import { normalizeTurnEventPage, type StreamEnvelope, type TurnEventHistoryResponse } from './turn-event-history';
 import { VirtualChatThread, type ChatMeasurements, type ChatRow } from './virtual-chat-thread';
 import { TerminalPanel } from '../components/terminal/TerminalPanel';
 import { requestId } from '../components/terminal/terminal-client';
@@ -137,21 +138,6 @@ type SessionHistory = {
   activeTurnStatus: string | null;
 };
 
-type StreamEnvelope = {
-  turnId: string;
-  seq: number;
-  type: string;
-  payload: Record<string, unknown>;
-  createdAt: string;
-};
-
-type TurnEventHistoryItem = {
-  turnId: string;
-  seq: number;
-  type: string;
-  payload: unknown;
-  createdAt: string;
-};
 type PanelLayoutPersistence = {
   left: {
     mode: SidebarMode;
@@ -1414,10 +1400,10 @@ export default function HomePage() {
   const commandDetailPanelView = useMemo(
     () => (
       <article className="sim-output command-detail-panel">
-        {commandDetailLoading ? <pre>Loading command output...</pre> : null}
+        {commandDetailLoading ? <pre>Loading command details...</pre> : null}
         {!commandDetailLoading && commandDetailError ? <pre>{commandDetailError}</pre> : null}
         {!commandDetailLoading && !commandDetailError && !commandDetail ? (
-          <pre>Select the output icon on a command in Timeline.</pre>
+          <pre>Select the details icon on a command in Timeline.</pre>
         ) : null}
         {!commandDetailLoading && !commandDetailError && commandDetail ? (
           <>
@@ -3253,7 +3239,7 @@ export default function HomePage() {
     const normalizedEvents: StreamEnvelope[] = [];
     let cursor = range?.since ?? 0;
     while (true) {
-      const events = await apiRequest<TurnEventHistoryItem[]>(
+      const response = await apiRequest<TurnEventHistoryResponse>(
         `/api/channels/plugins/web/app/turns/${normalizedTurnId}/events?${new URLSearchParams({
           since: String(cursor),
           limit: String(pageSize),
@@ -3263,12 +3249,10 @@ export default function HomePage() {
           method: 'GET',
         },
       );
-      const page = events
-        .map((event) => normalizeHistoryEventItem(event, normalizedTurnId))
-        .filter((event): event is StreamEnvelope => event !== null);
+      const { events: page, eventCount } = normalizeTurnEventPage(response, normalizedTurnId);
       normalizedEvents.push(...page);
       const nextCursor = page.reduce((latest, event) => Math.max(latest, event.seq), cursor);
-      if (events.length < pageSize || nextCursor <= cursor) {
+      if (eventCount < pageSize || nextCursor <= cursor) {
         break;
       }
       cursor = nextCursor;
@@ -3497,7 +3481,7 @@ export default function HomePage() {
   async function openCommandDetail(event: TimelineEvent): Promise<void> {
     const turnId = inspectedTurnIdRef.current.trim();
     const detailRef = event.detailRef?.trim() ?? '';
-    if (!turnId || !detailRef || !event.hasOutput || !isCommandToolKind(event.toolKind)) {
+    if (!turnId || !detailRef || !isCommandToolKind(event.toolKind)) {
       return;
     }
     openInsightsPanel('detail');
@@ -3593,7 +3577,7 @@ export default function HomePage() {
           setActiveHistoryTurn((current) => current?.id === envelope.turnId ? { ...current, historyVersion: 2 } : current);
         }
         const selectedMessage = inspectedMessageRef.current;
-        const updatedMessage = envelope.payload.message as ChatMessage | undefined;
+        const updatedMessage = readHistoryMessageSnapshot(envelope);
         if (selectedMessage && updatedMessage?.id === selectedMessage.id) {
           inspectedMessageRef.current = updatedMessage;
         }
@@ -6020,7 +6004,6 @@ export default function HomePage() {
                                   ) : null}
                                   {event.kind === 'tool' &&
                                   event.detailRef &&
-                                  event.hasOutput &&
                                   isCommandToolKind(event.toolKind) ? (
                                     <button
                                       type="button"
@@ -6028,8 +6011,8 @@ export default function HomePage() {
                                       onClick={() => {
                                         void openCommandDetail(event);
                                       }}
-                                      title="View command output"
-                                      aria-label="View command output"
+                                      title="View command details"
+                                      aria-label="View command details"
                                     >
                                       <SquareTerminal />
                                     </button>
@@ -6986,27 +6969,6 @@ function formatAutoReviewDetails(payload: Record<string, unknown>): string[] {
   }
 
   return details;
-}
-
-function normalizeHistoryEventItem(item: TurnEventHistoryItem, fallbackTurnId: string): StreamEnvelope | null {
-  const seq = typeof item.seq === 'number' && Number.isFinite(item.seq) ? item.seq : null;
-  if (seq === null) {
-    return null;
-  }
-  const type = typeof item.type === 'string' && item.type.trim().length > 0 ? item.type.trim() : 'event';
-  const payload = item.payload && typeof item.payload === 'object' && !Array.isArray(item.payload)
-    ? (item.payload as Record<string, unknown>)
-    : {};
-  const turnId =
-    typeof item.turnId === 'string' && item.turnId.trim().length > 0 ? item.turnId : fallbackTurnId;
-  const createdAt = typeof item.createdAt === 'string' && item.createdAt.length > 0 ? item.createdAt : new Date().toISOString();
-  return {
-    turnId,
-    seq,
-    type,
-    payload,
-    createdAt,
-  };
 }
 
 function buildTurnEventSnapshot(events: StreamEnvelope[]): TurnEventSnapshot {

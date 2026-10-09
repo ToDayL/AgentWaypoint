@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 
 const MAX_TIMELINE_METADATA_LENGTH = 4_096;
+const MAX_COMMAND_PREVIEW_LENGTH = 120;
 const MAX_TOOL_DETAIL_REF_LENGTH = 512;
 
 export type ToolDetailRefKind = 'call' | 'item' | 'tool' | 'event';
@@ -23,7 +24,7 @@ export function summarizeTimelineEventPayload(type: string, payload: unknown): P
   }
 
   if (type === 'tool.started' || type === 'tool.completed') {
-    return summarizeToolLifecycle(record);
+    return summarizeToolLifecycle(type, record);
   }
 
   if (type === 'turn.approval.requested') {
@@ -39,7 +40,37 @@ export function summarizeTimelineEventPayload(type: string, payload: unknown): P
     ]);
   }
 
-  return JSON.parse(JSON.stringify(record)) as Prisma.InputJsonValue;
+  const summary = JSON.parse(JSON.stringify(record)) as Record<string, unknown>;
+  const message = asRecord(summary.message);
+  if (message && typeof message.id === 'string') {
+    summary.message = summarizeMessageSnapshot(message, record.itemId);
+    if (type === 'assistant.message.completed' && summary.text === message.content) {
+      delete summary.text;
+    }
+    if (type === 'user.message.accepted' && summary.content === message.content) {
+      delete summary.content;
+    }
+  }
+  if (Array.isArray(summary.messages)) {
+    summary.messages = summary.messages.map((entry) => {
+      const snapshot = asRecord(entry);
+      return snapshot ? summarizeMessageSnapshot(snapshot) : entry;
+    });
+  }
+  return summary as Prisma.InputJsonValue;
+}
+
+function summarizeMessageSnapshot(
+  message: Record<string, unknown>,
+  itemId?: unknown,
+): Record<string, unknown> {
+  const { sessionId: _sessionId, tokenCount: _tokenCount, turnId: _turnId, ...summary } = message;
+  // The enclosing event supplies these associations. Terminal snapshots keep
+  // their own backend item id because a terminal event can close several items.
+  if (typeof itemId === 'string' && summary.backendItemId === itemId) {
+    delete summary.backendItemId;
+  }
+  return summary;
 }
 
 export function resolveEventToolDetailRef(payload: unknown): string | null {
@@ -144,6 +175,8 @@ function summarizeToolOutput(record: Record<string, unknown>): Prisma.InputJsonV
     'kind',
     'stream',
     'taskId',
+    'outputAvailable',
+    'outputBytes',
   ]);
   const kind = readTrimmedString(record.kind);
   copyToolDetailRef(summary, record);
@@ -162,7 +195,7 @@ function summarizeToolOutput(record: Record<string, unknown>): Prisma.InputJsonV
   return summary as Prisma.InputJsonValue;
 }
 
-function summarizeToolLifecycle(record: Record<string, unknown>): Prisma.InputJsonValue {
+function summarizeToolLifecycle(type: string, record: Record<string, unknown>): Prisma.InputJsonValue {
   const item = asRecord(record.item);
   const summary = copyFields(record, [
     'phase',
@@ -184,6 +217,8 @@ function summarizeToolLifecycle(record: Record<string, unknown>): Prisma.InputJs
     'outcome',
     'exitCode',
     'durationMs',
+    'outputAvailable',
+    'outputBytes',
   ]);
 
   copyFallbackScalar(summary, 'itemId', item?.id);
@@ -195,6 +230,22 @@ function summarizeToolLifecycle(record: Record<string, unknown>): Prisma.InputJs
   copyFallbackScalar(summary, 'exitCode', item?.exitCode);
   copyFallbackScalar(summary, 'durationMs', item?.durationMs);
   copyToolDetailRef(summary, record);
+
+  if (isCommandToolKind(resolveEventToolKind(record)) && typeof summary.detailRef === 'string') {
+    // Full command text remains in the persisted event for the detail endpoint.
+    if (type === 'tool.started') {
+      const title = readTrimmedString(record.title) ?? readTrimmedString(record.command) ??
+        readTrimmedString(item?.command) ?? 'Command execution';
+      const preview = title.replace(/\s+/g, ' ');
+      summary.title = preview.length > MAX_COMMAND_PREVIEW_LENGTH
+        ? `${preview.slice(0, MAX_COMMAND_PREVIEW_LENGTH - 1)}…`
+        : preview;
+    } else {
+      delete summary.title;
+      delete summary.cwd;
+    }
+    delete summary.command;
+  }
 
   const aggregatedOutput = readString(item?.aggregatedOutput) ?? '';
   if (aggregatedOutput.length > 0) {

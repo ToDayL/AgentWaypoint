@@ -32,6 +32,34 @@ const queued: QueuedInput = {
 };
 
 describe("message history streaming", () => {
+  it('restores compact message associations and calibrates content after missing deltas', () => {
+    const { turnId: _turnId, backendItemId: _backendItemId, ...snapshot } = message;
+    const result = applyHistoryEvent([], {
+      turnId: 'turn', seq: 10, type: 'assistant.message.completed',
+      payload: {
+        itemId: 'item-a', messageId: 'a',
+        message: { ...snapshot, content: 'Final answer', state: 'completed', endEventSeq: 10 },
+      },
+    });
+    expect(result[0]).toMatchObject({
+      id: 'a', turnId: 'turn', backendItemId: 'item-a', content: 'Final answer',
+      state: 'completed', lastEventSeq: 10, timelineStartSeq: 2, endEventSeq: 10,
+    });
+    expect(eventInMessageRange(result[0]!, 10)).toBe(true);
+    expect(applyHistoryEvent(result, {
+      turnId: 'turn', seq: 6, type: 'assistant.delta',
+      payload: { itemId: 'item-a', messageId: 'a', text: 'Late delta' },
+    })).toEqual(result);
+  });
+
+  it('restores each interrupted message from a compact terminal snapshot', () => {
+    const { turnId: _turnId, ...snapshot } = message;
+    expect(applyHistoryEvent([], {
+      turnId: 'turn', seq: 10, type: 'turn.failed',
+      payload: { message: 'Connection failed', messages: [{ ...snapshot, state: 'interrupted' }] },
+    })[0]).toMatchObject({ turnId: 'turn', backendItemId: 'item-a', state: 'interrupted', lastEventSeq: 10 });
+  });
+
   it('merges turn calibration without dropping older messages or overwriting newer SSE data', () => {
     const older = { ...message, id: 'older', turnId: 'old-turn', historySeq: 1, content: 'Old history' };
     const staleSnapshot = { ...message, content: 'Stale', lastEventSeq: 4 };
