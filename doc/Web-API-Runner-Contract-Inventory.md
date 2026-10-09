@@ -598,6 +598,47 @@ type PendingApproval = {
 };
 ```
 
+### Turn Event History Page
+
+`GET /api/channels/plugins/web/app/turns/:id/events?since=<int>&until=<int?>&limit=<int?>`
+returns a page with a shared turn identifier:
+
+```ts
+type TurnEventHistoryPage = {
+  turnId: string;
+  events: Array<{
+    id: string;
+    seq: number;
+    type: string;
+    payload: Record<string, unknown>;
+    createdAt: string;
+  }>;
+};
+```
+
+Events retain their durable sequence numbers. `since` is exclusive, `until` is
+inclusive, and `limit` bounds each page. An empty page contains `events: []`.
+Web also accepts the previous array response during staggered deployments.
+
+Both history pages and SSE use compact timeline payloads:
+
+- Command start events carry a title preview of at most 120 characters.
+  Command completion events omit the repeated title, command, and working directory.
+  Full command text and output are available from
+  `GET /api/channels/plugins/web/app/turns/:id/command-output?detailRef=<ref>`,
+  including commands that produced no output. Legacy commands without a stable
+  detail reference retain their inline command metadata.
+- Message snapshots omit `sessionId`, `tokenCount`, and the enclosing `turnId`.
+  They also omit `backendItemId` when it matches the event's `itemId`.
+  Web restores these turn/item associations from the enclosing event.
+- Completed assistant messages retain authoritative `message.content` and omit
+  an identical outer `text`; accepted user messages omit an identical outer
+  `content`. Snapshots retain history order, state, phase, timestamps, and
+  timeline range boundaries. Terminal snapshots keep each interrupted item's
+  own `backendItemId`.
+
+These projections do not change the persisted events or session history.
+
 ### RunnerStreamEvent / SSE Envelope
 
 ```ts

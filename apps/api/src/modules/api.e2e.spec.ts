@@ -1091,6 +1091,24 @@ describe('API e2e', () => {
     });
     expect(secondCommandOutputResponse.statusCode).toBe(201);
 
+    const longCommand = `python3 - <<'PY'\n${'print("command details")\n'.repeat(300)}PY`;
+    for (const type of ['tool.started', 'tool.completed']) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/internal/runner/turns/${turnId}/events`,
+        payload: {
+          type,
+          payload: {
+            itemId: 'tool-3', kind: 'commandExecution', title: longCommand,
+            command: longCommand, cwd: '/workspace',
+            status: type === 'tool.started' ? 'inProgress' : 'completed',
+            ...(type === 'tool.completed' ? { exitCode: 0, durationMs: 10 } : {}),
+          },
+        },
+      });
+      expect(response.statusCode).toBe(201);
+    }
+
     const completionResponse = await app.inject({
       method: 'POST',
       url: `/internal/runner/turns/${turnId}/events`,
@@ -1135,7 +1153,7 @@ describe('API e2e', () => {
       headers: { 'x-user-email': email },
     });
     expect(pagedEventsResponse.statusCode).toBe(200);
-    expect(pagedEventsResponse.json()).toEqual([
+    expect(pagedEventsResponse.json()).toEqual({ turnId, events: [
       expect.objectContaining({
         seq: diffSeq,
         type: 'diff.updated',
@@ -1144,7 +1162,8 @@ describe('API e2e', () => {
           snapshotAvailable: true,
         },
       }),
-    ]);
+    ] });
+    expect(pagedEventsResponse.json().events[0]).not.toHaveProperty('turnId');
     const diffDetailResponse = await app.inject({
       method: 'GET',
       url: `/api/channels/plugins/web/app/turns/${turnId}/diff`,
@@ -1181,7 +1200,7 @@ describe('API e2e', () => {
       headers: { 'x-user-email': email },
     });
     expect(timelineToolResponse.statusCode).toBe(200);
-    expect(timelineToolResponse.json()).toEqual([
+    expect(timelineToolResponse.json()).toEqual({ turnId, events: [
       expect.objectContaining({
         seq: toolOutput.seq,
         type: 'tool.output',
@@ -1192,7 +1211,7 @@ describe('API e2e', () => {
           outputAvailable: true,
         }),
       }),
-    ]);
+    ] });
     expect(JSON.stringify(timelineToolResponse.json())).not.toContain('out-1out-2');
     const commandOutputResponse = await app.inject({
       method: 'GET',
@@ -1221,6 +1240,46 @@ describe('API e2e', () => {
       title: 'Bash',
       output: 'other-output',
     });
+
+    const commandEvents = events.filter((event) => (event.payload as Record<string, unknown>).itemId === 'tool-3');
+    const timelineCommandsResponse = await app.inject({
+      method: 'GET',
+      url: `/api/channels/plugins/web/app/turns/${turnId}/events?${new URLSearchParams({
+        since: String(commandEvents[0]!.seq - 1), until: String(commandEvents[1]!.seq), limit: '1',
+      }).toString()}`,
+      headers: { 'x-user-email': email },
+    });
+    expect(timelineCommandsResponse.statusCode).toBe(200);
+    const commandPage = timelineCommandsResponse.json();
+    expect(commandPage.turnId).toBe(turnId);
+    expect(commandPage.events).toHaveLength(1);
+    expect(commandPage.events[0].payload.title.length).toBeLessThanOrEqual(120);
+    expect(commandPage.events[0].payload).not.toHaveProperty('command');
+    const nextCommandPage = await app.inject({
+      method: 'GET',
+      url: `/api/channels/plugins/web/app/turns/${turnId}/events?since=${commandPage.events[0].seq}&until=${commandEvents[1]!.seq}`,
+      headers: { 'x-user-email': email },
+    });
+    expect(nextCommandPage.json().events).toHaveLength(1);
+    expect(nextCommandPage.json().events[0].payload).toMatchObject({ exitCode: 0, durationMs: 10 });
+    expect(nextCommandPage.json().events[0].payload).not.toHaveProperty('title');
+    expect(nextCommandPage.json().events[0].payload).not.toHaveProperty('command');
+
+    const silentCommandDetail = await app.inject({
+      method: 'GET',
+      url: `/api/channels/plugins/web/app/turns/${turnId}/command-output?detailRef=item:tool-3`,
+      headers: { 'x-user-email': email },
+    });
+    expect(silentCommandDetail.statusCode).toBe(200);
+    expect(silentCommandDetail.json()).toMatchObject({
+      command: longCommand, status: 'completed', exitCode: 0, durationMs: 10, output: '', outputBytes: 0,
+    });
+    const missingCommandDetail = await app.inject({
+      method: 'GET',
+      url: `/api/channels/plugins/web/app/turns/${turnId}/command-output?detailRef=item:missing`,
+      headers: { 'x-user-email': email },
+    });
+    expect(missingCommandDetail.statusCode).toBe(404);
     expect(events.map((event) => event.type)).toContain('turn.completed');
 
     const assistantDelta = assistantDeltas[0];
@@ -1395,7 +1454,7 @@ describe('API e2e', () => {
     });
     expect(timelineResponse.statusCode).toBe(200);
     expect(
-      (timelineResponse.json() as Array<{ type: string }>).some(
+      (timelineResponse.json().events as Array<{ type: string }>).some(
         (event) => event.type === 'thread.token_usage.updated',
       ),
     ).toBe(false);

@@ -306,12 +306,17 @@ export class WebPluginAppController {
   async getTurnEvents(@CurrentUserDecorator() user: CurrentUser, @Param() params: unknown, @Query() query: unknown) {
     const { id } = parseWithZod(TurnIdParamsSchema, params);
     const queryInput = parseWithZod(StreamTurnQuerySchema, query);
-    const turn = await this.webPlugin.getTurnForUser(user.id, id);
+    await this.webPlugin.getTurnForUser(user.id, id);
     const cursor = queryInput.since ?? 0;
     const limit = queryInput.limit ?? 500;
     const persistedEvents = await this.webPlugin.getEventsForTurn(user.id, id, cursor, limit, queryInput.until);
-    return persistedEvents
-      .filter((event) => queryInput.until === undefined || event.seq <= queryInput.until).slice(0, limit);
+    return {
+      turnId: id,
+      events: persistedEvents
+        .filter((event) => queryInput.until === undefined || event.seq <= queryInput.until)
+        .slice(0, limit)
+        .map(({ turnId: _turnId, ...event }) => event),
+    };
   }
 
   @Get('turns/:id/diff')

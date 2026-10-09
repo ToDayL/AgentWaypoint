@@ -102,6 +102,38 @@ describe("durable message history", () => {
     };
   }
 
+  it('compacts timeline snapshots while retaining full durable history and terminal recovery', async () => {
+    const f = await fixture();
+    await f.emit('assistant.message.started', { itemId: 'answer', phase: 'final_answer', runnerSeq: 1 });
+    await f.emit('assistant.delta', { itemId: 'answer', text: 'Draft', runnerSeq: 2 });
+    await f.emit('assistant.message.completed', { itemId: 'answer', text: 'Final answer', phase: 'final_answer', runnerSeq: 3 });
+    await f.emit('assistant.message.started', { itemId: 'interrupted', runnerSeq: 4 });
+    await f.emit('assistant.delta', { itemId: 'interrupted', text: 'Partial answer', runnerSeq: 5 });
+    await f.emit('turn.failed', { message: 'Disconnected', runnerSeq: 6 });
+
+    const events = await f.service.getEventsForTurn(f.user.id, f.turn.id, 0);
+    const completed = events.find((event) => event.type === 'assistant.message.completed')!;
+    const payload = completed.payload as Record<string, unknown>;
+    expect(payload).not.toHaveProperty('text');
+    expect(payload.message).toMatchObject({ content: 'Final answer', state: 'completed', endEventSeq: completed.seq });
+    for (const key of ['sessionId', 'turnId', 'backendItemId', 'tokenCount']) {
+      expect(payload.message).not.toHaveProperty(key);
+    }
+    const terminal = events.find((event) => event.type === 'turn.failed')!;
+    expect(terminal.payload).toMatchObject({
+      message: 'Disconnected', messages: [{ backendItemId: 'interrupted', content: 'Partial answer', state: 'interrupted' }],
+    });
+    const durable = await prisma.event.findUniqueOrThrow({ where: { id: completed.id } });
+    expect(durable.payload).toMatchObject({
+      text: 'Final answer', message: { sessionId: f.session.id, turnId: f.turn.id, backendItemId: 'answer' },
+    });
+    const history = await f.history();
+    expect(history.messages.find((entry) => entry.backendItemId === 'answer')).toMatchObject({
+      content: 'Final answer', state: 'completed', turnId: f.turn.id,
+    });
+    await f.service.onModuleDestroy();
+  });
+
   it('returns bounded turn metadata and retains pending inputs from older turns', async () => {
     const f = await fixture();
     const archivedIds = Array.from({ length: 30 }, () => crypto.randomUUID());

@@ -653,7 +653,7 @@ export class TurnsService implements OnModuleInit, OnModuleDestroy {
     }
 
     const output = outputParts.length > 0 ? outputParts.join('') : aggregateFallback;
-    if (!commandMatched || output.length === 0) {
+    if (!commandMatched) {
       throw new NotFoundException({ message: 'Command output not found' });
     }
 

@@ -31,6 +31,17 @@ type HistoryEvent = {
   payload: Record<string, unknown>;
 };
 
+export function readHistoryMessageSnapshot(event: HistoryEvent): ChatMessage | undefined {
+  const snapshot = event.payload.message as ChatMessage | undefined;
+  if (!snapshot?.id) return undefined;
+  return {
+    ...snapshot,
+    turnId: snapshot.turnId ?? event.turnId,
+    backendItemId: snapshot.backendItemId ??
+      (typeof event.payload.itemId === 'string' ? event.payload.itemId : undefined),
+  };
+}
+
 export function mergeHistoryMessages(
   current: ChatMessage[],
   incoming: ChatMessage[],
@@ -54,7 +65,7 @@ export function applyHistoryEvent(
   event: HistoryEvent,
 ): ChatMessage[] {
   if (event.payload.ignored === true) return current;
-  const snapshot = event.payload.message as ChatMessage | undefined;
+  const snapshot = readHistoryMessageSnapshot(event);
   if (snapshot?.id)
     return mergeHistoryMessages(current, [
       { ...snapshot, lastEventSeq: event.seq },
@@ -64,6 +75,7 @@ export function applyHistoryEvent(
       current,
       (event.payload.messages as ChatMessage[]).map((message) => ({
         ...message,
+        turnId: message.turnId ?? event.turnId,
         lastEventSeq: event.seq,
       })),
     );
