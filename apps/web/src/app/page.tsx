@@ -8,7 +8,6 @@ import {
   memo,
   PointerEvent as ReactPointerEvent,
   SyntheticEvent,
-  UIEvent as ReactUIEvent,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -66,6 +65,7 @@ import remarkBreaks from 'remark-breaks';
 import { applyHistoryEvent, applyInputEvent, eventInMessageRange, mergeHistoryMessages, mergeQueuedInput, readHistoryMessageSnapshot, type ChatMessage, type QueuedInput } from './history-messages';
 import { normalizeTurnEventPage, type StreamEnvelope, type TurnEventHistoryResponse } from './turn-event-history';
 import { VirtualChatThread, type ChatMeasurements, type ChatRow } from './virtual-chat-thread';
+import { VirtualTimeline, type TimelineScrollState } from './virtual-timeline';
 import { TerminalPanel } from '../components/terminal/TerminalPanel';
 import { requestId } from '../components/terminal/terminal-client';
 import {
@@ -640,10 +640,6 @@ const STREAM_EVENTS = [
 ];
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const CHAT_MARKDOWN_REMARK_PLUGINS = [remarkGfm, remarkBreaks];
-const TIMELINE_ESTIMATED_ROW_HEIGHT = 74;
-const TIMELINE_ROW_GAP = 4;
-const TIMELINE_OVERSCAN_PX = 600;
-const TIMELINE_BOTTOM_THRESHOLD_PX = 48;
 const TIMELINE_BATCH_FLUSH_MS = 80;
 const TIMELINE_BATCH_MAX_EVENTS = 500;
 const CHAT_BUBBLE_BATCH_FLUSH_MS = 50;
@@ -782,9 +778,6 @@ export default function HomePage() {
   const [newSessionAutoApproveTimeout, setNewSessionAutoApproveTimeout] = useState(10);
   const [availableSkills, setAvailableSkills] = useState<SkillOption[]>([]);
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
-  const [timelineScrollTop, setTimelineScrollTop] = useState(0);
-  const [timelineViewportHeight, setTimelineViewportHeight] = useState(0);
-  const [timelineMeasureVersion, setTimelineMeasureVersion] = useState(0);
   const [inspectedTurnId, setInspectedTurnId] = useState('');
   const [turnEventsLoading, setTurnEventsLoading] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -851,11 +844,7 @@ export default function HomePage() {
   const eventSourceRef = useRef<EventSource | null>(null);
   const turnStreamCursorRef = useRef<Record<string, number>>({});
   const sessionHistoryRequestRef = useRef(0);
-  const timelineListRef = useRef<HTMLDivElement | null>(null);
-  const timelineRowHeightsRef = useRef<Record<string, number>>({});
-  const timelineRowElementsRef = useRef<Record<string, HTMLDivElement>>({});
-  const timelineRowResizeObserverRef = useRef<ResizeObserver | null>(null);
-  const timelineStickToBottomRef = useRef(true);
+  const timelineScrollStateRef = useRef<TimelineScrollState | null>(null);
   const pendingTimelineEventsRef = useRef<StreamEnvelope[]>([]);
   const timelineFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const systemTimelineEventCounterRef = useRef(0);
@@ -1022,89 +1011,6 @@ export default function HomePage() {
       createdAt: '', working: true },
   ] : displayedMessages, [displayedMessages, liveTurnId, activeAssistantMessageId]);
   const pendingInputs = queuedInputs.filter((input) => input.status !== 'accepted');
-  const timelineVirtualView = useMemo(() => {
-    const measuredHeights = timelineRowHeightsRef.current;
-    const viewportHeight = Math.max(timelineViewportHeight, TIMELINE_ESTIMATED_ROW_HEIGHT);
-    const viewportStart = Math.max(0, timelineScrollTop - TIMELINE_OVERSCAN_PX);
-    const viewportEnd = timelineScrollTop + viewportHeight + TIMELINE_OVERSCAN_PX;
-    const rows: Array<{ event: TimelineEvent; top: number; height: number }> = [];
-    let nextTop = 0;
-
-    timelineEvents.forEach((event) => {
-      const height = Math.max(measuredHeights[event.id] ?? TIMELINE_ESTIMATED_ROW_HEIGHT, 1);
-      const top = nextTop;
-      const bottom = top + height;
-      if (bottom >= viewportStart && top <= viewportEnd) {
-        rows.push({ event, top, height });
-      }
-      nextTop = bottom + TIMELINE_ROW_GAP;
-    });
-
-    return {
-      rows,
-      totalHeight: timelineEvents.length > 0 ? Math.max(0, nextTop - TIMELINE_ROW_GAP) : 0,
-    };
-  }, [timelineEvents, timelineScrollTop, timelineViewportHeight, timelineMeasureVersion]);
-  const handleTimelineScroll = useCallback((event: ReactUIEvent<HTMLDivElement>) => {
-    const element = event.currentTarget;
-    const nextScrollTop = element.scrollTop;
-    timelineStickToBottomRef.current =
-      element.scrollHeight - element.clientHeight - nextScrollTop <= TIMELINE_BOTTOM_THRESHOLD_PX;
-    setTimelineScrollTop((current) => (Math.abs(current - nextScrollTop) < 1 ? current : nextScrollTop));
-  }, []);
-  const scrollTimelineToBottom = useCallback((): void => {
-    const element = timelineListRef.current;
-    if (!element) {
-      return;
-    }
-    const nextScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
-    element.scrollTop = nextScrollTop;
-    timelineStickToBottomRef.current = true;
-    setTimelineViewportHeight((current) => {
-      const nextHeight = element.clientHeight;
-      return Math.abs(current - nextHeight) < 1 ? current : nextHeight;
-    });
-    setTimelineScrollTop((current) => (Math.abs(current - nextScrollTop) < 1 ? current : nextScrollTop));
-  }, []);
-  const recordTimelineRowHeight = useCallback((eventId: string, element: HTMLDivElement): void => {
-    const nextHeight = Math.ceil(element.getBoundingClientRect().height);
-    if (!Number.isFinite(nextHeight) || nextHeight <= 0) {
-      return;
-    }
-    const previousHeight = timelineRowHeightsRef.current[eventId];
-    if (previousHeight !== undefined && Math.abs(previousHeight - nextHeight) <= 1) {
-      return;
-    }
-    timelineRowHeightsRef.current[eventId] = nextHeight;
-    setTimelineMeasureVersion((current) => current + 1);
-  }, []);
-  const measureTimelineRow = useCallback((eventId: string, element: HTMLDivElement | null): void => {
-    const previousElement = timelineRowElementsRef.current[eventId];
-    if (!element) {
-      if (previousElement) {
-        timelineRowResizeObserverRef.current?.unobserve(previousElement);
-        delete timelineRowElementsRef.current[eventId];
-      }
-      return;
-    }
-    if (previousElement && previousElement !== element) {
-      timelineRowResizeObserverRef.current?.unobserve(previousElement);
-    }
-    timelineRowElementsRef.current[eventId] = element;
-    if (!timelineRowResizeObserverRef.current) {
-      timelineRowResizeObserverRef.current = new ResizeObserver((entries) => {
-        entries.forEach((entry) => {
-          const target = entry.target as HTMLDivElement;
-          const targetEventId = target.dataset.timelineEventId;
-          if (targetEventId) {
-            recordTimelineRowHeight(targetEventId, target);
-          }
-        });
-      });
-    }
-    timelineRowResizeObserverRef.current.observe(element);
-    recordTimelineRowHeight(eventId, element);
-  }, [recordTimelineRowHeight]);
   const clearPendingTimelineBatch = useCallback((): void => {
     pendingTimelineEventsRef.current = [];
     if (timelineFlushTimerRef.current) {
@@ -1438,68 +1344,13 @@ export default function HomePage() {
   }, [inspectedTurnId]);
 
   useEffect(() => {
-    const element = timelineListRef.current;
-    if (!element) {
-      return undefined;
-    }
-
-    const updateTimelineViewport = (): void => {
-      setTimelineViewportHeight((current) => {
-        const nextHeight = element.clientHeight;
-        return Math.abs(current - nextHeight) < 1 ? current : nextHeight;
-      });
-      setTimelineScrollTop((current) => {
-        const nextScrollTop = element.scrollTop;
-        return Math.abs(current - nextScrollTop) < 1 ? current : nextScrollTop;
-      });
-    };
-
-    updateTimelineViewport();
-    const resizeObserver = new ResizeObserver(updateTimelineViewport);
-    resizeObserver.observe(element);
-    return () => {
-      resizeObserver.disconnect();
-    };
-  }, [insightsTab, mobileInsightsOpen, rightSidebarMode]);
-
-  useEffect(() => {
-    timelineRowHeightsRef.current = {};
     setExpandedToolDetailKeys({});
-    timelineStickToBottomRef.current = true;
-    setTimelineMeasureVersion((current) => current + 1);
-    const element = timelineListRef.current;
-    if (!element) {
-      setTimelineScrollTop(0);
-      return;
-    }
-    setTimelineViewportHeight(element.clientHeight);
-    requestAnimationFrame(scrollTimelineToBottom);
-  }, [inspectedTurnId, scrollTimelineToBottom]);
-
-  useEffect(() => {
-    if (insightsTab !== 'events' || !timelineStickToBottomRef.current) {
-      return undefined;
-    }
-    const frameId = requestAnimationFrame(scrollTimelineToBottom);
-    return () => {
-      cancelAnimationFrame(frameId);
-    };
-  }, [
-    insightsTab,
-    scrollTimelineToBottom,
-    timelineEvents.length,
-    timelineMeasureVersion,
-    timelineVirtualView.totalHeight,
-    turnEventsLoading,
-  ]);
+  }, [inspectedTurnId]);
 
   useEffect(() => {
     return () => {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
-      timelineRowResizeObserverRef.current?.disconnect();
-      timelineRowResizeObserverRef.current = null;
-      timelineRowElementsRef.current = {};
       clearPendingTimelineBatch();
       clearPendingAssistantTextBatch();
       pendingTurnCreateAbortRef.current?.abort();
@@ -5973,97 +5824,87 @@ export default function HomePage() {
                   {insightsTab === 'diff' ? <><p className="timeline-empty">Changes for the entire turn</p>{diffPanelView}</> : null}
                   {insightsTab === 'detail' ? commandDetailPanelView : null}
                   {insightsTab === 'events' ? (
-                    <div className="timeline-list" ref={timelineListRef} onScroll={handleTimelineScroll}>
-                      {SESSION_DEBUG_INFO_ENABLED && inspectedTurnId ? (
-                        <p className="timeline-empty">Inspecting turn: {inspectedTurnId}</p>
-                      ) : null}
-                      {turnEventsLoading ? <p className="timeline-empty">Loading timeline...</p> : null}
-                      {!turnEventsLoading && timelineEvents.length === 0 ? <p className="timeline-empty">No events yet.</p> : null}
-                      {!turnEventsLoading && timelineEvents.length > 0 ? (
-                        <div className="timeline-virtual-spacer" style={{ height: `${timelineVirtualView.totalHeight}px` }}>
-                          {timelineVirtualView.rows.map(({ event, top }) => (
-                            <div
-                              key={event.id}
-                              data-timeline-event-id={event.id}
-                              ref={(element) => measureTimelineRow(event.id, element)}
-                              className="timeline-virtual-row"
-                              style={{ transform: `translateY(${top}px)` }}
-                            >
-                              <article className="timeline-event">
-                                <header className="timeline-event-head">
-                                  <span className="timeline-event-title">{event.title}</span>
-                                  {event.status ? <span className="status-pill">{event.status}</span> : null}
-                                  {event.kind === 'diff' ? (
-                                    <button
-                                      type="button"
-                                      className="timeline-inline-button"
-                                      onClick={() => openInsightsPanel('diff')}
-                                    >
-                                      View Diff
-                                    </button>
-                                  ) : null}
-                                  {event.kind === 'tool' &&
-                                  event.detailRef &&
-                                  isCommandToolKind(event.toolKind) ? (
-                                    <button
-                                      type="button"
-                                      className="icon-button timeline-command-detail-button"
-                                      onClick={() => {
-                                        void openCommandDetail(event);
-                                      }}
-                                      title="View command details"
-                                      aria-label="View command details"
-                                    >
-                                      <SquareTerminal />
-                                    </button>
-                                  ) : null}
-                                  <span className="timeline-event-seq">
-                                    {event.seqStart >= 0
-                                      ? event.seqStart === event.seqEnd
-                                        ? `#${event.seqStart}`
-                                        : `#${event.seqStart}-#${event.seqEnd}`
-                                      : 'system'}
-                                  </span>
-                                </header>
-                                {event.details.length > 0 ? (
-                                  <div className="timeline-event-details">
-                                    {event.details.map((detail, index) => {
-                                      const detailKey = `${event.id}-${index}`;
-                                      const normalizedDetail = typeof detail === 'string' ? detail : String(detail ?? '');
-                                      const isToolDetail = event.kind === 'tool';
-                                      const lineCount = normalizedDetail.length === 0 ? 0 : normalizedDetail.split('\n').length;
-                                      const canToggle = isToolDetail && lineCount > 5;
-                                      const expanded = expandedToolDetailKeys[detailKey] === true;
-                                      return (
-                                        <div key={detailKey} className="timeline-detail-box">
-                                          {canToggle ? (
-                                            <button
-                                              type="button"
-                                              className="icon-button timeline-detail-toggle"
-                                              onClick={() =>
-                                                setExpandedToolDetailKeys((current) => ({
-                                                  ...current,
-                                                  [detailKey]: current[detailKey] !== true,
-                                                }))
-                                              }
-                                              title={expanded ? 'Collapse details' : 'Expand details'}
-                                              aria-label={expanded ? 'Collapse details' : 'Expand details'}
-                                            >
-                                              <ChevronDown className={expanded ? 'timeline-toggle-icon is-open' : 'timeline-toggle-icon'} />
-                                            </button>
-                                          ) : null}
-                                          <pre>{canToggle && !expanded ? tailLines(normalizedDetail, 5) : normalizedDetail}</pre>
-                                        </div>
-                                      );
-                                    })}
+                    <VirtualTimeline
+                      key={`${inspectedTurnId}:${timelineMode}:${inspectedMessageRef.current?.id ?? ''}`}
+                      scopeKey={`${inspectedTurnId}:${timelineMode}:${inspectedMessageRef.current?.id ?? ''}`}
+                      events={timelineEvents}
+                      loading={turnEventsLoading}
+                      scrollStateRef={timelineScrollStateRef}
+                      debugLabel={SESSION_DEBUG_INFO_ENABLED && inspectedTurnId ? `Inspecting turn: ${inspectedTurnId}` : undefined}
+                    >
+                      {(event) => (
+                        <article className="timeline-event">
+                          <header className="timeline-event-head">
+                            <span className="timeline-event-title">{event.title}</span>
+                            {event.status ? <span className="status-pill">{event.status}</span> : null}
+                            {event.kind === 'diff' ? (
+                              <button
+                                type="button"
+                                className="timeline-inline-button"
+                                onClick={() => openInsightsPanel('diff')}
+                              >
+                                View Diff
+                              </button>
+                            ) : null}
+                            {event.kind === 'tool' &&
+                            event.detailRef &&
+                            isCommandToolKind(event.toolKind) ? (
+                              <button
+                                type="button"
+                                className="icon-button timeline-command-detail-button"
+                                onClick={() => {
+                                  void openCommandDetail(event);
+                                }}
+                                title="View command details"
+                                aria-label="View command details"
+                              >
+                                <SquareTerminal />
+                              </button>
+                            ) : null}
+                            <span className="timeline-event-seq">
+                              {event.seqStart >= 0
+                                ? event.seqStart === event.seqEnd
+                                  ? `#${event.seqStart}`
+                                  : `#${event.seqStart}-#${event.seqEnd}`
+                                : 'system'}
+                            </span>
+                          </header>
+                          {event.details.length > 0 ? (
+                            <div className="timeline-event-details">
+                              {event.details.map((detail, index) => {
+                                const detailKey = `${event.id}-${index}`;
+                                const normalizedDetail = typeof detail === 'string' ? detail : String(detail ?? '');
+                                const isToolDetail = event.kind === 'tool';
+                                const lineCount = normalizedDetail.length === 0 ? 0 : normalizedDetail.split('\n').length;
+                                const canToggle = isToolDetail && lineCount > 5;
+                                const expanded = expandedToolDetailKeys[detailKey] === true;
+                                return (
+                                  <div key={detailKey} className="timeline-detail-box">
+                                    {canToggle ? (
+                                      <button
+                                        type="button"
+                                        className="icon-button timeline-detail-toggle"
+                                        onClick={() =>
+                                          setExpandedToolDetailKeys((current) => ({
+                                            ...current,
+                                            [detailKey]: current[detailKey] !== true,
+                                          }))
+                                        }
+                                        title={expanded ? 'Collapse details' : 'Expand details'}
+                                        aria-label={expanded ? 'Collapse details' : 'Expand details'}
+                                      >
+                                        <ChevronDown className={expanded ? 'timeline-toggle-icon is-open' : 'timeline-toggle-icon'} />
+                                      </button>
+                                    ) : null}
+                                    <pre>{canToggle && !expanded ? tailLines(normalizedDetail, 5) : normalizedDetail}</pre>
                                   </div>
-                                ) : null}
-                              </article>
+                                );
+                              })}
                             </div>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
+                          ) : null}
+                        </article>
+                      )}
+                    </VirtualTimeline>
                   ) : null}
                 </div>
                 <div className={`session-info-wrap ${sessionInfoOpen ? 'open' : 'closed'}`}>
