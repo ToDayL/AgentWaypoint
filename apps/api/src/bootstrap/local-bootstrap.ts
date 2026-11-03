@@ -11,6 +11,7 @@ const DB_FILENAME = 'agentwaypoint.db';
 const DEFAULT_API_PORT = '4000';
 const DEFAULT_WEB_PORT = '3000';
 const DEFAULT_LISTEN_IP = '0.0.0.0';
+const DEFAULT_API_LISTEN_IP = '127.0.0.1';
 const BASELINE_MIGRATION_NAME = '20260713000000_initial_schema';
 
 export type AgentWaypointConfig = {
@@ -21,6 +22,7 @@ export type AgentWaypointConfig = {
   API_PORT: string;
   WEB_PORT: string;
   LISTEN_IP: string;
+  API_LISTEN_IP: string;
   DEFAULT_WORKSPACE_ROOT: string;
   RUNNER_MODE: string;
 };
@@ -84,7 +86,7 @@ function isInteractive(): boolean {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY);
 }
 
-function readConfig(configPath: string): AgentWaypointConfig {
+export function readConfig(configPath: string): AgentWaypointConfig {
   const raw = fs.readFileSync(configPath, 'utf8');
   const parsed = JSON.parse(raw) as Record<string, unknown>;
   const required: (keyof AgentWaypointConfig)[] = [
@@ -102,13 +104,16 @@ function readConfig(configPath: string): AgentWaypointConfig {
       throw new Error(`Config at ${configPath} is missing required field: ${key}`);
     }
   }
-  // LISTEN_IP was introduced after the initial config format. Preserve old
-  // installations by treating its absence as the original all-interface bind.
+  // Preserve the historical Web binding for configs without LISTEN_IP.
   const listenIp = parsed.LISTEN_IP ?? DEFAULT_LISTEN_IP;
   if (typeof listenIp !== 'string' || isIP(listenIp) === 0) {
     throw new Error(`Config at ${configPath} has an invalid LISTEN_IP; expected an IPv4 or IPv6 address`);
   }
-  return { ...parsed, LISTEN_IP: listenIp } as AgentWaypointConfig;
+  const apiListenIp = parsed.API_LISTEN_IP === undefined ? DEFAULT_API_LISTEN_IP : parsed.API_LISTEN_IP;
+  if (typeof apiListenIp !== 'string' || isIP(apiListenIp) === 0) {
+    throw new Error(`Config at ${configPath} has an invalid API_LISTEN_IP; expected an IPv4 or IPv6 address`);
+  }
+  return { ...parsed, LISTEN_IP: listenIp, API_LISTEN_IP: apiListenIp } as AgentWaypointConfig;
 }
 
 function applyToEnv(config: AgentWaypointConfig): void {
@@ -151,7 +156,7 @@ async function runInteractiveBootstrap(defaultHome: string): Promise<AgentWaypoi
     const webPort = (await rl.question(`Web port [${DEFAULT_WEB_PORT}]: `)).trim() || DEFAULT_WEB_PORT;
     const listenIp = await promptUntil(
       rl,
-      `Listen IP [${DEFAULT_LISTEN_IP}]: `,
+      `Web listen IP [${DEFAULT_LISTEN_IP}]: `,
       (raw) => raw.trim().length === 0 || isIP(raw.trim()) !== 0,
       'Please enter a valid IPv4 or IPv6 address.',
     );
@@ -164,6 +169,7 @@ async function runInteractiveBootstrap(defaultHome: string): Promise<AgentWaypoi
       API_PORT: apiPort,
       WEB_PORT: webPort,
       LISTEN_IP: listenIp.trim() || DEFAULT_LISTEN_IP,
+      API_LISTEN_IP: DEFAULT_API_LISTEN_IP,
       DEFAULT_WORKSPACE_ROOT: path.join(home, 'workspaces'),
       RUNNER_MODE: 'embedded',
     };

@@ -51,7 +51,7 @@ async function bootstrap(): Promise<void> {
   }
 
   const port = Number(process.env.API_PORT ?? process.env.PORT ?? 4000);
-  const listenIp = process.env.LISTEN_IP ?? '0.0.0.0';
+  const listenIp = process.env.API_LISTEN_IP ?? '127.0.0.1';
   await app.listen(port, listenIp);
 }
 

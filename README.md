@@ -40,7 +40,11 @@ On first start, the CLI prompts for:
 - data directory, defaulting to `~/.agentwaypoint`
 - admin email and password
 - API and Web ports, defaulting to `4000` and `3000`
-- listen IP, defaulting to `0.0.0.0` (all IPv4 interfaces)
+- Web listen IP, defaulting to `0.0.0.0` (all IPv4 interfaces)
+
+The API binds to `127.0.0.1` by default; browser requests reach it through the Web server.
+Existing configurations also use this local API binding when `API_LISTEN_IP` is absent.
+To allow remote API access, explicitly set `API_LISTEN_IP` in `config.json` to an IPv4 or IPv6 address.
 
 Open the printed URL, usually:
 ```text

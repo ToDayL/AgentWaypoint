@@ -37,7 +37,7 @@ rm -rf ./.agentwaypoint-dev apps/web/.next
 pnpm dev:up
 ```
 
-On first run, bootstrap prompts for admin credentials, ports, and a listen IP. Use non-reserved ports such as API `4000` and Web `3000`. The default listen IP is `0.0.0.0`; enter a specific IPv4 or IPv6 address to restrict both services to that interface.
+On first run, bootstrap prompts for admin credentials, ports, and a Web listen IP. Use non-reserved ports such as API `4000` and Web `3000`. `LISTEN_IP` defaults to `0.0.0.0` and controls the Web server. The API uses its separate `API_LISTEN_IP`, defaulting to `127.0.0.1`, and the Web server proxies API and terminal traffic to that address. Existing configs without `API_LISTEN_IP` also default to a local API binding. Set it explicitly in `config.json` when remote API access is required.
 The launcher rebuilds the web app when the existing `.next` build is missing or stale. To force a rebuild, run:
 ```bash
 ./agent-waypoint restart --home ./.agentwaypoint-dev --rebuild
