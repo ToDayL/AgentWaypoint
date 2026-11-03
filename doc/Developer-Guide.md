@@ -81,6 +81,8 @@ HTTP runner compatibility configuration:
 - `RUNNER_AUTH_TOKEN`
 
 ## Web/API Routing
+
+`LISTEN_IP` controls the Web bind address (default `0.0.0.0`). `API_LISTEN_IP` independently controls the API bind address (default `127.0.0.1`, including existing configs without the key). The launcher uses the API address for the Web upstream and startup health check; wildcard API binds use a loopback address for those local connections. Set `API_LISTEN_IP` explicitly in `config.json` when a deployment needs direct remote API access.
 The web app uses the generic Next proxy at `/api/[...path]`. The primary product UI calls `/api/channels/plugins/web/app/*` for project/session/turn/model/skill/filesystem workflows, while auth, settings, and bot integration management use the core `/api/*` endpoints directly.
 
 ## Auth Notes

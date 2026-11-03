@@ -151,7 +151,7 @@ async function cmdStart() {
     JWT_SECRET: config.JWT_SECRET,
     AUTH_SESSION_COOKIE_NAME: config.AUTH_SESSION_COOKIE_NAME,
     API_PORT: String(config.API_PORT),
-    LISTEN_IP: String(config.LISTEN_IP),
+    API_LISTEN_IP: String(config.API_LISTEN_IP),
     DEFAULT_WORKSPACE_ROOT: config.DEFAULT_WORKSPACE_ROOT,
     RUNNER_MODE: config.RUNNER_MODE,
   });
@@ -159,8 +159,8 @@ async function cmdStart() {
   const webChild = spawnDetached(webCmd, webLog, {
     ...process.env,
     AGENTWAYPOINT_HOME: config.AGENTWAYPOINT_HOME,
-    API_BASE_URL: apiUrl(config.LISTEN_IP, config.API_PORT),
-    NEXT_PUBLIC_API_BASE_URL: apiUrl(config.LISTEN_IP, config.API_PORT),
+    API_BASE_URL: apiUrl(config.API_LISTEN_IP, config.API_PORT),
+    NEXT_PUBLIC_API_BASE_URL: apiUrl(config.API_LISTEN_IP, config.API_PORT),
     PORT: String(config.WEB_PORT),
     LISTEN_IP: String(config.LISTEN_IP),
   });
@@ -171,6 +171,7 @@ async function cmdStart() {
     apiPort: Number(config.API_PORT),
     webPort: Number(config.WEB_PORT),
     listenIp: String(config.LISTEN_IP),
+    apiListenIp: String(config.API_LISTEN_IP),
     startedAt: new Date().toISOString(),
     home: config.AGENTWAYPOINT_HOME,
   };
@@ -260,7 +261,8 @@ function cmdStatus() {
       `Home:     ${record.home}`,
       `API:      PID ${record.apiPid} ${apiAlive ? '(alive)' : '(DEAD)'} :${record.apiPort}`,
       `Web:      PID ${record.webPid} ${webAlive ? '(alive)' : '(DEAD)'} :${record.webPort}`,
-      `Listen IP: ${record.listenIp ?? '0.0.0.0'}`,
+      `API bind: ${record.apiListenIp ?? record.listenIp ?? '0.0.0.0'}`,
+      `Web bind: ${record.listenIp ?? '0.0.0.0'}`,
       `Started:  ${record.startedAt}`,
       `URL:      ${webUrl(record.listenIp, record.webPort)}`,
       '',
@@ -732,15 +734,14 @@ async function runBootstrapForeground() {
         `Re-run \`./agent-waypoint start\` from a real terminal.`,
     );
   }
-  // Configs created before LISTEN_IP existed retain the historical bind-all
-  // behavior without requiring a manual migration.
-  return { LISTEN_IP: '0.0.0.0', ...JSON.parse(fs.readFileSync(configPath, 'utf8')) };
+  // Keep the historical Web binding; old configs now bind the API locally.
+  return { LISTEN_IP: '0.0.0.0', API_LISTEN_IP: '127.0.0.1', ...JSON.parse(fs.readFileSync(configPath, 'utf8')) };
 }
 
 async function waitForStartup(record) {
   await waitForHttpOk({
     name: 'API',
-    url: `${apiUrl(record.listenIp, record.apiPort)}/api/health`,
+    url: `${apiUrl(record.apiListenIp ?? record.listenIp, record.apiPort)}/api/health`,
     timeoutMs: STARTUP_TIMEOUT_MS,
     logFilePath: apiLog,
   });

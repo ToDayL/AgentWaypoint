@@ -86,8 +86,17 @@ export class TerminalsGateway implements OnModuleDestroy {
   }
 
   private upgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
-    if (request.url?.split('?')[0] !== '/api/terminals/socket') return;
-    socket.on('error', () => {});
+    const pathname = request.url?.split('?')[0] ?? '';
+    const remoteAddress = request.socket.remoteAddress ?? 'unknown';
+    socket.on('error', (error: Error) => {
+      this.logger.warn(`WebSocket socket error for ${pathname} from ${remoteAddress}: ${error.message}`);
+      socket.destroy();
+    });
+    if (pathname !== '/api/terminals/socket') {
+      this.logger.warn(`Rejected unsupported WebSocket upgrade for ${pathname} from ${remoteAddress}`);
+      socket.destroy();
+      return;
+    }
     void (async () => {
       const context = this.network.check(request.headers);
       const principal = await this.auth.resolveRequestPrincipal({ headers: request.headers });
